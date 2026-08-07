@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ZSharp.Compiler")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c72d2a7f02b2cae4101a082ec4136587743c1910")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+4cf6e08bc9bcd96411a25f7fa65e679ed28edb89")]
 [assembly: System.Reflection.AssemblyProductAttribute("ZSharp.Compiler")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ZSharp.Compiler")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
