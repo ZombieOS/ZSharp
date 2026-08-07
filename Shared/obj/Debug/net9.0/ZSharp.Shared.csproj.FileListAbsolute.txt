@@ -1,0 +1,12 @@
+/workspaces/ZSharp/Shared/obj/Debug/net9.0/ZSharp.Shared.GeneratedMSBuildEditorConfig.editorconfig
+/workspaces/ZSharp/Shared/obj/Debug/net9.0/ZSharp.Shared.AssemblyInfoInputs.cache
+/workspaces/ZSharp/Shared/obj/Debug/net9.0/ZSharp.Shared.AssemblyInfo.cs
+/workspaces/ZSharp/Shared/obj/Debug/net9.0/ZSharp.Shared.csproj.CoreCompileInputs.cache
+/workspaces/ZSharp/Shared/obj/Debug/net9.0/ZSharp.Shared.sourcelink.json
+/workspaces/ZSharp/Shared/bin/Debug/net9.0/ZSharp.Shared.deps.json
+/workspaces/ZSharp/Shared/bin/Debug/net9.0/ZSharp.Shared.dll
+/workspaces/ZSharp/Shared/bin/Debug/net9.0/ZSharp.Shared.pdb
+/workspaces/ZSharp/Shared/obj/Debug/net9.0/ZSharp.Shared.dll
+/workspaces/ZSharp/Shared/obj/Debug/net9.0/refint/ZSharp.Shared.dll
+/workspaces/ZSharp/Shared/obj/Debug/net9.0/ZSharp.Shared.pdb
+/workspaces/ZSharp/Shared/obj/Debug/net9.0/ref/ZSharp.Shared.dll

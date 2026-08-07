@@ -1,0 +1,16 @@
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ZSharp.Compiler.GeneratedMSBuildEditorConfig.editorconfig
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ZSharp.Compiler.AssemblyInfoInputs.cache
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ZSharp.Compiler.AssemblyInfo.cs
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ZSharp.Compiler.csproj.CoreCompileInputs.cache
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ZSharp.Compiler.sourcelink.json
+/workspaces/ZSharp/Compiler/bin/Debug/net9.0/ZSharp.Compiler.deps.json
+/workspaces/ZSharp/Compiler/bin/Debug/net9.0/ZSharp.Compiler.dll
+/workspaces/ZSharp/Compiler/bin/Debug/net9.0/ZSharp.Compiler.pdb
+/workspaces/ZSharp/Compiler/bin/Debug/net9.0/ZSharp.Shared.dll
+/workspaces/ZSharp/Compiler/bin/Debug/net9.0/ZSharp.Shared.pdb
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ZSharp.Compiler.csproj.AssemblyReference.cache
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ZSharp.C.2E61836B.Up2Date
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ZSharp.Compiler.dll
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/refint/ZSharp.Compiler.dll
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ZSharp.Compiler.pdb
+/workspaces/ZSharp/Compiler/obj/Debug/net9.0/ref/ZSharp.Compiler.dll
