@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0.0 - First Z1 release - 2026-08-22
+## 1.0.0.1 - First Z1 release - 2026-08-23
 
 - Added the C17 Z# compiler and bytecode virtual machine.
 - Added `.zsharp` source parsing and `project.zsettings` validation.
@@ -13,5 +13,8 @@
   provider integration for non-Z# projects.
 - Added permanent PID-derived project identities and per-build SHA-256 bytecode
   integrity checks.
-- Added the `com.zombieos:zsharp:1.0.0.0` Java integration library source for
-  Maven and Gradle workspaces.
+- Added the self-contained `com.zombieos:zsharp:1.0.0.1` Java integration
+  library for Maven and Gradle workspaces. Runtimes for Windows x64/ARM64,
+  Linux x64/ARM64, and macOS Intel/Apple Silicon are embedded,
+  integrity-checked, and extracted automatically when no explicit toolchain is
+  configured.

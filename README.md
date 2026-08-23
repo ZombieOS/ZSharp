@@ -3,7 +3,7 @@
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
-Version 1.0.0.0 is the first release of the Z1 language and toolchain. It is
+Version 1.0.0.1 is the first release of the Z1 language and toolchain. It is
 ready for experiments and local projects; the public dependency registry,
 hardware APIs, and complete external-function ABI are planned follow-up work.
 
@@ -99,12 +99,20 @@ cmake -S . -B build
 cmake --build build
 ```
 
+Release maintainers can rebuild every native runtime embedded by the Java
+library with a portable Zig compiler:
+
+```text
+powershell -File scripts/build-embedded-runtimes.ps1 -Zig path/to/zig.exe
+```
+
 ## Java integration
 
 The Java library requires Java 17 or newer. It provides the same API to Gradle
 and Maven projects and communicates with the native toolchain as a child
-process. This keeps the first integration portable and avoids platform-specific
-JNI packages.
+process. Native runtimes are bundled for Windows x64/ARM64, Linux x64/ARM64,
+and macOS Intel/Apple Silicon, so a separate Z# installation is not required
+on those platforms.
 
 Build and publish it to your local dependency cache with either:
 
@@ -128,7 +136,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.zombieos:zsharp:1.0.0.0")
+    implementation("com.zombieos:zsharp:1.0.0.1")
 }
 ```
 
@@ -138,7 +146,7 @@ or Maven:
 <dependency>
     <groupId>com.zombieos</groupId>
     <artifactId>zsharp</artifactId>
-    <version>1.0.0.0</version>
+    <version>1.0.0.1</version>
 </dependency>
 ```
 
@@ -162,14 +170,27 @@ var result = zsharp.runWithProviders(
 );
 ```
 
-The library searches for the toolchain using `ZSHARP_BIN`, then
-`ZSHARP_HOME/bin`, and finally the system `PATH`.
+The library first honors `ZSHARP_BIN` and `ZSHARP_HOME/bin` as explicit
+overrides. It otherwise selects the bundled runtime for the current operating
+system and CPU, checksum-verifies it, extracts it to the user's private cache,
+and launches it automatically. Unsupported platforms fall back to the system
+`PATH`. Bundled Linux runtimes target glibc 2.17 or newer; a musl-based system
+such as Alpine can use a compatible external runtime through `ZSHARP_BIN`.
+
+JarJar, Shadow, and similar dependency-bundling tools can carry Z# inside a
+developer's application or mod. The bundler must retain
+`META-INF/zsharp/runtime/**`; no separate installation is needed for users on
+a platform whose runtime is present there.
 
 Pushing the repository to GitHub does not by itself publish the Java
 coordinate. The included GitHub Actions workflow publishes it to GitHub
 Packages when a GitHub Release is published. Maven Central requires its own
 namespace, license, signing, and publication setup. See
 [PUBLISHING.md](PUBLISHING.md).
+
+## License
+
+Z# is licensed under the [Apache License 2.0](LICENSE).
 
 ## Syntax decisions still open
 
