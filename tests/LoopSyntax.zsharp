@@ -1,0 +1,9 @@
+zsharp = type.script
+
+room Main[] (
+ noticed brain Start[DR] (
+  loop (
+   Print("looping"):
+  )
+ )
+)

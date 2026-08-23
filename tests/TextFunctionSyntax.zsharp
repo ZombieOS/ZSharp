@@ -1,0 +1,11 @@
+zsharp = type.script
+
+room TextFunctions[] (
+ noticed text Greeting[text Name] (
+  feed("Hello!"):
+ )
+
+ noticed text Start[] (
+  feed("Started"):
+ )
+)

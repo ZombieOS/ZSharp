@@ -1,0 +1,13 @@
+zsharp = type.script
+
+room Values[] (
+ noticed number Get[] (
+  feed(1):
+ )
+)
+
+room Main[] (
+ noticed brain Start[] (
+  number Value = Function.call(InvalidTypedOutcomeSelector:Values:Get [])[Result]:
+ )
+)

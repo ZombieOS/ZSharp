@@ -1,0 +1,9 @@
+zsharp = type.script
+
+room Main[] (
+ noticed text Message = "correct":
+
+ noticed brain Start[] (
+  Print(Mesage):
+ )
+)

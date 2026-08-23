@@ -1,0 +1,14 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import zsharp.SharedValues():
+
+ noticed brain Start[] (
+  number.set:SharedValues.Data.Visits = SharedValues.Data.Visits + 1:
+  text.set.SharedValues.Data.Message = "updated cross-file value":
+  SharedValues.Data.Available = dead:
+  Print(SharedValues.Data.Visits):
+  Print(SharedValues.Data.Message):
+  Print(SharedValues.Data.Available):
+ )
+)

@@ -1,0 +1,12 @@
+zsharp = type.script
+
+noticed room Main[] (
+ noticed number Add[number Left, number Right] (
+  feed(number.Left + number.Right):
+ )
+
+ noticed brain Start[DR] (
+  number Result = addition(4 + 6):
+  Print(Result):
+ )
+)

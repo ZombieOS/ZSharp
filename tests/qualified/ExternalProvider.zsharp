@@ -1,0 +1,11 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import playfab.Player():
+ import playfab.Client():
+
+ noticed brain Start[] (
+  Print(playfab.Player.Data.PlayerId):
+  Function.call(playfab.Client.Player.Refresh):
+ )
+)

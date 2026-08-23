@@ -1,0 +1,10 @@
+zsharp = type.script
+
+noticed room Main[] (
+ noticed number Score = 10:
+
+ noticed brain Start[] (
+  number.set:Score = Score + 5:
+  Print(Score):
+ )
+)

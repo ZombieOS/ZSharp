@@ -1,0 +1,15 @@
+zsharp = type.script
+
+room Decisions[] (
+ noticed brain Choose[] (
+  if(Result)[alive] (
+   feed(1):
+  )
+ )
+)
+
+room Main[] (
+ noticed brain Start[] (
+  number Value = Function.call(InvalidBrainValueNoOutcome:Decisions:Choose []):
+ )
+)

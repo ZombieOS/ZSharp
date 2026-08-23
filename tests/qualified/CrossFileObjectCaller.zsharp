@@ -1,0 +1,13 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import zsharp.Objects():
+
+ noticed brain Start[] (
+  Objects.Shared.User.Move[7, 8]:
+  Print(Objects.Shared.User.X):
+  Print(Objects.Shared.User.Y):
+  Objects.Shared.User.set.X = Objects.Shared.User.X + 2:
+  Print(Objects.Shared.User.X):
+ )
+)

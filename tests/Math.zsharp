@@ -1,0 +1,22 @@
+zsharp = type.script
+
+room Calculator[] (
+ noticed number Add[number Left, number Right] (
+  feed(number.Left + number.Right):
+ )
+
+ noticed text Greet[text Name] (
+  feed("Hello " + Name):
+ )
+)
+
+room Main[] (
+ noticed brain Start[] (
+  number Result = Function.call(Math:Calculator:Add [4, 6]):
+  text NumericText = Function.call(Math:Calculator:Add [2, 3]):
+  text Greeting = Function.call(Math:Calculator:Greet ["Zombie"]):
+  Print(Result):
+  Print(NumericText):
+  Print(Greeting):
+ )
+)

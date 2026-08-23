@@ -1,0 +1,12 @@
+zsharp = type.settings
+
+Project: "Self Dependency":
+PID: "self_dependency":
+Version: [1.0.0.0]:
+Authors: ["ZombieOS"]:
+Description: "Invalid self dependency.":
+ZSharp: [1.0.0.0]:
+
+Dependencies (
+ self_dependency:1.0.0.0
+):

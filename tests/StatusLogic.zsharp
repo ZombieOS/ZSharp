@@ -1,0 +1,14 @@
+zsharp = type.script
+
+room Main[] (
+ noticed status Alive = alive:
+ noticed number Health = 10:
+
+ noticed brain Start[] (
+  if[Alive and Health > 0] (
+   Print("Player is active"):
+  ) else (
+   Print("Player is inactive"):
+  )
+ )
+)

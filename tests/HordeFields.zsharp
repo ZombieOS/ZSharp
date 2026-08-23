@@ -1,0 +1,17 @@
+zsharp = type.script
+
+room Counter[] (
+ noticed horde number Shared = 0:
+
+ noticed horde brain Increase[] (
+  number.set:Shared = Shared + 1:
+ )
+)
+
+room Main[] (
+ noticed brain Start[] (
+  Function.call(HordeFields:Counter:Increase):
+  Function.call(HordeFields:Counter:Increase):
+  Print(Counter.Shared):
+ )
+)

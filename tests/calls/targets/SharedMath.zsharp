@@ -1,0 +1,7 @@
+zsharp = type.script
+
+noticed room Calculator[] (
+ noticed number Multiply[number Left, number Right] (
+  feed(number.Left * number.Right):
+ )
+)

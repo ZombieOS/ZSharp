@@ -1,0 +1,25 @@
+zsharp = type.script
+
+room Player[] (
+ noticed number X = 0:
+ noticed number Y = 0:
+
+ noticed brain Move[number x, number y] (
+  number.set:X = X + x:
+  number.set:Y = Y + y:
+ )
+)
+
+room Shared[] (
+ noticed Player User = new Player[]:
+)
+
+room Main[] (
+ noticed brain Start[] (
+  Shared.User.Move[10, 20]:
+  Print(Shared.User.X):
+  Print(Shared.User.Y):
+  Shared.User.set.X = Shared.User.X + 5:
+  Print(Shared.User.X):
+ )
+)

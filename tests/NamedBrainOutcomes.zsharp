@@ -1,0 +1,34 @@
+zsharp = type.script
+
+room Decisions[] (
+ noticed brain Choose[number Value] (
+  if(Score)[Value > 0] (
+   feed(Value + 1):
+  ) else (
+   feed("not positive"):
+  )
+
+  if(Label)[Value > 0] (
+   feed("positive"):
+  ) else (
+   feed("not positive"):
+  )
+
+  if(OnlyPositive)[Value > 0] (
+   feed(Value):
+  )
+ )
+)
+
+room Main[] (
+ noticed brain Start[] (
+  number Score = Function.call(NamedBrainOutcomes:Decisions:Choose [4])[Score]:
+  text Label = Function.call(NamedBrainOutcomes:Decisions:Choose [4])[Label]:
+  number WrongType = Function.call(NamedBrainOutcomes:Decisions:Choose [-1])[Score]:
+  number NoFeed = Function.call(NamedBrainOutcomes:Decisions:Choose [-1])[OnlyPositive]:
+  Print(Score):
+  Print(Label):
+  Print(WrongType):
+  Print(NoFeed):
+ )
+)

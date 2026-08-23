@@ -1,0 +1,15 @@
+zsharp = type.script
+
+room Main[] (
+ noticed text() Names = ["Alex", "Sam", "Robin"]:
+ noticed number() Scores = [10, 20.5, 30]:
+
+ noticed brain Start[] (
+  Names.set[1] = "Zombie":
+  Scores.set[0] = 99.25:
+  Print(Names[1]):
+  Print(Scores[0]):
+  Print(Names.Length):
+  Print(Scores.Length):
+ )
+)

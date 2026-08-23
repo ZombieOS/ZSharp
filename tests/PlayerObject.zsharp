@@ -1,0 +1,21 @@
+zsharp = type.script
+
+room Player[] (
+ noticed text Name:
+
+ noticed Player[text name] (
+  text.set.Name = name:
+ )
+
+ noticed brain Move[number x, number y] (
+ )
+)
+
+room Main[] (
+ noticed Player User = new Player["Zombie"]:
+
+ noticed brain Start[] (
+  User.Move[10, 20]:
+  Print(User.Name):
+ )
+)

@@ -1,0 +1,11 @@
+zsharp = type.settings
+
+Project: "Normalized PID":
+PID: "my project":
+Version: [1.0.0.0]:
+Authors: ["ZombieOS"]:
+Description: "Spaces become underscores.":
+ZSharp: [1.0.0.0]:
+
+Dependencies (
+):

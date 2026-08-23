@@ -1,0 +1,11 @@
+zsharp = type.script
+
+room Shared[] (
+ noticed text Message = "same-file value":
+)
+
+room Main[] (
+ noticed brain Start[] (
+  Print(Shared.Message):
+ )
+)

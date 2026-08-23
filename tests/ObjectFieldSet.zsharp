@@ -1,0 +1,19 @@
+zsharp = type.script
+
+room Point[] (
+ noticed number X = 0:
+ noticed number Y = 0:
+)
+
+room Main[] (
+ noticed Point User = new Point[]:
+ noticed number x = 10:
+ noticed number y = 20:
+
+ noticed brain Start[] (
+  User.set.X = User.X + x:
+  User.set.Y = User.Y + y:
+  Print(User.X):
+  Print(User.Y):
+ )
+)

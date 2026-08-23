@@ -1,0 +1,9 @@
+zsharp = type.script
+
+noticed room Main[] (
+ noticed text() Names = ["Alex", "Sam", "Robin"]:
+
+ noticed brain Start[] (
+  Print(Names[1]):
+ )
+)

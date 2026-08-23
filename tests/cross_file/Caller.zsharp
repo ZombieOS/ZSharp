@@ -1,0 +1,9 @@
+zsharp = type.script
+
+noticed room Launcher[] (
+ import zsharp.Home():
+
+ noticed brain Start[] (
+  Function.call(Home:Main:Start_Outcome):
+ )
+)

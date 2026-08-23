@@ -1,0 +1,10 @@
+zsharp = type.script
+
+room Main[] (
+ noticed brain Start[] (
+  Print(null):
+  if[null == null] (
+   Print("null worked"):
+  )
+ )
+)

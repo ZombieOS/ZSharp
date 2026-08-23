@@ -1,0 +1,13 @@
+zsharp = type.script
+
+noticed room Main[] (
+ noticed number Visits = 10:
+
+ noticed brain Start[] (
+  if[var.Visits >= 10] (
+   Print("Returning visitor"):
+  ) else (
+   Print("New visitor"):
+  )
+ )
+)

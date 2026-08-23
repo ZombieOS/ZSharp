@@ -1,0 +1,10 @@
+zsharp = type.script
+
+noticed horde room Tools[] (
+ noticed horde brain Use[] (
+ )
+)
+
+room Main[] (
+ noticed Tools Invalid = new Tools[]:
+)

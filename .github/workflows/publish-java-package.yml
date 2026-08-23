@@ -1,0 +1,40 @@
+name: Publish Java package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java 17 and Maven authentication
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Verify Java library
+        working-directory: java
+        run: mvn --batch-mode verify
+
+      - name: Publish to GitHub Packages
+        working-directory: java
+        shell: bash
+        run: >-
+          mvn --batch-mode deploy
+          -Dgithub.repository="${GITHUB_REPOSITORY,,}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

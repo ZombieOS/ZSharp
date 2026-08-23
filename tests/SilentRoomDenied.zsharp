@@ -1,0 +1,13 @@
+zsharp = type.script
+
+silent room Secret[] (
+ noticed brain Run[] (
+  Print("should not run"):
+ )
+)
+
+room Main[] (
+ noticed brain Start[] (
+  Function.call(SilentRoomDenied:Secret:Run):
+ )
+)

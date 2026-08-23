@@ -1,0 +1,16 @@
+zsharp = type.script
+
+noticed horde room Tools[] (
+ noticed horde number Uses = 0:
+
+ noticed horde brain Use[] (
+  number.set:Uses = Uses + 1:
+ )
+)
+
+room Main[] (
+ noticed brain Start[] (
+  Function.call(HordeRoom:Tools:Use):
+  Print(Tools.Uses):
+ )
+)

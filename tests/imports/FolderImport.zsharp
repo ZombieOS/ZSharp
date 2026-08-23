@@ -1,0 +1,9 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import zsharp.targets.SharedValues():
+
+ noticed brain Start[] (
+  Print(SharedValues.Data.Message):
+ )
+)

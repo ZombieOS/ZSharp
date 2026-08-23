@@ -1,0 +1,12 @@
+zsharp = type.settings
+
+Project: "Valid Project":
+PID: "valid_project":
+Version: [1.2.3.4]:
+Authors: ["ZombieOS", "Contributor"]:
+Description: "A valid\nsettings file.":
+ZSharp: [1.0.0.0]:
+
+Dependencies (
+ playfab:1.0.0.0
+):

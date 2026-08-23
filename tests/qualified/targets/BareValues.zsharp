@@ -1,0 +1,5 @@
+zsharp = type.script
+
+room Data[] (
+ noticed text Message = "file-only":
+)

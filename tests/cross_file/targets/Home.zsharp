@@ -1,0 +1,9 @@
+zsharp = type.script
+
+noticed room Main[] (
+ noticed text Outcome = "Cross-file Function.call worked":
+
+ noticed brain Start_Outcome[] (
+  Print(Outcome):
+ )
+)

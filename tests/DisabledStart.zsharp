@@ -1,0 +1,8 @@
+zsharp = type.script
+
+noticed room Test[] (
+ noticed text Message = "This should not print":
+ noticed brain Start[DR] (
+  Print(Message):
+ )
+)

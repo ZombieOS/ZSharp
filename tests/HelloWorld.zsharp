@@ -1,0 +1,10 @@
+zsharp = type.script
+
+noticed room Test[] (
+ noticed text HelloWorld = "Hello World":
+ noticed number Visits = 1:
+ noticed brain Start[] (
+  Print(HelloWorld):
+  Print(Visits):
+ )
+)

@@ -1,0 +1,13 @@
+zsharp = type.script
+
+noticed room RoomA[] (
+ import zsharp.SharedValues():
+
+ silent room RoomB[] (
+  noticed text Message = "nested room worked":
+ )
+
+ noticed brain Start[] (
+  Print(RoomB.Message):
+ )
+)

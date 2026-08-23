@@ -1,0 +1,10 @@
+#ifndef ZSHARP_H
+#define ZSHARP_H
+
+#define ZSHARP_VERSION_MAJOR 1
+#define ZSHARP_VERSION_MINOR 0
+#define ZSHARP_VERSION_PATCH 0
+#define ZSHARP_VERSION_REVISION 0
+#define ZSHARP_SOURCE_EXTENSION ".zsharp"
+
+#endif

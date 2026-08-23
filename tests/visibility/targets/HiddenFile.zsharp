@@ -1,0 +1,7 @@
+zsharp = type.script
+
+room Main[] (
+ noticed brain Run[] (
+  Print("should not run"):
+ )
+)

@@ -1,0 +1,16 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import playfab.Player():
+ import playfab.Entities():
+
+ noticed brain Start[] (
+  text.set.playfab.Player.Data.PlayerId = "updated-player-id":
+  Print(playfab.Player.Data.PlayerId):
+  playfab.Entities.Players.User.Move[3, 4]:
+  Print(playfab.Entities.Players.User.X):
+  Print(playfab.Entities.Players.User.Y):
+  playfab.Entities.Players.User.set.X = 9:
+  Print(playfab.Entities.Players.User.X):
+ )
+)

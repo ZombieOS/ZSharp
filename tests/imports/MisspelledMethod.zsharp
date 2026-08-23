@@ -1,0 +1,14 @@
+zsharp = type.script
+
+room Player[] (
+ noticed brain Move[] (
+ )
+)
+
+room Main[] (
+ noticed Player User = new Player[]:
+
+ noticed brain Start[] (
+  User.Mvoe[]:
+ )
+)

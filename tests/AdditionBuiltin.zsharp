@@ -1,0 +1,8 @@
+zsharp = type.script
+
+room Main[] (
+ noticed brain Start[] (
+  number Result = addition(4 + 6):
+  Print(Result):
+ )
+)

@@ -1,0 +1,165 @@
+package com.zombieos.zsharp;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+
+/**
+ * Invokes the native Z# compiler and VM without tying a Java project to JNI.
+ * Instances are immutable and safe to reuse.
+ */
+public final class ZSharpToolchain {
+    private final Path executable;
+
+    public ZSharpToolchain(Path executable) {
+        this.executable = Objects.requireNonNull(executable, "executable");
+    }
+
+    public static ZSharpToolchain discover() {
+        String directExecutable = System.getenv("ZSHARP_BIN");
+        if (directExecutable != null && !directExecutable.isBlank()) {
+            return new ZSharpToolchain(Path.of(directExecutable));
+        }
+
+        String home = System.getenv("ZSHARP_HOME");
+        if (home != null && !home.isBlank()) {
+            String executableName = isWindows() ? "zsharp.exe" : "zsharp";
+            return new ZSharpToolchain(Path.of(home, "bin", executableName));
+        }
+
+        return new ZSharpToolchain(Path.of(isWindows() ? "zsharp.exe" : "zsharp"));
+    }
+
+    public Path executable() {
+        return executable;
+    }
+
+    public ZSharpResult version() throws IOException, InterruptedException {
+        return execute(List.of("--version"));
+    }
+
+    public ZSharpResult compile(Path source, Path bytecodeOutput)
+            throws IOException, InterruptedException {
+        requireSourceFile(source);
+        Objects.requireNonNull(bytecodeOutput, "bytecodeOutput");
+        return execute(List.of("compile", source.toString(), "-o", bytecodeOutput.toString()));
+    }
+
+    public ZSharpResult run(Path source, String... arguments)
+            throws IOException, InterruptedException {
+        requireSourceFile(source);
+        List<String> command = new ArrayList<>();
+        command.add("run");
+        command.add(source.toString());
+        if (arguments.length > 0) {
+            command.add("--");
+            command.addAll(List.of(arguments));
+        }
+        return execute(command);
+    }
+
+    /** Runs source while mapping external Z# project names to provider libraries. */
+    public ZSharpResult runWithProviders(Path source, Map<String, Path> providers)
+            throws IOException, InterruptedException {
+        requireSourceFile(source);
+        List<String> command = new ArrayList<>();
+        command.add("run");
+        command.add(source.toString());
+        addProviders(command, providers);
+        return execute(command);
+    }
+
+    public ZSharpResult runBytecode(Path bytecode, String... arguments)
+            throws IOException, InterruptedException {
+        Objects.requireNonNull(bytecode, "bytecode");
+        List<String> command = new ArrayList<>();
+        command.add("run-bytecode");
+        command.add(bytecode.toString());
+        if (arguments.length > 0) {
+            command.add("--");
+            command.addAll(List.of(arguments));
+        }
+        return execute(command);
+    }
+
+    /** Runs bytecode while mapping external Z# project names to providers. */
+    public ZSharpResult runBytecodeWithProviders(
+            Path bytecode, Map<String, Path> providers)
+            throws IOException, InterruptedException {
+        Objects.requireNonNull(bytecode, "bytecode");
+        List<String> command = new ArrayList<>();
+        command.add("run-bytecode");
+        command.add(bytecode.toString());
+        addProviders(command, providers);
+        return execute(command);
+    }
+
+    private static void addProviders(List<String> command,
+                                     Map<String, Path> providers) {
+        Objects.requireNonNull(providers, "providers");
+        providers.forEach((project, library) -> {
+            Objects.requireNonNull(project, "provider project");
+            Objects.requireNonNull(library, "provider library");
+            if (project.isBlank() || project.indexOf('=') >= 0) {
+                throw new IllegalArgumentException(
+                        "provider project names cannot be blank or contain '='");
+            }
+            command.add("--provider");
+            command.add(project + "=" + library);
+        });
+    }
+
+    private ZSharpResult execute(List<String> arguments)
+            throws IOException, InterruptedException {
+        List<String> command = new ArrayList<>(arguments.size() + 1);
+        command.add(executable.toString());
+        command.addAll(arguments);
+
+        Process process = new ProcessBuilder(command).start();
+        CompletableFuture<String> stdout = readAsync(process.getInputStream());
+        CompletableFuture<String> stderr = readAsync(process.getErrorStream());
+        int exitCode = process.waitFor();
+
+        try {
+            return new ZSharpResult(exitCode, stdout.join(), stderr.join());
+        } catch (CompletionException exception) {
+            Throwable cause = exception.getCause();
+            if (cause instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw exception;
+        }
+    }
+
+    private static CompletableFuture<String> readAsync(InputStream stream) {
+        return CompletableFuture.supplyAsync(() -> {
+            try (stream) {
+                return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            } catch (IOException exception) {
+                throw new CompletionException(exception);
+            }
+        });
+    }
+
+    private static void requireSourceFile(Path source) {
+        Objects.requireNonNull(source, "source");
+        if (!ZSharp.isSourceFile(source)) {
+            throw new IllegalArgumentException(
+                    "Z# source files must use the " + ZSharp.SOURCE_EXTENSION + " extension");
+        }
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "")
+                .toLowerCase(Locale.ROOT)
+                .contains("win");
+    }
+}

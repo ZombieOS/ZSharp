@@ -1,0 +1,11 @@
+zsharp = type.script
+
+room Shared[] (
+ silent text Message = "hidden":
+)
+
+room Main[] (
+ noticed brain Start[] (
+  Print(Shared.Message):
+ )
+)

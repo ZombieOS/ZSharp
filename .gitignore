@@ -1,0 +1,19 @@
+# Native builds
+/build/
+/out/
+*.obj
+*.o
+*.exe
+
+# Java builds
+**/.gradle/
+**/target/
+**/build/
+*.class
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+

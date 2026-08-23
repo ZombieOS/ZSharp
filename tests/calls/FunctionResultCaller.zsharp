@@ -1,0 +1,10 @@
+zsharp = type.script
+
+room Main[] (
+ import zsharp.SharedMath():
+
+ noticed brain Start[] (
+  number Result = Function.call(SharedMath:Calculator:Multiply [6, 7]):
+  Print(Result):
+ )
+)

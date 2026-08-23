@@ -1,0 +1,9 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import zsharp.HiddenFile():
+
+ noticed brain Start[] (
+  Function.call(HiddenFile:Main:Run):
+ )
+)

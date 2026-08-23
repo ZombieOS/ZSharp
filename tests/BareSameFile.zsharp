@@ -1,0 +1,13 @@
+zsharp = type.script
+
+room Helper[] (
+ noticed brain Run[] (
+  Print("file-only room call worked"):
+ )
+)
+
+room Main[] (
+ noticed brain Start[] (
+  Function.call(BareSameFile:Helper:Run):
+ )
+)

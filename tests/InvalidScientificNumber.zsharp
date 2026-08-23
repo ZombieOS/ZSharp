@@ -1,0 +1,5 @@
+zsharp = type.script
+
+room Main[] (
+ noticed number Invalid = 1e+10:
+)

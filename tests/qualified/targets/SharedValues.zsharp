@@ -1,0 +1,7 @@
+zsharp = type.script
+
+noticed room Data[] (
+ noticed text Message = "cross-file value":
+ noticed number Visits = 42:
+ noticed status Available = alive:
+)

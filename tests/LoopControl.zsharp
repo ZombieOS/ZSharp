@@ -1,0 +1,20 @@
+zsharp = type.script
+
+room Main[] (
+ noticed number Count = 0:
+
+ noticed brain Start[] (
+  loop (
+   number.set:Count = Count + 1:
+   if[Count == 1] (
+    continue:
+   ) else (
+   )
+   Print(Count):
+   if[Count >= 3] (
+    loop.end:
+   ) else (
+   )
+  )
+ )
+)

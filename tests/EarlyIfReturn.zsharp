@@ -1,0 +1,11 @@
+zsharp = type.script
+
+room Main[] (
+ noticed brain Start[] (
+  Print("before"):
+  if[dead] (
+   Print("condition met"):
+  )
+  Print("after"):
+ )
+)

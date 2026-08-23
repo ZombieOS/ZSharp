@@ -1,0 +1,12 @@
+zsharp = type.script
+
+room Main[] (
+ noticed number Maybe[] (
+  feed:
+ )
+
+ noticed brain Start[] (
+  Function.call(FeedVoid:Main:Maybe):
+  Print("continued"):
+ )
+)

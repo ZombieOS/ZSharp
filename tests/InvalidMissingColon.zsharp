@@ -1,0 +1,8 @@
+zsharp = type.script
+
+noticed room Test[] (
+ noticed text Message = "Missing terminator"
+ noticed brain Start[] (
+  Print(Message):
+ )
+)

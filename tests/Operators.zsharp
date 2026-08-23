@@ -1,0 +1,18 @@
+zsharp = type.script
+
+room Main[] (
+ noticed brain Start[] (
+  number Arithmetic = 10 - 2 * 3:
+  number Division = 8 / 2:
+  number Remainder = 10 % 4:
+  number Negative = -5:
+  Print(Arithmetic):
+  Print(Division):
+  Print(Remainder):
+  Print(Negative):
+  if[not dead and 3 != 4] (
+   Print("operators worked"):
+  ) else (
+  )
+ )
+)

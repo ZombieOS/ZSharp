@@ -1,0 +1,14 @@
+zsharp = type.script
+
+room Values[] (
+ noticed text Name[] (
+  feed("Zombie"):
+ )
+)
+
+room Main[] (
+ noticed brain Start[] (
+  number Result = Function.call(FunctionCallWrongType:Values:Name []):
+  Print(Result):
+ )
+)
