@@ -1,0 +1,9 @@
+zsharp = type.script
+
+noticed room Outer[] (
+ noticed brain Start[] (
+  loop (
+   loop.end:
+  ):
+ )
+)

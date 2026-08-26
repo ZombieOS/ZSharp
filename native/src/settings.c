@@ -2,6 +2,7 @@
 
 #include "bytecode.h"
 #include "lexer.h"
+#include "zsharp.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -242,6 +243,50 @@ static int normalize_project_id(SettingsParser *parser, char *project_id) {
     return 1;
 }
 
+static int validate_window_path(SettingsParser *parser, const char *name,
+                                const char *path) {
+    const char *segment = path;
+    const char *cursor = path;
+    size_t length = strlen(path);
+    if (length == 0) {
+        settings_fail(parser, &parser->current,
+                      "Window %s path cannot be empty", name);
+        return 0;
+    }
+    if (path[0] == '/' || strchr(path, '\\') != NULL ||
+        strchr(path, ':') != NULL) {
+        settings_fail(parser, &parser->current,
+                      "Window %s must be a project-relative path using '/'",
+                      name);
+        return 0;
+    }
+    while (1) {
+        if (*cursor == '/' || *cursor == '\0') {
+            size_t segment_length = (size_t)(cursor - segment);
+            if (segment_length == 0 ||
+                (segment_length == 1 && segment[0] == '.') ||
+                (segment_length == 2 && segment[0] == '.' &&
+                 segment[1] == '.')) {
+                settings_fail(parser, &parser->current,
+                              "Window %s path cannot contain empty, '.', or "
+                              "'..' segments", name);
+                return 0;
+            }
+            if (*cursor == '\0') break;
+            segment = cursor + 1;
+        }
+        cursor++;
+    }
+    if (length < strlen(ZSHARP_SOURCE_EXTENSION) ||
+        strcmp(path + length - strlen(ZSHARP_SOURCE_EXTENSION),
+               ZSHARP_SOURCE_EXTENSION) != 0) {
+        settings_fail(parser, &parser->current,
+                      "Window %s must identify a .zsharp file", name);
+        return 0;
+    }
+    return 1;
+}
+
 static char *read_settings_source(const char *path) {
     FILE *file = fopen(path, "rb");
     long size;
@@ -284,19 +329,20 @@ void zsharp_settings_free(ZSharpSettings *settings) {
         free(settings->dependencies[index].project_id);
     }
     free(settings->dependencies);
+    free(settings->window_startup);
+    free(settings->window_uninstall);
     zsharp_settings_init(settings);
 }
 
-int zsharp_settings_parse_file(const char *path, ZSharpSettings *settings,
-                               ZSharpDiagnostic *diagnostic, char *error,
-                               size_t error_size) {
-    char *source = read_settings_source(path);
+int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
+                                 ZSharpDiagnostic *diagnostic, char *error,
+                                 size_t error_size) {
     SettingsParser parser;
     unsigned seen = 0;
     zsharp_settings_init(settings);
     memset(diagnostic, 0, sizeof(*diagnostic));
     if (source == NULL) {
-        snprintf(error, error_size, "could not read '%s'", path);
+        snprintf(error, error_size, "settings source is missing");
         return 0;
     }
     memset(&parser, 0, sizeof(parser));
@@ -438,13 +484,75 @@ int zsharp_settings_parse_file(const char *path, ZSharpSettings *settings,
                                   "')' after dependencies");
             settings_consume_type(&parser, ZTOKEN_COLON,
                                   "':' after Dependencies");
+        } else if (settings_match_word(&parser, "Window")) {
+            unsigned window_seen = 0;
+            if ((seen & 128u) != 0) {
+                settings_fail(&parser, &parser.current,
+                              "duplicate Window setting");
+                break;
+            }
+            seen |= 128u;
+            settings->has_window = 1;
+            settings_consume_type(&parser, ZTOKEN_LEFT_PAREN,
+                                  "'(' before Window settings");
+            while (!parser.failed &&
+                   parser.current.type != ZTOKEN_RIGHT_PAREN) {
+                if (settings_match_word(&parser, "Startup")) {
+                    if ((window_seen & 1u) != 0) {
+                        settings_fail(&parser, &parser.current,
+                                      "duplicate Window Startup setting");
+                        break;
+                    }
+                    window_seen |= 1u;
+                    settings_consume_type(&parser, ZTOKEN_COLON,
+                                          "':' after 'Startup'");
+                    settings->window_startup = settings_consume_text(
+                        &parser, "a quoted startup window path");
+                    if (settings->window_startup != NULL) {
+                        validate_window_path(&parser, "Startup",
+                                             settings->window_startup);
+                    }
+                    settings_consume_type(&parser, ZTOKEN_COLON,
+                                          "':' after the Startup path");
+                } else if (settings_match_word(&parser, "Uninstall")) {
+                    if ((window_seen & 2u) != 0) {
+                        settings_fail(&parser, &parser.current,
+                                      "duplicate Window Uninstall setting");
+                        break;
+                    }
+                    window_seen |= 2u;
+                    settings_consume_type(&parser, ZTOKEN_COLON,
+                                          "':' after 'Uninstall'");
+                    settings->window_uninstall = settings_consume_text(
+                        &parser, "a quoted uninstall window path");
+                    if (settings->window_uninstall != NULL) {
+                        validate_window_path(&parser, "Uninstall",
+                                             settings->window_uninstall);
+                    }
+                    settings_consume_type(&parser, ZTOKEN_COLON,
+                                          "':' after the Uninstall path");
+                } else {
+                    settings_fail(&parser, &parser.current,
+                                  "unknown Window setting '%.*s'",
+                                  (int)parser.current.length,
+                                  parser.current.start);
+                }
+            }
+            settings_consume_type(&parser, ZTOKEN_RIGHT_PAREN,
+                                  "')' after Window settings");
+            settings_consume_type(&parser, ZTOKEN_COLON,
+                                  "':' after Window settings");
+            if (!parser.failed && window_seen != 3u) {
+                settings_fail(&parser, &parser.current,
+                              "Window must define Startup and Uninstall");
+            }
         } else {
             settings_fail(&parser, &parser.current,
                           "unknown project setting '%.*s'",
                           (int)parser.current.length, parser.current.start);
         }
     }
-    if (!parser.failed && seen != 127u) {
+    if (!parser.failed && (seen & 127u) != 127u) {
         settings_fail(&parser, &parser.current,
                       "project.zsettings must define Project, PID, Version, "
                       "Authors, Description, ZSharp, and Dependencies");
@@ -477,12 +585,46 @@ int zsharp_settings_parse_file(const char *path, ZSharpSettings *settings,
                       ZSHARP_CURRENT_GENERATION,
                       settings->zsharp_version[0]);
     }
-    free(source);
+    if (!parser.failed && settings->has_window) {
+        size_t dependency_index;
+        int found = 0;
+        for (dependency_index = 0;
+             dependency_index < settings->dependency_count;
+             dependency_index++) {
+            if (strcmp(settings->dependencies[dependency_index].project_id,
+                       "zsharpwindow") == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            settings_fail(&parser, &parser.current,
+                          "Window settings require the zsharpwindow "
+                          "dependency");
+        }
+    }
     if (parser.failed) {
         zsharp_settings_free(settings);
         return 0;
     }
     return 1;
+}
+
+int zsharp_settings_parse_file(const char *path, ZSharpSettings *settings,
+                               ZSharpDiagnostic *diagnostic, char *error,
+                               size_t error_size) {
+    char *source = read_settings_source(path);
+    int ok;
+    if (source == NULL) {
+        zsharp_settings_init(settings);
+        memset(diagnostic, 0, sizeof(*diagnostic));
+        snprintf(error, error_size, "could not read '%s'", path);
+        return 0;
+    }
+    ok = zsharp_settings_parse_source(source, settings, diagnostic, error,
+                                      error_size);
+    free(source);
+    return ok;
 }
 
 static char *settings_path_join(const char *root, const char *name) {

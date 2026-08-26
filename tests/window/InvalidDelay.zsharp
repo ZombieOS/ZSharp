@@ -1,0 +1,7 @@
+zsharp = type.script
+
+noticed room InvalidDelay[] (
+ noticed brain Start[] (
+  wait(5minutes):
+ )
+)

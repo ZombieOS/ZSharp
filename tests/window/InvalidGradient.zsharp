@@ -1,0 +1,9 @@
+zsharp = type.script:window
+
+noticed Window InvalidGradient[] (
+ import ZSharp.Window.Design():
+ noticed design Design[] (
+  title: "Invalid gradient":
+  background: linear-gradient(90:#FFFFFF):
+ )
+)

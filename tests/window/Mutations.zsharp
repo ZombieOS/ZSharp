@@ -1,0 +1,24 @@
+zsharp = type.script
+
+noticed room Actions[] (
+ noticed text Background = "Main.Design.background":
+
+ noticed brain Theme[] (
+  Main.Design.title.set: "Updated Z# Window":
+  Background.set: linear-gradient(1:#FFFFFF:#000000):
+  wait(1ms):
+  Main.Design.background.set: radial-gradient(2:#101820:#336699:#FFFFFF):
+  Main.Design.scalable.set: dead:
+  Main.Design.width.set: 321px:
+  Main.Design.locationX.set: 2px:
+  Main.Design.locationY.set: -2px:
+  Main.Header1.content.set: "Updated text":
+  Main.Header1.color.set: #123456:
+  Main.PlayButton.text.set: "Updated button":
+  Main.PlayButton.buttonColor.set: #654321:
+  Main.PlayButton.textColor.set: #FFFFFF:
+  Main.PlayButton.locationX.set: -20zu:
+  Main.NameInput.display.set: "Updated placeholder":
+  delay(0.001s):
+ )
+)

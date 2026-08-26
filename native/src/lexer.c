@@ -108,6 +108,13 @@ ZSharpToken zsharp_lexer_next(ZSharpLexer *lexer) {
         return make_token(ZTOKEN_STRING, start, lexer, line, column);
     }
 
+    if (character == '#') {
+        while (isalnum((unsigned char)peek(lexer))) {
+            advance(lexer);
+        }
+        return make_token(ZTOKEN_COLOR, start, lexer, line, column);
+    }
+
     switch (character) {
         case '=':
             if (peek(lexer) == '=') {

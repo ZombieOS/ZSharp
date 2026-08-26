@@ -25,6 +25,9 @@ typedef struct ZSharpSettings {
     uint32_t zsharp_version[ZSHARP_VERSION_PART_COUNT];
     ZSharpDependency *dependencies;
     size_t dependency_count;
+    int has_window;
+    char *window_startup;
+    char *window_uninstall;
 } ZSharpSettings;
 
 void zsharp_settings_init(ZSharpSettings *settings);
@@ -33,6 +36,10 @@ void zsharp_settings_free(ZSharpSettings *settings);
 int zsharp_settings_parse_file(const char *path, ZSharpSettings *settings,
                                ZSharpDiagnostic *diagnostic, char *error,
                                size_t error_size);
+
+int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
+                                 ZSharpDiagnostic *diagnostic, char *error,
+                                 size_t error_size);
 
 int zsharp_settings_load(const char *project_root, ZSharpSettings *settings,
                          ZSharpDiagnostic *diagnostic, char *error,

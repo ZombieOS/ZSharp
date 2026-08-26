@@ -1,0 +1,14 @@
+zsharp = type.script:window
+
+noticed Window BadField[] (
+ import ZSharp.Window.Design():
+ import ZSharp.Window.Button():
+ noticed design Design[] (
+  title: "Bad field":
+ )
+ noticed button Button1[] (
+  text: "Button":
+  width: 15:
+  heigh: 15:
+ )
+)

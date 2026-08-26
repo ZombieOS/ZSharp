@@ -1,0 +1,11 @@
+zsharp = type.script:window
+
+noticed Window Main[] (
+ import ZSharp.Window.Design():
+
+ noticed design Design[] (
+  title: "Multitask Test":
+  scalable: alive:
+  background: #FFFFFF:
+ )
+)

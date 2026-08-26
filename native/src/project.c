@@ -23,6 +23,43 @@ typedef struct SearchState {
     size_t error_size;
 } SearchState;
 
+static void set_error(char *error, size_t error_size, const char *message);
+
+static int ignored_project_directory(const char *name) {
+    return strcmp(name, ".git") == 0 || strcmp(name, ".gradle") == 0 ||
+           strcmp(name, ".idea") == 0 || strcmp(name, ".vscode") == 0 ||
+           strcmp(name, "build") == 0 || strcmp(name, "target") == 0 ||
+           strcmp(name, "Packages") == 0 || strcmp(name, "node_modules") == 0;
+}
+
+static int has_source_extension(const char *name) {
+    size_t name_length = strlen(name);
+    size_t extension_length = strlen(ZSHARP_SOURCE_EXTENSION);
+    return name_length > extension_length &&
+           memcmp(name + name_length - extension_length,
+                  ZSHARP_SOURCE_EXTENSION, extension_length) == 0;
+}
+
+static int append_source_path(ZSharpSourceList *sources, char *path,
+                              char *error, size_t error_size) {
+    char **resized = (char **)realloc(
+        sources->items, (sources->count + 1) * sizeof(*sources->items));
+    if (resized == NULL) {
+        free(path);
+        set_error(error, error_size, "out of memory");
+        return 0;
+    }
+    sources->items = resized;
+    sources->items[sources->count++] = path;
+    return 1;
+}
+
+static int compare_source_paths(const void *left, const void *right) {
+    const char *const *a = (const char *const *)left;
+    const char *const *b = (const char *const *)right;
+    return strcmp(*a, *b);
+}
+
 static void set_error(char *error, size_t error_size, const char *message) {
     if (error != NULL && error_size > 0) {
         snprintf(error, error_size, "%s", message);
@@ -217,6 +254,134 @@ char *zsharp_project_current_directory(char *error, size_t error_size) {
 #endif
 }
 
+static int path_is_directory(const char *path) {
+#ifdef _WIN32
+    DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat status;
+    return stat(path, &status) == 0 && S_ISDIR(status.st_mode);
+#endif
+}
+
+static int path_is_file(const char *path) {
+#ifdef _WIN32
+    DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+#else
+    struct stat status;
+    return stat(path, &status) == 0 && S_ISREG(status.st_mode);
+#endif
+}
+
+static char *absolute_path(const char *path, char *error, size_t error_size) {
+#ifdef _WIN32
+    DWORD required = GetFullPathNameA(path, 0, NULL, NULL);
+    char *result;
+    if (required == 0) {
+        set_error(error, error_size, "could not resolve the project path");
+        return NULL;
+    }
+    result = (char *)malloc(required);
+    if (result == NULL) {
+        set_error(error, error_size, "out of memory");
+        return NULL;
+    }
+    if (GetFullPathNameA(path, required, result, NULL) == 0) {
+        free(result);
+        set_error(error, error_size, "could not resolve the project path");
+        return NULL;
+    }
+    return result;
+#else
+    char *result = realpath(path, NULL);
+    if (result == NULL) {
+        if (error != NULL && error_size > 0) {
+            snprintf(error, error_size, "could not resolve '%s': %s", path,
+                     strerror(errno));
+        }
+    }
+    return result;
+#endif
+}
+
+static void trim_to_parent(char *path) {
+    size_t length = strlen(path);
+    while (length > 1 && (path[length - 1] == '/' ||
+                           path[length - 1] == '\\')) {
+#ifdef _WIN32
+        if (length == 3 && path[1] == ':') break;
+#endif
+        path[--length] = '\0';
+    }
+    while (length > 0 && path[length - 1] != '/' &&
+           path[length - 1] != '\\') {
+        length--;
+    }
+    if (length == 0) {
+        path[0] = '.';
+        path[1] = '\0';
+        return;
+    }
+#ifdef _WIN32
+    if (length == 3 && path[1] == ':') {
+        path[length] = '\0';
+        return;
+    }
+#endif
+    if (length == 1) {
+        path[1] = '\0';
+        return;
+    }
+    path[length - 1] = '\0';
+}
+
+char *zsharp_project_find_root(const char *start_path, char *error,
+                               size_t error_size) {
+    char *cursor;
+    if (start_path == NULL || start_path[0] == '\0') {
+        cursor = zsharp_project_current_directory(error, error_size);
+    } else {
+        cursor = absolute_path(start_path, error, error_size);
+    }
+    if (cursor == NULL) return NULL;
+    if (!path_is_directory(cursor)) trim_to_parent(cursor);
+    for (;;) {
+        char *settings_path = join_path(cursor, ZSHARP_SETTINGS_FILE);
+        char *before;
+        if (settings_path == NULL) {
+            free(cursor);
+            set_error(error, error_size, "out of memory");
+            return NULL;
+        }
+        if (path_is_file(settings_path)) {
+            free(settings_path);
+            return cursor;
+        }
+        free(settings_path);
+        before = zsharp_copy_text(cursor, strlen(cursor));
+        if (before == NULL) {
+            free(cursor);
+            set_error(error, error_size, "out of memory");
+            return NULL;
+        }
+        trim_to_parent(cursor);
+        if (strcmp(before, cursor) == 0) {
+            if (error != NULL && error_size > 0) {
+                snprintf(error, error_size,
+                         "could not find %s at or above '%s'",
+                         ZSHARP_SETTINGS_FILE, start_path == NULL ? "." : start_path);
+            }
+            free(before);
+            free(cursor);
+            return NULL;
+        }
+        free(before);
+    }
+}
+
 int zsharp_project_find_source(const char *project_root, const char *file_name,
                                char **source_path, char *error,
                                size_t error_size) {
@@ -240,6 +405,118 @@ int zsharp_project_find_source(const char *project_root, const char *file_name,
     }
     *source_path = state.match;
     return 1;
+}
+
+#ifdef _WIN32
+static int list_source_directory(const char *directory,
+                                 ZSharpSourceList *sources,
+                                 char *error, size_t error_size) {
+    WIN32_FIND_DATAA entry;
+    char *pattern = join_path(directory, "*");
+    HANDLE search;
+    int ok = 1;
+    if (pattern == NULL) {
+        set_error(error, error_size, "out of memory");
+        return 0;
+    }
+    search = FindFirstFileA(pattern, &entry);
+    free(pattern);
+    if (search == INVALID_HANDLE_VALUE) {
+        DWORD code = GetLastError();
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND ||
+            code == ERROR_ACCESS_DENIED) return 1;
+        set_error(error, error_size,
+                  "could not enumerate the Z# project directory");
+        return 0;
+    }
+    do {
+        char *path;
+        if (strcmp(entry.cFileName, ".") == 0 ||
+            strcmp(entry.cFileName, "..") == 0) continue;
+        path = join_path(directory, entry.cFileName);
+        if (path == NULL) {
+            set_error(error, error_size, "out of memory");
+            ok = 0;
+            break;
+        }
+        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+                !ignored_project_directory(entry.cFileName)) {
+                ok = list_source_directory(path, sources, error, error_size);
+            }
+            free(path);
+        } else if (has_source_extension(entry.cFileName)) {
+            ok = append_source_path(sources, path, error, error_size);
+        } else {
+            free(path);
+        }
+    } while (ok && FindNextFileA(search, &entry));
+    FindClose(search);
+    return ok;
+}
+#else
+static int list_source_directory(const char *directory,
+                                 ZSharpSourceList *sources,
+                                 char *error, size_t error_size) {
+    DIR *stream = opendir(directory);
+    struct dirent *entry;
+    int ok = 1;
+    if (stream == NULL) {
+        if (errno == EACCES || errno == ENOENT) return 1;
+        set_error(error, error_size,
+                  "could not enumerate the Z# project directory");
+        return 0;
+    }
+    while (ok && (entry = readdir(stream)) != NULL) {
+        char *path;
+        struct stat status;
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) continue;
+        path = join_path(directory, entry->d_name);
+        if (path == NULL) {
+            set_error(error, error_size, "out of memory");
+            ok = 0;
+            break;
+        }
+        if (lstat(path, &status) != 0) {
+            free(path);
+            continue;
+        }
+        if (S_ISDIR(status.st_mode)) {
+            if (!ignored_project_directory(entry->d_name))
+                ok = list_source_directory(path, sources, error, error_size);
+            free(path);
+        } else if (S_ISREG(status.st_mode) &&
+                   has_source_extension(entry->d_name)) {
+            ok = append_source_path(sources, path, error, error_size);
+        } else {
+            free(path);
+        }
+    }
+    closedir(stream);
+    return ok;
+}
+#endif
+
+int zsharp_project_list_sources(const char *project_root,
+                                ZSharpSourceList *sources,
+                                char *error, size_t error_size) {
+    memset(sources, 0, sizeof(*sources));
+    if (!list_source_directory(project_root, sources, error, error_size)) {
+        zsharp_project_source_list_free(sources);
+        return 0;
+    }
+    qsort(sources->items, sources->count, sizeof(*sources->items),
+          compare_source_paths);
+    return 1;
+}
+
+void zsharp_project_source_list_free(ZSharpSourceList *sources) {
+    size_t index;
+    if (sources == NULL) return;
+    for (index = 0; index < sources->count; index++) free(sources->items[index]);
+    free(sources->items);
+    memset(sources, 0, sizeof(*sources));
 }
 
 static char *read_source(const char *path) {
@@ -387,6 +664,12 @@ static int import_matches_project_file(const ZSharpRoom *room,
     for (index = 0; index < room->import_count; index++) {
         const char *path = room->imports[index].path;
         size_t length = strlen(path);
+        if (length >= project_length + 2 &&
+            strncmp(path, project, project_length) == 0 &&
+            path[project_length] == '.' && path[length - 2] == '.' &&
+            path[length - 1] == '*') {
+            return 1;
+        }
         if (strncmp(path, project, project_length) == 0 &&
             path[project_length] == '.' && length > file_length &&
             path[length - file_length - 1] == '.' &&
@@ -867,11 +1150,146 @@ static int validate_simple_name(const ZSharpProgram *program,
     return 1;
 }
 
+static int window_has_import(const ZSharpWindow *window, const char *path) {
+    size_t index;
+    for (index = 0; index < window->import_count; index++) {
+        const char *candidate = window->imports[index].path;
+        size_t length = strlen(candidate);
+        if (strcmp(candidate, path) == 0) return 1;
+        if (length >= 2 && candidate[length - 2] == '.' &&
+            candidate[length - 1] == '*' &&
+            strncmp(candidate, path, length - 1) == 0 &&
+            path[length - 1] != '\0') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int split_callback_path(const char *path, char **storage,
+                               char **parts, size_t *count_output) {
+    char *copy = zsharp_copy_text(path, strlen(path));
+    char *cursor;
+    size_t count = 1;
+    if (copy == NULL) return 0;
+    parts[0] = copy;
+    for (cursor = copy; *cursor != '\0'; cursor++) {
+        if (*cursor == ':') {
+            *cursor = '\0';
+            if (count == 4 || cursor[1] == '\0') {
+                free(copy);
+                return 0;
+            }
+            parts[count++] = cursor + 1;
+        }
+    }
+    if (count < 3) {
+        free(copy);
+        return 0;
+    }
+    *storage = copy;
+    *count_output = count;
+    return 1;
+}
+
+static int validate_window_callback(const ZSharpProgram *program,
+                                    const ZSharpSettings *settings,
+                                    const ZSharpRoom *caller,
+                                    const char *project_root,
+                                    const char *path, char *error,
+                                    size_t error_size) {
+    char *storage = NULL;
+    char *parts[4] = {0};
+    size_t count = 0;
+    int ok;
+    if (path == NULL || path[0] == '\0') return 1;
+    if (!split_callback_path(path, &storage, parts, &count)) {
+        snprintf(error, error_size, "invalid window callback '%s'", path);
+        return 0;
+    }
+    if (count == 3) {
+        ok = validate_file_function(program, settings, caller, project_root,
+                                    parts[0], parts[1], parts[2], 0, 0, NULL,
+                                    error, error_size);
+    } else if (strcmp(parts[0], settings->project_id) == 0) {
+        ok = validate_file_function(program, settings, caller, project_root,
+                                    parts[1], parts[2], parts[3], 0, 0, NULL,
+                                    error, error_size);
+    } else {
+        ok = require_project_import(caller, settings, parts[0], parts[1],
+                                    error, error_size);
+    }
+    free(storage);
+    return ok;
+}
+
+static int validate_window_program(const ZSharpProgram *program,
+                                   const ZSharpSettings *settings,
+                                   const char *project_root, char *error,
+                                   size_t error_size) {
+    const ZSharpWindow *window = &program->window;
+    ZSharpRoom caller;
+    size_t element_index;
+    if (!program->has_window || window->name == NULL) {
+        snprintf(error, error_size,
+                 "window script does not contain a Window");
+        return 0;
+    }
+    if (zsharp_settings_find_dependency(settings, "zsharpwindow") == NULL) {
+        snprintf(error, error_size,
+                 "window scripts require zsharpwindow in Dependencies");
+        return 0;
+    }
+    if (!settings->has_window) {
+        snprintf(error, error_size,
+                 "window scripts require the Window settings section");
+        return 0;
+    }
+    memset(&caller, 0, sizeof(caller));
+    caller.qualified_name = window->name;
+    caller.imports = window->imports;
+    caller.import_count = window->import_count;
+    for (element_index = 0; element_index < window->element_count;
+         element_index++) {
+        const ZSharpUIElement *element = &window->elements[element_index];
+        const char *required_import =
+            element->type == ZUI_DESIGN ? "ZSharp.Window.Design" :
+            element->type == ZUI_TEXT ? "ZSharp.Window.Text" :
+            element->type == ZUI_BUTTON ? "ZSharp.Window.Button" :
+            element->type == ZUI_IMAGE ? "ZSharp.Window.Image" :
+            "ZSharp.Window.TextInput";
+        size_t property_index;
+        if (!window_has_import(window, required_import)) {
+            snprintf(error, error_size,
+                     "window element '%s' requires import %s()",
+                     element->name, required_import);
+            return 0;
+        }
+        for (property_index = 0;
+             property_index < element->property_count; property_index++) {
+            const ZSharpUIProperty *property =
+                &element->properties[property_index];
+            if (property->type == ZUI_PROPERTY_CALLBACK &&
+                !validate_window_callback(program, settings, &caller,
+                                          project_root,
+                                          property->text_value, error,
+                                          error_size)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 int zsharp_project_validate(const ZSharpProgram *program,
                             const ZSharpSettings *settings,
                             const char *project_root, char *error,
                             size_t error_size) {
     size_t room_index;
+    if (program->script_type == ZSCRIPT_WINDOW) {
+        return validate_window_program(program, settings, project_root, error,
+                                       error_size);
+    }
     for (room_index = 0; room_index < program->room_count; room_index++) {
         const ZSharpRoom *room = &program->rooms[room_index];
         size_t variable_index;
@@ -911,6 +1329,58 @@ int zsharp_project_validate(const ZSharpProgram *program,
                 }
             }
         }
+    }
+    return 1;
+}
+
+int zsharp_project_validate_settings(const ZSharpSettings *settings,
+                                     const char *project_root, char *error,
+                                     size_t error_size) {
+    const char *names[2] = {"Startup", "Uninstall"};
+    const char *paths[2];
+    size_t index;
+    if (!settings->has_window) return 1;
+    paths[0] = settings->window_startup;
+    paths[1] = settings->window_uninstall;
+    for (index = 0; index < 2; index++) {
+        char *full_path = join_path(project_root, paths[index]);
+        ZSharpProgram program;
+        ZSharpDiagnostic diagnostic;
+        char parse_error[512] = {0};
+        int ok;
+        if (full_path == NULL) {
+            set_error(error, error_size, "out of memory");
+            return 0;
+        }
+        ok = zsharp_project_parse_file(full_path, &program, &diagnostic,
+                                       parse_error, sizeof(parse_error));
+        if (!ok) {
+            if (diagnostic.message[0] != '\0') {
+                snprintf(error, error_size,
+                         "Window %s '%s' is invalid at %u:%u: %s",
+                         names[index], paths[index], diagnostic.line,
+                         diagnostic.column, diagnostic.message);
+            } else {
+                snprintf(error, error_size,
+                         "Window %s '%s' could not be loaded: %s",
+                         names[index], paths[index], parse_error);
+            }
+            free(full_path);
+            return 0;
+        }
+        if (program.script_type != ZSCRIPT_WINDOW) {
+            snprintf(error, error_size,
+                     "Window %s '%s' must use zsharp = type.script:window",
+                     names[index], paths[index]);
+            zsharp_program_free(&program);
+            free(full_path);
+            return 0;
+        }
+        ok = zsharp_project_validate(&program, settings, project_root, error,
+                                     error_size);
+        zsharp_program_free(&program);
+        free(full_path);
+        if (!ok) return 0;
     }
     return 1;
 }

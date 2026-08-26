@@ -1,0 +1,5 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import zsharp.*.SharedValues():
+)

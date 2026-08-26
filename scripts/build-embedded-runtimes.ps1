@@ -22,37 +22,37 @@ $targets = @(
         Id = "windows-x86_64"
         Triple = "x86_64-windows-gnu"
         Executable = "zsharp.exe"
-        Libraries = @()
+        Libraries = @("-luser32", "-lgdi32", "-lcomdlg32", "-lole32", "-lwindowscodecs", "-lshell32", "-ladvapi32", "-luuid")
     },
     @{
         Id = "windows-aarch64"
         Triple = "aarch64-windows-gnu"
         Executable = "zsharp.exe"
-        Libraries = @()
+        Libraries = @("-luser32", "-lgdi32", "-lcomdlg32", "-lole32", "-lwindowscodecs", "-lshell32", "-ladvapi32", "-luuid")
     },
     @{
         Id = "linux-x86_64"
         Triple = "x86_64-linux-gnu.2.17"
         Executable = "zsharp"
-        Libraries = @("-ldl")
+        Libraries = @("-ldl", "-lm", "-pthread")
     },
     @{
         Id = "linux-aarch64"
         Triple = "aarch64-linux-gnu.2.17"
         Executable = "zsharp"
-        Libraries = @("-ldl")
+        Libraries = @("-ldl", "-lm", "-pthread")
     },
     @{
         Id = "macos-x86_64"
         Triple = "x86_64-macos.10.15.0"
         Executable = "zsharp"
-        Libraries = @()
+        Libraries = @("-pthread")
     },
     @{
         Id = "macos-aarch64"
         Triple = "aarch64-macos.11.0.0"
         Executable = "zsharp"
-        Libraries = @()
+        Libraries = @("-pthread")
     }
 )
 

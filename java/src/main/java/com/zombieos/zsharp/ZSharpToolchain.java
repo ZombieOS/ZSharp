@@ -91,6 +91,94 @@ public final class ZSharpToolchain {
     }
 
     /**
+     * Validates and registers a project for the current user without launching it.
+     *
+     * @param project project folder, settings file, or path inside the project
+     * @return the native command result
+     * @throws IOException when the process cannot be started or read
+     * @throws InterruptedException when the calling thread is interrupted
+     */
+    public ZSharpResult registerProject(Path project)
+            throws IOException, InterruptedException {
+        Objects.requireNonNull(project, "project");
+        return execute(List.of("project", project.toString()));
+    }
+
+    /**
+     * Compatibility alias for {@link #registerProject(Path)}.
+     *
+     * @param project project folder, settings file, or path inside the project
+     * @return the native command result
+     * @throws IOException when the process cannot be started or read
+     * @throws InterruptedException when the calling thread is interrupted
+     * @deprecated Project registration no longer launches a project.
+     */
+    @Deprecated(forRemoval = false)
+    public ZSharpResult launchProject(Path project)
+            throws IOException, InterruptedException {
+        return registerProject(project);
+    }
+
+    /**
+     * Builds a validated package in the project's {@code Packages} folder.
+     *
+     * @param project project folder, settings file, or path inside the project
+     * @param type application or game package
+     * @param packageName filename without {@code .zapp} or {@code .zgame}
+     * @return the native command result
+     * @throws IOException when the process cannot be started or read
+     * @throws InterruptedException when the calling thread is interrupted
+     */
+    public ZSharpResult packageProject(Path project, ZSharpPackageType type,
+                                       String packageName)
+            throws IOException, InterruptedException {
+        return packageProject(project, type, packageName, false);
+    }
+
+    /**
+     * Builds a validated package and optionally its ZIP-compatible source copy.
+     *
+     * @param project project folder, settings file, or path inside the project
+     * @param type application or game package
+     * @param packageName filename without {@code .zapp} or {@code .zgame}
+     * @param includeUnbytecoded whether to also create the source companion
+     * @return the native command result
+     * @throws IOException when the process cannot be started or read
+     * @throws InterruptedException when the calling thread is interrupted
+     */
+    public ZSharpResult packageProject(Path project, ZSharpPackageType type,
+                                       String packageName,
+                                       boolean includeUnbytecoded)
+            throws IOException, InterruptedException {
+        Objects.requireNonNull(project, "project");
+        Objects.requireNonNull(type, "type");
+        if (packageName == null || packageName.isBlank()) {
+            throw new IllegalArgumentException("packageName cannot be blank");
+        }
+        List<String> command = new ArrayList<>();
+        command.add("package");
+        command.add(type.commandName());
+        command.add(project.toString());
+        command.add(packageName);
+        if (includeUnbytecoded) command.add("--unbytecode");
+        return execute(command);
+    }
+
+    /**
+     * Opens a {@code .zapp}, or routes an unavailable {@code .zgame} to the Hub.
+     *
+     * @param packageFile package to open
+     * @return the native command result
+     * @throws IOException when the process cannot be started or read
+     * @throws InterruptedException when the calling thread is interrupted
+     */
+    public ZSharpResult openPackage(Path packageFile)
+            throws IOException, InterruptedException {
+        requirePackageFile(packageFile);
+        return execute(List.of("run", packageFile.toString()));
+    }
+
+    /**
      * Runs a Z# source file.
      *
      * @param source Z# source file
@@ -225,6 +313,15 @@ public final class ZSharpToolchain {
         if (!ZSharp.isSourceFile(source)) {
             throw new IllegalArgumentException(
                     "Z# source files must use the " + ZSharp.SOURCE_EXTENSION + " extension");
+        }
+    }
+
+    private static void requirePackageFile(Path packageFile) {
+        Objects.requireNonNull(packageFile, "packageFile");
+        if (!ZSharp.isPackageFile(packageFile)) {
+            throw new IllegalArgumentException(
+                    "Z# packages must use the " + ZSharp.APP_EXTENSION + " or "
+                            + ZSharp.GAME_EXTENSION + " extension");
         }
     }
 

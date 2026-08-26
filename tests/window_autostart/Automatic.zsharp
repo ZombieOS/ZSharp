@@ -1,0 +1,7 @@
+zsharp = type.script
+
+noticed room Automatic[] (
+ noticed brain Start[] (
+  Print("automatic start ran"):
+ )
+)

@@ -1,0 +1,17 @@
+zsharp = type.settings
+
+Project: "Window Syntax Test":
+PID: "window_test":
+Version: [1.0.1.0]:
+Authors: ["Z# Tests"]:
+Description: "Compiler coverage for Z# window syntax.":
+ZSharp: [1.0.1.0]:
+
+Dependencies (
+ zsharpwindow:1.0.0.0
+):
+
+Window (
+ Startup: "Main.zsharp":
+ Uninstall: "Main.zsharp":
+):

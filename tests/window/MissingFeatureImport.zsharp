@@ -1,0 +1,11 @@
+zsharp = type.script:window
+
+noticed Window MissingImport[] (
+ import ZSharp.Window.Design():
+ noticed design Design[] (
+  title: "Missing import":
+ )
+ noticed text Header1[] (
+  content: "Text needs its feature import":
+ )
+)

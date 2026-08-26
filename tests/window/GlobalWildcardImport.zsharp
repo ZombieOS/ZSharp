@@ -1,0 +1,15 @@
+zsharp = type.script:window
+
+noticed Window GlobalWildcard[] (
+ import ZSharp.*():
+
+ noticed design Design[] (
+  title: "Global ZSharp Wildcard":
+  background: #FFFFFF:
+ )
+
+ noticed text[paragraph] Message[] (
+  content: "ZSharp.* imports official namespaces":
+  color: #000000:
+ )
+)

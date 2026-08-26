@@ -9,6 +9,7 @@ typedef enum ZSharpTokenType {
     ZTOKEN_IDENTIFIER,
     ZTOKEN_NUMBER,
     ZTOKEN_STRING,
+    ZTOKEN_COLOR,
     ZTOKEN_EQUAL,
     ZTOKEN_EQUAL_EQUAL,
     ZTOKEN_DOT,

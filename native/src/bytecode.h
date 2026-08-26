@@ -74,6 +74,66 @@ typedef struct ZSharpImport {
     uint32_t part_count;
 } ZSharpImport;
 
+typedef enum ZSharpScriptType {
+    ZSCRIPT_NORMAL = 0,
+    ZSCRIPT_WINDOW = 1,
+    ZSCRIPT_2D = 2,
+    ZSCRIPT_3D = 3
+} ZSharpScriptType;
+
+typedef enum ZSharpUIElementType {
+    ZUI_DESIGN = 1,
+    ZUI_TEXT = 2,
+    ZUI_BUTTON = 3,
+    ZUI_IMAGE = 4,
+    ZUI_TEXT_INPUT = 5
+} ZSharpUIElementType;
+
+typedef enum ZSharpUIPropertyType {
+    ZUI_PROPERTY_TEXT = 1,
+    ZUI_PROPERTY_STATUS = 2,
+    ZUI_PROPERTY_COLOR = 3,
+    ZUI_PROPERTY_MEASUREMENT = 4,
+    ZUI_PROPERTY_IDENTIFIER = 5,
+    ZUI_PROPERTY_IDENTIFIER_ARRAY = 6,
+    ZUI_PROPERTY_CALLBACK = 7,
+    ZUI_PROPERTY_EMPTY_ARRAY = 8
+} ZSharpUIPropertyType;
+
+typedef enum ZSharpUIUnit {
+    ZUI_UNIT_NONE = 0,
+    ZUI_UNIT_ZU = 1,
+    ZUI_UNIT_PX = 2
+} ZSharpUIUnit;
+
+typedef struct ZSharpUIProperty {
+    char *name;
+    ZSharpUIPropertyType type;
+    char *text_value;
+    int status_value;
+    ZSharpUIUnit unit;
+    char **items;
+    size_t item_count;
+} ZSharpUIProperty;
+
+typedef struct ZSharpUIElement {
+    int is_public;
+    ZSharpUIElementType type;
+    char *variant;
+    char *name;
+    ZSharpUIProperty *properties;
+    size_t property_count;
+} ZSharpUIElement;
+
+typedef struct ZSharpWindow {
+    int is_public;
+    char *name;
+    ZSharpImport *imports;
+    size_t import_count;
+    ZSharpUIElement *elements;
+    size_t element_count;
+} ZSharpWindow;
+
 typedef enum ZSharpOpCode {
     ZOP_PUSH_NUMBER = 1,
     ZOP_PUSH_TEXT = 2,
@@ -120,7 +180,10 @@ typedef enum ZSharpOpCode {
     ZOP_ARRAY_LENGTH = 43,
     ZOP_ARRAY_ADD_OBJECT = 44,
     ZOP_NAMED_IF_START = 45,
-    ZOP_PUSH_NULL = 46
+    ZOP_PUSH_NULL = 46,
+    ZOP_UI_SET = 47,
+    ZOP_DELAY = 48,
+    ZOP_UI_SET_DYNAMIC = 49
 } ZSharpOpCode;
 
 typedef struct ZSharpInstruction {
@@ -168,6 +231,9 @@ typedef struct ZSharpProgram {
     unsigned char project_identity[ZSHARP_SHA256_SIZE];
     unsigned char build_hash[ZSHARP_SHA256_SIZE];
     char *source_name;
+    ZSharpScriptType script_type;
+    int has_window;
+    ZSharpWindow window;
     ZSharpRoom *rooms;
     size_t room_count;
 } ZSharpProgram;
@@ -182,6 +248,9 @@ ZSharpVariable *zsharp_room_add_variable(ZSharpRoom *room);
 ZSharpFunction *zsharp_room_add_function(ZSharpRoom *room);
 ZSharpParameter *zsharp_function_add_parameter(ZSharpFunction *function);
 ZSharpInstruction *zsharp_function_add_instruction(ZSharpFunction *function);
+ZSharpImport *zsharp_window_add_import(ZSharpWindow *window);
+ZSharpUIElement *zsharp_window_add_element(ZSharpWindow *window);
+ZSharpUIProperty *zsharp_ui_element_add_property(ZSharpUIElement *element);
 
 int zsharp_bytecode_write(
     const char *path, const ZSharpProgram *program, const char *project_id,

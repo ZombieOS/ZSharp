@@ -47,6 +47,58 @@ Dependencies (
   changes with compiled content, and the VM refuses to run a bytecode file when
   the stored hash no longer matches.
 
+### Window project settings
+
+Window projects depend on the official `zsharpwindow` project:
+
+```zsharp
+Dependencies (
+ zsharpwindow:1.0.0.0
+):
+
+Window (
+ Startup: "window/location/Window.zsharp":
+ Uninstall: "window/location/Uninstall.zsharp":
+):
+```
+
+- `Window (...)` is a settings section rather than a function and is valid
+  only when `zsharpwindow` is listed as a dependency.
+- `Startup` selects the window file opened when the application launches.
+- `Uninstall` reserves and validates the future custom uninstall window. The
+  1.0.1.0 command uses a terminal confirmation.
+- Window paths are project-relative, use `/`, cannot escape the project, and
+  must identify a `zsharp = type.script:window` file.
+- Settings checks and project compilation load and validate both target files.
+- Normal PIDs remain lowercase. Reserved official namespaces such as `ZSharp`
+  and `ZOS` are the only capitalized project/import names.
+- Window and element coordinates use a center origin. Positive X moves right,
+  negative X moves left, positive Y moves up, and negative Y moves down.
+- One Z# UI unit (`zu`) equals four pixels multiplied by the operating system's
+  display scale: `pixels = zu * 4 * displayScale`.
+- A UI measurement without a suffix, such as `width: 15:`, means `15zu`.
+  Exact pixels require the `px` suffix, as in `width: 15px:`.
+- Design backgrounds accept a solid `#RRGGBB` color or a gradient. Gradient
+  syntax is `linear-gradient(DEGREES:COLOR1:COLOR2...)` or
+  `radial-gradient(DEGREES:COLOR1:COLOR2...)`, with at least two colors and no
+  fixed language-level maximum. Stops are spaced evenly. Zero degrees points
+  upward; radial degrees select the direction of its focal point.
+- A normal-script event handler changes a live window field with
+  `File.Element.property.set: value:`. The shorter
+  `Element.property.set: value:` form targets the active window too. Text,
+  solid colors, measurements, design gradients, status fields, titles, icons,
+  element positions/sizes, labels, and placeholders use this form. Input
+  `contents` remains runtime-owned, and click targets and input types are not
+  mutable in 1.0.1.0.
+- A text variable containing `Element.property` or `File.Element.property`
+  can be used as a reusable live target with `PathAlias.set: value:`. The path
+  is resolved at runtime against the active window.
+- `wait(NUMBERms):` and `wait(NUMBERs):` pause execution for milliseconds or
+  seconds. `delay(...)` is an exact alias. The window runtime redraws and keeps
+  processing native events during a callback wait.
+- Current and future uninstall behavior is defined in
+  [UNINSTALL.md](UNINSTALL.md).
+
 ## First syntax sample
 
 The first supplied Hello World example is preserved as provided:
@@ -57,9 +109,8 @@ zsharp = type.script
 noticed room Test[] (
  noticed text HelloWorld = "Hello World": // this is a text variable
  noticed number Visits = 1: // this is a number variable
-  noticed brain Start[] ( // this is declaring a function. ill explain what noticed and brain mean
+  noticed brain Start[] ( // this is declaring a function.
   Print(HelloWorld): // this is printing Hello World to console
-  Function.call(FIILE:ROOM:FUNCTION): // example being Function.call(Home:Main:
  )
 )
 ```
@@ -83,9 +134,15 @@ noticed room Test[] (
 - The file portion of `Function.call` searches the entire project recursively
   for a Z# file with that name. `Home` therefore resolves to `Home.zsharp`, even
   when it is in another project folder.
-- A brain named `Start` runs automatically when its file or room is loaded.
+- A brain named `Start` runs automatically when its script is started. Window
+  applications start every normal project script after creating the window;
+  the window itself calls an event function only when its button is clicked.
 - `Start[DR]` disables that automatic run behavior. The brain may still be
   called explicitly.
+- In a window application, automatic `Start[]` brains and internal button
+  callbacks run as independent ZVM tasks. A loop in one task therefore does
+  not block another task or freeze the native window event loop. Closing the
+  window cancels and joins all of its tasks.
 - `number.set:Score = Score + 5:` assigns a new number value.
 - `+` performs number addition.
 - `-`, `*`, `/`, and `%` perform subtraction, multiplication, division, and
@@ -214,6 +271,11 @@ noticed room Test[] (
 - A direct file import is written as `import Project.File():`.
 - A file inside folders is written as
   `import Project.Folder.File():`. Additional folder names are allowed.
+- A final `*` imports every eligible endpoint below its prefix. Examples are
+  `import Project.*():`, `import Project.Folder.*():`,
+  `import ZSharp.*():`, and `import ZSharp.Window.*():`.
+- `*` is valid only as the final import name. Dependencies and visibility rules
+  still apply to wildcard imports.
 - Visibility rules still apply after import.
 - Missing imports and resolvable visibility/name errors are compile errors.
 - For the current project, `Project` is its `PID`. For an external project it
@@ -275,11 +337,6 @@ other rooms.
 - What the letters `DR` stand for and whether other `[]` options exist.
 - Whether capitalization is significant.
 - Whether files can contain brains outside a room.
-- Whether loading another file for `Function.call` also auto-runs that file's
-  `Start[]` functions. The runtime currently invokes only the requested target.
-- How tools should discover the project root when invoked from a subfolder. The
-  toolchain currently uses its working directory and expects
-  `project.zsettings` there.
 - What should happen if multiple project folders contain a Z# file with the
   same name. The toolchain currently reports that as an ambiguous call.
 - How a dependency PID is resolved to a Z# project folder or a provider

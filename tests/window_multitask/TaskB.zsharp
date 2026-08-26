@@ -1,0 +1,10 @@
+zsharp = type.script
+
+noticed room TaskB[] (
+ noticed brain Start[] (
+  loop (
+   Print("multitask B ran"):
+   wait(25ms):
+  )
+ )
+)

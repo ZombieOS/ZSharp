@@ -1,0 +1,65 @@
+zsharp = type.script:window
+
+noticed Window Main[] (
+ import ZSharp.Window.Design():
+ import ZSharp.Window.Text():
+ import ZSharp.Window.Button():
+ import ZSharp.Window.Image():
+ import ZSharp.Window.TextInput():
+ import window_test.Handlers():
+ import window_test.Mutations():
+
+ noticed design Design[] (
+  title: "Z# Window":
+  icon: "assets/images/icon.png":
+  width: 320zu:
+  height: 180px:
+  scalable: alive:
+  background: linear-gradient(45:#F0F0F0:#FFFFFF:#DDEEFF):
+ )
+
+ noticed text[Header] Header1[] (
+  content: "This is a header!":
+  color: #000000:
+  locationX: 100:
+  locationY: 100zu:
+ )
+
+ noticed button PlayButton[] (
+  text: "Click Me!":
+  textColor: #FFFFFF:
+  buttonColor: #000000:
+  width: 15:
+  height: 15zu:
+  locationX: 14px:
+  locationY: -12:
+  Click[
+   left: [Mutations:Actions:Theme]:
+   right: []:
+  ]:
+ )
+
+ noticed image Logo[] (
+  file: "assets/images/ZSharp.png":
+  width: 30:
+  height: 35:
+ )
+
+ noticed textInput NameInput[] (
+  display: "Enter your name":
+  type: text:
+  locationX: 10:
+  locationY: 15:
+  width: 15:
+  height: 10:
+ )
+
+ noticed textInput ImageInput[] (
+  display: "Choose an image":
+  type: image:
+  supportedTypes: [png, jpg]:
+  width: 15:
+  height: 10:
+  contents: []:
+ )
+)

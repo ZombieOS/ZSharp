@@ -3,6 +3,7 @@
 #include "decimal.h"
 #include "lexer.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -715,6 +716,211 @@ static int parse_text_statement(Parser *parser, ZSharpFunction *function) {
     return 1;
 }
 
+static char *consume_ui_color_text(Parser *parser) {
+    ZSharpToken token = parser->current;
+    char *color;
+    size_t index;
+    if (!consume_type(parser, ZTOKEN_COLOR, "a #RRGGBB color value"))
+        return NULL;
+    if (token.length != 7) {
+        fail_at(parser, &token, "UI colors must use exactly #RRGGBB");
+        return NULL;
+    }
+    for (index = 1; index < token.length; index++) {
+        if (!isxdigit((unsigned char)token.start[index])) {
+            fail_at(parser, &token, "UI colors must use hexadecimal #RRGGBB");
+            return NULL;
+        }
+    }
+    color = zsharp_copy_text(token.start, token.length);
+    if (color == NULL) {
+        fail_at(parser, &token, "out of memory");
+        return NULL;
+    }
+    for (index = 1; index < token.length; index++)
+        color[index] = (char)toupper((unsigned char)color[index]);
+    return color;
+}
+
+static int parse_ui_paint_text(Parser *parser, char **value) {
+    const char *kind;
+    char *degrees = NULL;
+    char **colors = NULL;
+    size_t color_count = 0;
+    size_t length;
+    size_t index;
+    char *output;
+    char *cursor;
+    if (parser->current.type == ZTOKEN_COLOR) {
+        *value = consume_ui_color_text(parser);
+        return *value != NULL;
+    }
+    if (zsharp_token_equals(&parser->current, "linear")) {
+        kind = "linear";
+    } else if (zsharp_token_equals(&parser->current, "radial")) {
+        kind = "radial";
+    } else {
+        fail_at(parser, &parser->current,
+                "expected #RRGGBB, linear-gradient, or radial-gradient");
+        return 0;
+    }
+    advance_token(parser);
+    if (!consume_type(parser, ZTOKEN_MINUS, "'-' in the gradient name") ||
+        !consume_word(parser, "gradient") ||
+        !consume_type(parser, ZTOKEN_LEFT_PAREN,
+                      "'(' after the gradient name") ||
+        !consume_signed_number_text(parser, &degrees)) {
+        return 0;
+    }
+    do {
+        char **resized;
+        char *color;
+        if (!consume_type(parser, ZTOKEN_COLON,
+                          "':' before a gradient color")) goto failed;
+        color = consume_ui_color_text(parser);
+        if (color == NULL) goto failed;
+        resized = (char **)realloc(colors,
+            (color_count + 1) * sizeof(*colors));
+        if (resized == NULL) {
+            free(color);
+            fail_at(parser, &parser->current, "out of memory");
+            goto failed;
+        }
+        colors = resized;
+        colors[color_count++] = color;
+    } while (parser->current.type == ZTOKEN_COLON);
+    if (color_count < 2) {
+        fail_at(parser, &parser->current,
+                "a gradient requires at least two colors");
+        goto failed;
+    }
+    if (!consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                      "')' after the gradient colors")) goto failed;
+    length = strlen(kind) + strlen("-gradient(") + strlen(degrees) + 2;
+    for (index = 0; index < color_count; index++)
+        length += 1 + strlen(colors[index]);
+    output = (char *)malloc(length);
+    if (output == NULL) {
+        fail_at(parser, &parser->current, "out of memory");
+        goto failed;
+    }
+    cursor = output;
+    memcpy(cursor, kind, strlen(kind));
+    cursor += strlen(kind);
+    memcpy(cursor, "-gradient(", strlen("-gradient("));
+    cursor += strlen("-gradient(");
+    memcpy(cursor, degrees, strlen(degrees));
+    cursor += strlen(degrees);
+    for (index = 0; index < color_count; index++) {
+        size_t color_length = strlen(colors[index]);
+        *cursor++ = ':';
+        memcpy(cursor, colors[index], color_length);
+        cursor += color_length;
+    }
+    *cursor++ = ')';
+    *cursor = '\0';
+    free(degrees);
+    for (index = 0; index < color_count; index++) free(colors[index]);
+    free(colors);
+    *value = output;
+    return 1;
+
+failed:
+    free(degrees);
+    for (index = 0; index < color_count; index++) free(colors[index]);
+    free(colors);
+    return 0;
+}
+
+static int parse_ui_update_value(Parser *parser, int32_t *type,
+                                 uint32_t *unit, char **value) {
+    ZSharpToken token = parser->current;
+    *unit = ZUI_UNIT_NONE;
+    if (token.type == ZTOKEN_STRING) {
+        advance_token(parser);
+        *type = ZUI_PROPERTY_TEXT;
+        *value = decode_text(parser, &token);
+        return *value != NULL;
+    }
+    if (token.type == ZTOKEN_COLOR ||
+        zsharp_token_equals(&token, "linear") ||
+        zsharp_token_equals(&token, "radial")) {
+        *type = ZUI_PROPERTY_COLOR;
+        return parse_ui_paint_text(parser, value);
+    }
+    if (zsharp_token_equals(&token, "alive") ||
+        zsharp_token_equals(&token, "dead")) {
+        *type = ZUI_PROPERTY_STATUS;
+        *value = copy_token(parser, &token);
+        advance_token(parser);
+        return *value != NULL;
+    }
+    if (token.type == ZTOKEN_NUMBER || token.type == ZTOKEN_MINUS) {
+        *type = ZUI_PROPERTY_MEASUREMENT;
+        if (!consume_signed_number_text(parser, value)) return 0;
+        *unit = ZUI_UNIT_ZU;
+        if (match_word(parser, "zu")) *unit = ZUI_UNIT_ZU;
+        else if (match_word(parser, "px")) *unit = ZUI_UNIT_PX;
+        return 1;
+    }
+    if (token.type == ZTOKEN_IDENTIFIER) {
+        *type = ZUI_PROPERTY_IDENTIFIER;
+        *value = copy_token(parser, &token);
+        advance_token(parser);
+        return *value != NULL;
+    }
+    fail_at(parser, &token, "expected a window property value");
+    return 0;
+}
+
+static int parse_delay_statement(Parser *parser, ZSharpFunction *function) {
+    char *duration = NULL;
+    char *milliseconds = NULL;
+    char decimal_error[128] = {0};
+    ZSharpInstruction *instruction;
+    int seconds = 0;
+    if (!consume_type(parser, ZTOKEN_LEFT_PAREN, "'(' after wait/delay") ||
+        !consume_number_text(parser, &duration)) {
+        free(duration);
+        return 0;
+    }
+    if (match_word(parser, "ms")) {
+        seconds = 0;
+    } else if (match_word(parser, "s")) {
+        seconds = 1;
+    } else {
+        fail_at(parser, &parser->current,
+                "expected 'ms' or 's' after the wait duration");
+        free(duration);
+        return 0;
+    }
+    if (!consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                      "')' after the wait duration") ||
+        !consume_type(parser, ZTOKEN_COLON,
+                      "':' after the wait/delay statement")) {
+        free(duration);
+        return 0;
+    }
+    if (seconds) {
+        milliseconds = zsharp_decimal_multiply(
+            duration, "1000", decimal_error, sizeof(decimal_error));
+        free(duration);
+        if (milliseconds == NULL) {
+            fail_at(parser, &parser->current, "%s", decimal_error);
+            return 0;
+        }
+    } else {
+        milliseconds = duration;
+    }
+    instruction = emit(parser, function, ZOP_DELAY);
+    if (instruction == NULL) {
+        free(milliseconds);
+        return 0;
+    }
+    instruction->operand = milliseconds;
+    return 1;
+}
+
 static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
     ZSharpToken first_token = parser->current;
     char *parts[5] = {0};
@@ -726,11 +932,16 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
     uint32_t argument_count = 0;
     int is_setter = 0;
     int is_array_setter = 0;
+    int is_ui_setter = 0;
 
     parts[part_count++] = copy_token(parser, &first_token);
     advance_token(parser);
     while (!parser->failed && match_type(parser, ZTOKEN_DOT)) {
         if (match_word(parser, "set")) {
+            if (parser->current.type == ZTOKEN_COLON) {
+                is_ui_setter = 1;
+                break;
+            }
             is_setter = 1;
             if (parser->current.type == ZTOKEN_LEFT_BRACKET) {
                 is_array_setter = 1;
@@ -748,6 +959,54 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
         parts[part_count++] = consume_name(parser, "a name after '.'");
     }
     if (parser->failed) goto failed;
+
+    if (is_ui_setter) {
+        int32_t value_type = 0;
+        uint32_t unit = ZUI_UNIT_NONE;
+        char *value_text = NULL;
+        if (part_count != 1 && part_count != 2 && part_count != 3) {
+            fail_at(parser, &first_token,
+                    "window property setters use PathAlias.set, "
+                    "Element.property.set, or File.Element.property.set");
+            goto failed;
+        }
+        if (!consume_type(parser, ZTOKEN_COLON,
+                          "':' after the window property setter") ||
+            !parse_ui_update_value(parser, &value_type, &unit, &value_text) ||
+            !consume_type(parser, ZTOKEN_COLON,
+                          "':' after the window property value")) {
+            free(value_text);
+            goto failed;
+        }
+        if (part_count == 1) {
+            instruction = emit(parser, function, ZOP_LOAD_NAME);
+            if (instruction == NULL) {
+                free(value_text);
+                goto failed;
+            }
+            instruction->operand = parts[0];
+            parts[0] = NULL;
+            instruction = emit(parser, function, ZOP_UI_SET_DYNAMIC);
+        } else {
+            path = join_path_parts(parser, parts, part_count);
+            if (path == NULL) {
+                free(value_text);
+                goto failed;
+            }
+            instruction = emit(parser, function, ZOP_UI_SET);
+        }
+        if (instruction == NULL) {
+            free(value_text);
+            goto failed;
+        }
+        if (part_count > 1) instruction->operand = path;
+        instruction->number_operand = value_type;
+        instruction->index_operand = unit;
+        instruction->call_function = value_text;
+        path = NULL;
+        for (index = 0; index < part_count; index++) free(parts[index]);
+        return 1;
+    }
 
     if (!is_setter && part_count >= 2 &&
         strcmp(parts[part_count - 1], "add") == 0 &&
@@ -1124,6 +1383,13 @@ static int parse_loop(Parser *parser, ZSharpFunction *function) {
         parser->loop_depth--;
         return 0;
     }
+    if (parser->current.type == ZTOKEN_COLON) {
+        fail_at(parser, &parser->current,
+                "a loop closes with ')' and does not use ':' after it");
+        free(context->destroy_jumps);
+        parser->loop_depth--;
+        return 0;
+    }
     if (context->start_index > UINT32_MAX) {
         fail_at(parser, &parser->current, "brain is too large");
         free(context->destroy_jumps);
@@ -1219,6 +1485,8 @@ static int parse_statement(Parser *parser, ZSharpFunction *function) {
         return parse_loop(parser, function);
     }
     if (match_word(parser, "continue")) return parse_continue(parser, function);
+    if (match_word(parser, "wait") || match_word(parser, "delay"))
+        return parse_delay_statement(parser, function);
     if (parser->current.type == ZTOKEN_IDENTIFIER) {
         return parse_named_statement(parser, function);
     }
@@ -1752,8 +2020,18 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
                     "an import path can contain at most 64 names");
             break;
         }
+        if (parser->current.type == ZTOKEN_STAR) {
+            ZSharpToken wildcard = parser->current;
+            parts[part_count++] = copy_token(parser, &wildcard);
+            advance_token(parser);
+            if (parser->current.type == ZTOKEN_DOT) {
+                fail_at(parser, &wildcard,
+                        "'*' must be the final name in an import path");
+            }
+            break;
+        }
         parts[part_count++] =
-            consume_name(parser, "a name in the import path");
+            consume_name(parser, "a name or '*' in the import path");
     }
     if (!parser->failed && part_count < 2) {
         fail_at(parser, &parser->current,
@@ -1790,6 +2068,642 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     }
     import->path = path;
     import->part_count = (uint32_t)part_count;
+    return 1;
+}
+
+static int parse_window_import(Parser *parser, ZSharpWindow *window) {
+    char *parts[64] = {0};
+    size_t part_count = 0;
+    size_t index;
+    char *path;
+    ZSharpImport *import;
+    parts[part_count++] = consume_name(parser, "an imported project name");
+    while (!parser->failed && match_type(parser, ZTOKEN_DOT)) {
+        if (part_count == 64) {
+            fail_at(parser, &parser->current,
+                    "an import path can contain at most 64 names");
+            break;
+        }
+        if (parser->current.type == ZTOKEN_STAR) {
+            ZSharpToken wildcard = parser->current;
+            parts[part_count++] = copy_token(parser, &wildcard);
+            advance_token(parser);
+            if (parser->current.type == ZTOKEN_DOT) {
+                fail_at(parser, &wildcard,
+                        "'*' must be the final name in an import path");
+            }
+            break;
+        }
+        parts[part_count++] =
+            consume_name(parser, "a name or '*' in the import path");
+    }
+    if (!parser->failed && part_count < 2) {
+        fail_at(parser, &parser->current,
+                "an import requires at least Project.File");
+    }
+    if (!parser->failed &&
+        (!consume_type(parser, ZTOKEN_LEFT_PAREN,
+                       "'(' after the imported file") ||
+         !consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                       "')' after the imported file") ||
+         !consume_type(parser, ZTOKEN_COLON,
+                       "':' after the import statement"))) {
+        /* The consume helpers record the diagnostic. */
+    }
+    if (parser->failed) {
+        for (index = 0; index < part_count; index++) free(parts[index]);
+        return 0;
+    }
+    path = join_path_parts(parser, parts, part_count);
+    for (index = 0; index < part_count; index++) free(parts[index]);
+    if (path == NULL) return 0;
+    for (index = 0; index < window->import_count; index++) {
+        if (strcmp(window->imports[index].path, path) == 0) {
+            fail_at(parser, &parser->current, "duplicate import '%s'", path);
+            free(path);
+            return 0;
+        }
+    }
+    import = zsharp_window_add_import(window);
+    if (import == NULL) {
+        fail_at(parser, &parser->current, "out of memory");
+        free(path);
+        return 0;
+    }
+    import->path = path;
+    import->part_count = (uint32_t)part_count;
+    return 1;
+}
+
+static int token_equals_ignore_case(const ZSharpToken *token,
+                                    const char *text) {
+    size_t index;
+    size_t length = strlen(text);
+    if (token->type != ZTOKEN_IDENTIFIER || token->length != length) return 0;
+    for (index = 0; index < length; index++) {
+        if (tolower((unsigned char)token->start[index]) !=
+            tolower((unsigned char)text[index])) return 0;
+    }
+    return 1;
+}
+
+static char *copy_token_lower(Parser *parser, const ZSharpToken *token) {
+    size_t index;
+    char *copy = copy_token(parser, token);
+    if (copy == NULL) return NULL;
+    for (index = 0; copy[index] != '\0'; index++) {
+        copy[index] = (char)tolower((unsigned char)copy[index]);
+    }
+    return copy;
+}
+
+static ZSharpUIProperty *find_ui_property(ZSharpUIElement *element,
+                                          const char *name) {
+    size_t index;
+    for (index = 0; index < element->property_count; index++) {
+        if (strcmp(element->properties[index].name, name) == 0) {
+            return &element->properties[index];
+        }
+    }
+    return NULL;
+}
+
+static ZSharpUIProperty *add_ui_property(Parser *parser,
+                                         ZSharpUIElement *element,
+                                         const char *name,
+                                         ZSharpUIPropertyType type) {
+    ZSharpUIProperty *property;
+    if (find_ui_property(element, name) != NULL) {
+        fail_at(parser, &parser->current, "duplicate UI field '%s'", name);
+        return NULL;
+    }
+    property = zsharp_ui_element_add_property(element);
+    if (property == NULL) {
+        fail_at(parser, &parser->current, "out of memory");
+        return NULL;
+    }
+    property->name = zsharp_copy_text(name, strlen(name));
+    property->type = type;
+    if (property->name == NULL) {
+        fail_at(parser, &parser->current, "out of memory");
+        return NULL;
+    }
+    return property;
+}
+
+static int append_ui_item(Parser *parser, ZSharpUIProperty *property,
+                          char *item) {
+    char **resized = (char **)realloc(
+        property->items, (property->item_count + 1) * sizeof(*resized));
+    if (resized == NULL) {
+        free(item);
+        fail_at(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    property->items = resized;
+    property->items[property->item_count++] = item;
+    return 1;
+}
+
+static int parse_ui_text_value(Parser *parser, ZSharpUIProperty *property) {
+    ZSharpToken token = parser->current;
+    if (!consume_type(parser, ZTOKEN_STRING, "a quoted text value")) return 0;
+    property->text_value = decode_text(parser, &token);
+    return property->text_value != NULL;
+}
+
+static int parse_ui_status_value(Parser *parser, ZSharpUIProperty *property) {
+    if (match_word(parser, "alive")) {
+        property->status_value = 1;
+        return 1;
+    }
+    if (match_word(parser, "dead")) {
+        property->status_value = 0;
+        return 1;
+    }
+    fail_at(parser, &parser->current,
+            "expected 'alive' or 'dead' for a UI status field");
+    return 0;
+}
+
+static int parse_ui_color_value(Parser *parser, ZSharpUIProperty *property) {
+    return parse_ui_paint_text(parser, &property->text_value);
+}
+
+static int parse_ui_measurement_value(Parser *parser,
+                                      ZSharpUIProperty *property) {
+    if (!consume_signed_number_text(parser, &property->text_value)) return 0;
+    property->unit = ZUI_UNIT_ZU;
+    if (match_word(parser, "zu")) {
+        property->unit = ZUI_UNIT_ZU;
+    } else if (match_word(parser, "px")) {
+        property->unit = ZUI_UNIT_PX;
+    }
+    return 1;
+}
+
+static int parse_ui_identifier_value(Parser *parser,
+                                     ZSharpUIProperty *property) {
+    property->text_value = consume_name(parser, "a UI option name");
+    return property->text_value != NULL;
+}
+
+static int parse_ui_identifier_array(Parser *parser,
+                                     ZSharpUIProperty *property) {
+    if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
+                      "'[' before the option list")) return 0;
+    if (parser->current.type != ZTOKEN_RIGHT_BRACKET) {
+        do {
+            char *item = consume_name(parser, "an option name");
+            if (item == NULL || !append_ui_item(parser, property, item)) {
+                return 0;
+            }
+        } while (match_type(parser, ZTOKEN_COMMA));
+    }
+    return consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                        "']' after the option list");
+}
+
+static int parse_ui_empty_array(Parser *parser) {
+    if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
+                      "'[' before the empty runtime value")) return 0;
+    if (parser->current.type != ZTOKEN_RIGHT_BRACKET) {
+        fail_at(parser, &parser->current,
+                "'contents' is runtime-owned and must start as []");
+        return 0;
+    }
+    return consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                        "']' after the empty runtime value");
+}
+
+static int parse_callback_path(Parser *parser, ZSharpUIProperty *property) {
+    char *parts[4] = {0};
+    size_t count = 0;
+    size_t length = 0;
+    size_t index;
+    char *output;
+    char *cursor;
+    if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
+                      "'[' before the click target")) return 0;
+    if (parser->current.type == ZTOKEN_RIGHT_BRACKET) {
+        property->text_value = zsharp_copy_text("", 0);
+        if (property->text_value == NULL) {
+            fail_at(parser, &parser->current, "out of memory");
+            return 0;
+        }
+        return consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "']' after the empty click target");
+    }
+    do {
+        if (count == 4) {
+            fail_at(parser, &parser->current,
+                    "a click target has at most Project:File:Room:Function");
+            break;
+        }
+        parts[count++] = consume_name(parser, "a click target name");
+    } while (!parser->failed && match_type(parser, ZTOKEN_COLON));
+    if (!parser->failed && count < 3) {
+        fail_at(parser, &parser->current,
+                "a click target must be File:Room:Function or "
+                "Project:File:Room:Function");
+    }
+    if (!parser->failed) {
+        consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                     "']' after the click target");
+    }
+    if (parser->failed) {
+        for (index = 0; index < count; index++) free(parts[index]);
+        return 0;
+    }
+    for (index = 0; index < count; index++) {
+        length += strlen(parts[index]) + (index > 0 ? 1u : 0u);
+    }
+    output = (char *)malloc(length + 1);
+    if (output == NULL) {
+        for (index = 0; index < count; index++) free(parts[index]);
+        fail_at(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    cursor = output;
+    for (index = 0; index < count; index++) {
+        size_t part_length = strlen(parts[index]);
+        if (index > 0) *cursor++ = ':';
+        memcpy(cursor, parts[index], part_length);
+        cursor += part_length;
+        free(parts[index]);
+    }
+    *cursor = '\0';
+    property->text_value = output;
+    return 1;
+}
+
+static int parse_click_field(Parser *parser, ZSharpUIElement *element) {
+    int seen_left = 0;
+    int seen_right = 0;
+    if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
+                      "'[' after 'Click'")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_BRACKET) {
+        const char *name;
+        ZSharpUIProperty *property;
+        if (match_word(parser, "left")) {
+            if (seen_left) {
+                fail_at(parser, &parser->current,
+                        "duplicate left click target");
+                return 0;
+            }
+            seen_left = 1;
+            name = "left";
+        } else if (match_word(parser, "right")) {
+            if (seen_right) {
+                fail_at(parser, &parser->current,
+                        "duplicate right click target");
+                return 0;
+            }
+            seen_right = 1;
+            name = "right";
+        } else {
+            fail_at(parser, &parser->current,
+                    "expected 'left' or 'right' inside Click");
+            return 0;
+        }
+        if (!consume_type(parser, ZTOKEN_COLON,
+                          "':' after the mouse button")) return 0;
+        property = add_ui_property(parser, element, name,
+                                   ZUI_PROPERTY_CALLBACK);
+        if (property == NULL || !parse_callback_path(parser, property) ||
+            !consume_type(parser, ZTOKEN_COLON,
+                          "':' after the click target")) return 0;
+    }
+    if (!parser->failed && (!seen_left || !seen_right)) {
+        fail_at(parser, &parser->current,
+                "Click must define both left and right targets; use [] for "
+                "an unused target");
+        return 0;
+    }
+    return consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                        "']' after Click") &&
+           consume_type(parser, ZTOKEN_COLON, "':' after Click");
+}
+
+static int field_is_measurement(const char *name) {
+    return strcmp(name, "width") == 0 || strcmp(name, "height") == 0 ||
+           strcmp(name, "locationX") == 0 ||
+           strcmp(name, "locationY") == 0;
+}
+
+static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
+    char *name;
+    ZSharpUIProperty *property;
+    ZSharpUIPropertyType type = ZUI_PROPERTY_TEXT;
+    int valid = 0;
+    if (element->type == ZUI_BUTTON && match_word(parser, "Click")) {
+        return parse_click_field(parser, element);
+    }
+    name = consume_name(parser, "a UI field name");
+    if (name == NULL) return 0;
+    if (strcmp(name, "heigh") == 0) {
+        fail_at(parser, &parser->current,
+                "unknown UI field 'heigh'; use 'height'");
+        free(name);
+        return 0;
+    }
+    if (element->type == ZUI_DESIGN) {
+        if (strcmp(name, "title") == 0 || strcmp(name, "icon") == 0) {
+            type = ZUI_PROPERTY_TEXT;
+            valid = 1;
+        } else if (strcmp(name, "scalable") == 0) {
+            type = ZUI_PROPERTY_STATUS;
+            valid = 1;
+        } else if (strcmp(name, "background") == 0) {
+            type = ZUI_PROPERTY_COLOR;
+            valid = 1;
+        } else if (field_is_measurement(name)) {
+            type = ZUI_PROPERTY_MEASUREMENT;
+            valid = 1;
+        }
+    } else if (element->type == ZUI_TEXT) {
+        if (strcmp(name, "content") == 0) {
+            type = ZUI_PROPERTY_TEXT;
+            valid = 1;
+        } else if (strcmp(name, "color") == 0) {
+            type = ZUI_PROPERTY_COLOR;
+            valid = 1;
+        } else if (field_is_measurement(name)) {
+            type = ZUI_PROPERTY_MEASUREMENT;
+            valid = 1;
+        }
+    } else if (element->type == ZUI_BUTTON) {
+        if (strcmp(name, "text") == 0) {
+            type = ZUI_PROPERTY_TEXT;
+            valid = 1;
+        } else if (strcmp(name, "textColor") == 0 ||
+                   strcmp(name, "buttonColor") == 0) {
+            type = ZUI_PROPERTY_COLOR;
+            valid = 1;
+        } else if (field_is_measurement(name)) {
+            type = ZUI_PROPERTY_MEASUREMENT;
+            valid = 1;
+        }
+    } else if (element->type == ZUI_IMAGE) {
+        if (strcmp(name, "file") == 0) {
+            type = ZUI_PROPERTY_TEXT;
+            valid = 1;
+        } else if (field_is_measurement(name)) {
+            type = ZUI_PROPERTY_MEASUREMENT;
+            valid = 1;
+        }
+    } else if (element->type == ZUI_TEXT_INPUT) {
+        if (strcmp(name, "display") == 0) {
+            type = ZUI_PROPERTY_TEXT;
+            valid = 1;
+        } else if (strcmp(name, "type") == 0) {
+            type = ZUI_PROPERTY_IDENTIFIER;
+            valid = 1;
+        } else if (strcmp(name, "supportedTypes") == 0) {
+            type = ZUI_PROPERTY_IDENTIFIER_ARRAY;
+            valid = 1;
+        } else if (strcmp(name, "contents") == 0) {
+            type = ZUI_PROPERTY_EMPTY_ARRAY;
+            valid = 1;
+        } else if (field_is_measurement(name)) {
+            type = ZUI_PROPERTY_MEASUREMENT;
+            valid = 1;
+        }
+    }
+    if (!valid) {
+        fail_at(parser, &parser->current, "unknown %s UI field '%s'",
+                element->type == ZUI_DESIGN ? "design" :
+                element->type == ZUI_TEXT ? "text" :
+                element->type == ZUI_BUTTON ? "button" :
+                element->type == ZUI_IMAGE ? "image" : "textInput",
+                name);
+        free(name);
+        return 0;
+    }
+    if (!consume_type(parser, ZTOKEN_COLON, "':' after the UI field name")) {
+        free(name);
+        return 0;
+    }
+    property = add_ui_property(parser, element, name, type);
+    free(name);
+    if (property == NULL) return 0;
+    if ((type == ZUI_PROPERTY_TEXT &&
+         !parse_ui_text_value(parser, property)) ||
+        (type == ZUI_PROPERTY_STATUS &&
+         !parse_ui_status_value(parser, property)) ||
+        (type == ZUI_PROPERTY_COLOR &&
+         !parse_ui_color_value(parser, property)) ||
+        (type == ZUI_PROPERTY_MEASUREMENT &&
+         !parse_ui_measurement_value(parser, property)) ||
+        (type == ZUI_PROPERTY_IDENTIFIER &&
+         !parse_ui_identifier_value(parser, property)) ||
+        (type == ZUI_PROPERTY_IDENTIFIER_ARRAY &&
+         !parse_ui_identifier_array(parser, property)) ||
+        (type == ZUI_PROPERTY_EMPTY_ARRAY && !parse_ui_empty_array(parser))) {
+        return 0;
+    }
+    if (type == ZUI_PROPERTY_COLOR && property->text_value != NULL &&
+        (strncmp(property->text_value, "linear-gradient(", 16) == 0 ||
+         strncmp(property->text_value, "radial-gradient(", 16) == 0) &&
+        !(element->type == ZUI_DESIGN &&
+          strcmp(property->name, "background") == 0)) {
+        fail_at(parser, &parser->current,
+                "gradients are supported by design backgrounds");
+        return 0;
+    }
+    if (type == ZUI_PROPERTY_MEASUREMENT &&
+        (strcmp(property->name, "width") == 0 ||
+         strcmp(property->name, "height") == 0) &&
+        zsharp_decimal_compare(property->text_value, "0") <= 0) {
+        fail_at(parser, &parser->current,
+                "UI width and height must be greater than zero");
+        return 0;
+    }
+    return consume_type(parser, ZTOKEN_COLON, "':' after the UI field value");
+}
+
+static int require_ui_field(Parser *parser, ZSharpUIElement *element,
+                            const char *name) {
+    if (find_ui_property(element, name) != NULL) return 1;
+    fail_at(parser, &parser->current, "%s '%s' requires the '%s' field",
+            element->type == ZUI_DESIGN ? "design" :
+            element->type == ZUI_TEXT ? "text" :
+            element->type == ZUI_BUTTON ? "button" :
+            element->type == ZUI_IMAGE ? "image" : "textInput",
+            element->name, name);
+    return 0;
+}
+
+static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
+    ZSharpUIProperty *input_type;
+    ZSharpUIProperty *supported;
+    if (element->type == ZUI_DESIGN) {
+        return require_ui_field(parser, element, "title");
+    }
+    if (element->type == ZUI_TEXT) {
+        return require_ui_field(parser, element, "content");
+    }
+    if (element->type == ZUI_BUTTON) {
+        return require_ui_field(parser, element, "text") &&
+               require_ui_field(parser, element, "width") &&
+               require_ui_field(parser, element, "height");
+    }
+    if (element->type == ZUI_IMAGE) {
+        return require_ui_field(parser, element, "file") &&
+               require_ui_field(parser, element, "width") &&
+               require_ui_field(parser, element, "height");
+    }
+    if (!require_ui_field(parser, element, "display") ||
+        !require_ui_field(parser, element, "type") ||
+        !require_ui_field(parser, element, "width") ||
+        !require_ui_field(parser, element, "height")) return 0;
+    input_type = find_ui_property(element, "type");
+    supported = find_ui_property(element, "supportedTypes");
+    if (strcmp(input_type->text_value, "text") != 0 &&
+        strcmp(input_type->text_value, "image") != 0) {
+        fail_at(parser, &parser->current,
+                "textInput type must be 'text' or 'image'");
+        return 0;
+    }
+    if (strcmp(input_type->text_value, "image") == 0 &&
+        (supported == NULL || supported->item_count == 0)) {
+        fail_at(parser, &parser->current,
+                "image textInput '%s' requires supportedTypes", element->name);
+        return 0;
+    }
+    if (strcmp(input_type->text_value, "text") == 0 && supported != NULL) {
+        fail_at(parser, &parser->current,
+                "supportedTypes is only valid for an image textInput");
+        return 0;
+    }
+    if (find_ui_property(element, "contents") == NULL &&
+        add_ui_property(parser, element, "contents",
+                        ZUI_PROPERTY_EMPTY_ARRAY) == NULL) return 0;
+    return 1;
+}
+
+static int parse_ui_element(Parser *parser, ZSharpWindow *window) {
+    int is_public;
+    ZSharpUIElementType type;
+    ZSharpUIElement *element;
+    char *variant = NULL;
+    size_t index;
+    if (!parse_visibility(parser, &is_public)) return 0;
+    if (match_word(parser, "design")) {
+        type = ZUI_DESIGN;
+    } else if (match_word(parser, "text")) {
+        type = ZUI_TEXT;
+        if (match_type(parser, ZTOKEN_LEFT_BRACKET)) {
+            ZSharpToken token = parser->current;
+            if (!token_equals_ignore_case(&token, "title") &&
+                !token_equals_ignore_case(&token, "subtitle") &&
+                !token_equals_ignore_case(&token, "header") &&
+                !token_equals_ignore_case(&token, "subheader") &&
+                !token_equals_ignore_case(&token, "paragraph")) {
+                fail_at(parser, &token,
+                        "text type must be title, subtitle, header, "
+                        "subheader, or paragraph");
+                return 0;
+            }
+            variant = copy_token_lower(parser, &token);
+            advance_token(parser);
+            if (!consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                              "']' after the text type")) {
+                free(variant);
+                return 0;
+            }
+        } else {
+            variant = zsharp_copy_text("paragraph", 9);
+            if (variant == NULL) {
+                fail_at(parser, &parser->current, "out of memory");
+                return 0;
+            }
+        }
+    } else if (match_word(parser, "button")) {
+        type = ZUI_BUTTON;
+    } else if (match_word(parser, "image")) {
+        type = ZUI_IMAGE;
+    } else if (match_word(parser, "textInput")) {
+        type = ZUI_TEXT_INPUT;
+    } else {
+        fail_at(parser, &parser->current,
+                "expected design, text, button, image, or textInput");
+        return 0;
+    }
+    element = zsharp_window_add_element(window);
+    if (element == NULL) {
+        free(variant);
+        fail_at(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    element->is_public = is_public;
+    element->type = type;
+    element->variant = variant;
+    element->name = consume_name(parser, "a UI element name");
+    if (element->name == NULL) return 0;
+    for (index = 0; index + 1 < window->element_count; index++) {
+        if (strcmp(window->elements[index].name, element->name) == 0) {
+            fail_at(parser, &parser->current,
+                    "duplicate UI element '%s'", element->name);
+            return 0;
+        }
+        if (type == ZUI_DESIGN &&
+            window->elements[index].type == ZUI_DESIGN) {
+            fail_at(parser, &parser->current,
+                    "a window can contain only one design");
+            return 0;
+        }
+    }
+    if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
+                      "'[' after the UI element name") ||
+        !consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                      "']' after the UI element options") ||
+        !consume_type(parser, ZTOKEN_LEFT_PAREN,
+                      "'(' before the UI element body")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
+           parser->current.type != ZTOKEN_EOF) {
+        if (!parse_ui_field(parser, element)) return 0;
+    }
+    return consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                        "')' after the UI element body") &&
+           finish_ui_element(parser, element);
+}
+
+static int parse_window(Parser *parser, ZSharpProgram *program) {
+    int is_public;
+    size_t design_count = 0;
+    size_t index;
+    ZSharpWindow *window = &program->window;
+    if (!parse_visibility(parser, &is_public)) return 0;
+    if (!consume_word(parser, "Window")) return 0;
+    program->has_window = 1;
+    window->is_public = is_public;
+    window->name = consume_name(parser, "a window name");
+    if (window->name == NULL ||
+        !consume_type(parser, ZTOKEN_LEFT_BRACKET,
+                      "'[' after the window name") ||
+        !consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                      "']' after the window options") ||
+        !consume_type(parser, ZTOKEN_LEFT_PAREN,
+                      "'(' before the window body")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
+           parser->current.type != ZTOKEN_EOF) {
+        if (match_word(parser, "import")) {
+            if (!parse_window_import(parser, window)) return 0;
+        } else if (!parse_ui_element(parser, window)) {
+            return 0;
+        }
+    }
+    if (!consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                      "')' after the window body")) return 0;
+    for (index = 0; index < window->element_count; index++) {
+        if (window->elements[index].type == ZUI_DESIGN) design_count++;
+    }
+    if (design_count != 1) {
+        fail_at(parser, &parser->current,
+                "a window must contain exactly one design");
+        return 0;
+    }
     return 1;
 }
 
@@ -1884,6 +2798,18 @@ static int parse_room(Parser *parser, ZSharpProgram *program,
             if (!parse_import(parser, room)) return 0;
         } else if (begins_room(parser)) {
             if (!parse_room(parser, program, room->qualified_name)) return 0;
+        } else if (zsharp_token_equals(&parser->current, "Print") ||
+                   zsharp_token_equals(&parser->current, "Function") ||
+                   zsharp_token_equals(&parser->current, "feed") ||
+                   zsharp_token_equals(&parser->current, "if") ||
+                   zsharp_token_equals(&parser->current, "loop") ||
+                   zsharp_token_equals(&parser->current, "continue") ||
+                   zsharp_token_equals(&parser->current, "wait") ||
+                   zsharp_token_equals(&parser->current, "delay")) {
+            fail_at(parser, &parser->current,
+                    "executable statements must be inside a brain function; "
+                    "for startup code, declare 'noticed brain Start[]'");
+            return 0;
         } else if (!parse_member(parser, room)) {
             return 0;
         }
@@ -1913,12 +2839,40 @@ int zsharp_parse_source(const char *source, const char *source_name,
     consume_word(&parser, "type");
     consume_type(&parser, ZTOKEN_DOT, "'.' after 'type'");
     consume_word(&parser, "script");
-    while (!parser.failed && parser.current.type != ZTOKEN_EOF) {
-        parse_room(&parser, program, NULL);
+    if (match_type(&parser, ZTOKEN_COLON)) {
+        if (match_word(&parser, "window")) {
+            program->script_type = ZSCRIPT_WINDOW;
+        } else if (parser.current.type == ZTOKEN_NUMBER &&
+                   parser.current.length == 1 &&
+                   parser.current.start[0] == '2') {
+            advance_token(&parser);
+            consume_word(&parser, "D");
+            program->script_type = ZSCRIPT_2D;
+        } else if (parser.current.type == ZTOKEN_NUMBER &&
+                   parser.current.length == 1 &&
+                   parser.current.start[0] == '3') {
+            advance_token(&parser);
+            consume_word(&parser, "D");
+            program->script_type = ZSCRIPT_3D;
+        } else {
+            fail_at(&parser, &parser.current,
+                    "expected 'window', '2D', or '3D' after the script ':'");
+        }
     }
-    if (!parser.failed && program->room_count == 0) {
-        fail_at(&parser, &parser.current,
-                "a script must contain at least one room");
+    if (!parser.failed && program->script_type == ZSCRIPT_WINDOW) {
+        parse_window(&parser, program);
+        if (!parser.failed && parser.current.type != ZTOKEN_EOF) {
+            fail_at(&parser, &parser.current,
+                    "a window file can contain exactly one Window");
+        }
+    } else {
+        while (!parser.failed && parser.current.type != ZTOKEN_EOF) {
+            parse_room(&parser, program, NULL);
+        }
+        if (!parser.failed && program->room_count == 0) {
+            fail_at(&parser, &parser.current,
+                    "a script must contain at least one room");
+        }
     }
     if (parser.failed) {
         zsharp_program_free(program);

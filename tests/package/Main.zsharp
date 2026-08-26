@@ -1,0 +1,19 @@
+zsharp = type.script:window
+
+noticed Window Main[] (
+ import ZSharp.Window.Design():
+ import ZSharp.Window.Text():
+
+ noticed design Design[] (
+  title: "Packaged Z# Window":
+  width: 80zu:
+  height: 50zu:
+  scalable: dead:
+  background: #20242A:
+ )
+
+ noticed text[Header] Header1[] (
+  content: "This window came from a .zapp":
+  color: #FFFFFF:
+ )
+)

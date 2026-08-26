@@ -1,0 +1,7 @@
+zsharp = type.script
+
+noticed room Disabled[] (
+ noticed brain Start[DR] (
+  Print("DR start ran"):
+ )
+)

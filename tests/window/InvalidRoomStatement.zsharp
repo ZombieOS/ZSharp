@@ -1,0 +1,8 @@
+zsharp = type.script
+
+noticed room Outer[] (
+ noticed room Start[] (
+  loop (
+  )
+ )
+)

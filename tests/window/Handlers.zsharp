@@ -1,0 +1,7 @@
+zsharp = type.script
+
+noticed room Actions[] (
+ noticed brain OnPlay[] (
+  Print("Play clicked"):
+ )
+)

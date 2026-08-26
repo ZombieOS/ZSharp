@@ -2,10 +2,21 @@
 
 #include "decimal.h"
 #include "project.h"
+#include "window.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
+#endif
 
 #define ZSHARP_MAX_CALL_DEPTH 256
 
@@ -50,7 +61,44 @@ typedef struct RuntimeModule {
 typedef struct RuntimeModuleCache {
     RuntimeModule *modules;
     size_t module_count;
+    const ZSharpWindowRuntime *window_runtime;
 } RuntimeModuleCache;
+
+static int runtime_wait(const char *milliseconds, char *error,
+                        size_t error_size) {
+    char *end = NULL;
+    double value = strtod(milliseconds == NULL ? "" : milliseconds, &end);
+    if (end == milliseconds || end == NULL || *end != '\0' ||
+        !isfinite(value) || value < 0.0 || value > 604800000.0) {
+        snprintf(error, error_size,
+                 "wait/delay must be between 0ms and 604800000ms");
+        return 0;
+    }
+#ifdef _WIN32
+    {
+        unsigned long duration = (unsigned long)(value + 0.5);
+        Sleep(duration);
+    }
+#else
+    {
+        struct timespec duration;
+        duration.tv_sec = (time_t)(value / 1000.0);
+        duration.tv_nsec = (long)((value -
+            (double)duration.tv_sec * 1000.0) * 1000000.0 + 0.5);
+        if (duration.tv_nsec >= 1000000000L) {
+            duration.tv_sec++;
+            duration.tv_nsec -= 1000000000L;
+        }
+        while (nanosleep(&duration, &duration) != 0) {
+            if (errno != EINTR) {
+                snprintf(error, error_size, "wait/delay failed");
+                return 0;
+            }
+        }
+    }
+#endif
+    return 1;
+}
 
 static RuntimeObject *create_object_from_values(
     ZSharpProgram *program, const char *object_type,
@@ -396,20 +444,15 @@ static int initialize_program_objects(
     size_t error_size);
 static void cleanup_program_objects(ZSharpProgram *program);
 
-static ZSharpProgram *load_project_module(
-    RuntimeModuleCache *cache, const char *file_name, RuntimeHeap *heap,
+static ZSharpProgram *load_project_module_path(
+    RuntimeModuleCache *cache, char *source_path, RuntimeHeap *heap,
     const char *project_root, const ZSharpProviderBinding *providers,
     size_t provider_count, unsigned depth, char *error, size_t error_size) {
-    char *source_path = NULL;
     size_t index;
     RuntimeModule *resized;
     RuntimeModule *module;
     ZSharpDiagnostic diagnostic;
     char load_error[512] = {0};
-    if (!zsharp_project_find_source(project_root, file_name, &source_path,
-                                    error, error_size)) {
-        return NULL;
-    }
     for (index = 0; index < cache->module_count; index++) {
         if (strcmp(cache->modules[index].source_path, source_path) == 0) {
             free(source_path);
@@ -450,6 +493,20 @@ static ZSharpProgram *load_project_module(
         return NULL;
     }
     return module->program;
+}
+
+static ZSharpProgram *load_project_module(
+    RuntimeModuleCache *cache, const char *file_name, RuntimeHeap *heap,
+    const char *project_root, const ZSharpProviderBinding *providers,
+    size_t provider_count, unsigned depth, char *error, size_t error_size) {
+    char *source_path = NULL;
+    if (!zsharp_project_find_source(project_root, file_name, &source_path,
+                                    error, error_size)) {
+        return NULL;
+    }
+    return load_project_module_path(
+        cache, source_path, heap, project_root, providers, provider_count,
+        depth, error, error_size);
 }
 
 static int resolve_room_variable(ZSharpProgram *target_program,
@@ -940,6 +997,15 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
         RuntimeValue value;
         memset(&value, 0, sizeof(value));
 
+        if (module_cache->window_runtime != NULL &&
+            module_cache->window_runtime->is_cancelled != NULL &&
+            module_cache->window_runtime->is_cancelled(
+                module_cache->window_runtime->state)) {
+            snprintf(error, error_size, "window task stopped");
+            ok = 0;
+            goto done;
+        }
+
         switch (instruction->op) {
             case ZOP_PUSH_NUMBER:
                 value.type = ZVALUE_NUMBER;
@@ -972,6 +1038,61 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 value.type = ZVALUE_NULL;
                 if (!push(stack, stack_capacity, &stack_count, value, error,
                           error_size)) {
+                    ok = 0;
+                    goto done;
+                }
+                break;
+            case ZOP_UI_SET:
+            case ZOP_UI_SET_DYNAMIC: {
+                const char *property_path = instruction->operand;
+                if (instruction->op == ZOP_UI_SET_DYNAMIC) {
+                    if (!pop(stack, &stack_count, &value, error,
+                             error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                    if (value.type != ZVALUE_TEXT || value.text == NULL ||
+                        value.text[0] == '\0') {
+                        snprintf(error, error_size,
+                                 "a window property path alias must contain "
+                                 "text such as "
+                                 "'Startup.Design.background'");
+                        ok = 0;
+                        goto done;
+                    }
+                    property_path = value.text;
+                }
+                if (module_cache->window_runtime == NULL ||
+                    module_cache->window_runtime->set_property == NULL) {
+                    snprintf(error, error_size,
+                             "window properties can only be changed while "
+                             "a window callback is running");
+                    ok = 0;
+                    goto done;
+                }
+                if (!module_cache->window_runtime->set_property(
+                        module_cache->window_runtime->state,
+                        property_path,
+                        (ZSharpWindowValueType)instruction->number_operand,
+                        instruction->call_function,
+                        (ZSharpUIUnit)instruction->index_operand,
+                        error, error_size)) {
+                    ok = 0;
+                    goto done;
+                }
+                break;
+            }
+            case ZOP_DELAY:
+                if (module_cache->window_runtime != NULL &&
+                    module_cache->window_runtime->wait != NULL) {
+                    if (!module_cache->window_runtime->wait(
+                            module_cache->window_runtime->state,
+                            instruction->operand, error, error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                } else if (!runtime_wait(instruction->operand, error,
+                                         error_size)) {
                     ok = 0;
                     goto done;
                 }
@@ -2637,6 +2758,566 @@ static void cleanup_module_cache(RuntimeModuleCache *cache) {
     memset(cache, 0, sizeof(*cache));
 }
 
+typedef struct WindowExecutionContext {
+    ZSharpProgram *program;
+    RuntimeHeap *heap;
+    const char *project_root;
+    const ZSharpProviderBinding *providers;
+    size_t provider_count;
+    RuntimeModuleCache *module_cache;
+    struct WindowTask **tasks;
+    size_t task_count;
+    struct WindowRoomState **room_states;
+    size_t room_state_count;
+    int stopping;
+} WindowExecutionContext;
+
+typedef struct WindowSharedVariable {
+    char *name;
+    ZSharpValueType type;
+    char *text;
+    int32_t number;
+} WindowSharedVariable;
+
+typedef struct WindowRoomState {
+    char *source_path;
+    char *room_name;
+    WindowSharedVariable *variables;
+    size_t variable_count;
+    int initialized;
+#ifdef _WIN32
+    CRITICAL_SECTION mutex;
+#else
+    pthread_mutex_t mutex;
+#endif
+} WindowRoomState;
+
+typedef struct WindowTask {
+    WindowExecutionContext *context;
+    const ZSharpWindowRuntime *runtime;
+    char *source_path;
+    char *room_name;
+    char *function_name;
+    WindowRoomState *room_state;
+    int failed;
+    char error[512];
+#ifdef _WIN32
+    HANDLE thread;
+#else
+    pthread_t thread;
+#endif
+} WindowTask;
+
+static void lock_window_room_state(WindowRoomState *state) {
+#ifdef _WIN32
+    EnterCriticalSection(&state->mutex);
+#else
+    pthread_mutex_lock(&state->mutex);
+#endif
+}
+
+static void unlock_window_room_state(WindowRoomState *state) {
+#ifdef _WIN32
+    LeaveCriticalSection(&state->mutex);
+#else
+    pthread_mutex_unlock(&state->mutex);
+#endif
+}
+
+static WindowRoomState *find_or_add_window_room_state(
+    WindowExecutionContext *context, const char *source_path,
+    const char *room_name, char *error, size_t error_size) {
+    size_t index;
+    WindowRoomState *state;
+    WindowRoomState **resized;
+    for (index = 0; index < context->room_state_count; index++) {
+        state = context->room_states[index];
+        if (strcmp(state->source_path, source_path) == 0 &&
+            strcmp(state->room_name, room_name) == 0) return state;
+    }
+    state = (WindowRoomState *)calloc(1, sizeof(*state));
+    if (state == NULL) goto out_of_memory;
+    state->source_path = zsharp_copy_text(source_path, strlen(source_path));
+    state->room_name = zsharp_copy_text(room_name, strlen(room_name));
+    if (state->source_path == NULL || state->room_name == NULL) {
+        free(state->source_path);
+        free(state->room_name);
+        free(state);
+        goto out_of_memory;
+    }
+#ifdef _WIN32
+    InitializeCriticalSection(&state->mutex);
+#else
+    if (pthread_mutex_init(&state->mutex, NULL) != 0) {
+        free(state->source_path);
+        free(state->room_name);
+        free(state);
+        snprintf(error, error_size,
+                 "could not initialize Z# window task state");
+        return NULL;
+    }
+#endif
+    resized = (WindowRoomState **)realloc(
+        context->room_states,
+        (context->room_state_count + 1) * sizeof(*context->room_states));
+    if (resized == NULL) {
+#ifdef _WIN32
+        DeleteCriticalSection(&state->mutex);
+#else
+        pthread_mutex_destroy(&state->mutex);
+#endif
+        free(state->source_path);
+        free(state->room_name);
+        free(state);
+        goto out_of_memory;
+    }
+    context->room_states = resized;
+    context->room_states[context->room_state_count++] = state;
+    return state;
+
+out_of_memory:
+    snprintf(error, error_size, "out of memory");
+    return NULL;
+}
+
+static int restore_window_room_state(WindowRoomState *state,
+                                     ZSharpRoom *room, char *error,
+                                     size_t error_size) {
+    size_t index;
+    if (!state->initialized) return 1;
+    for (index = 0; index < state->variable_count; index++) {
+        WindowSharedVariable *saved = &state->variables[index];
+        ZSharpVariable *variable = find_variable(room, saved->name);
+        char *copy;
+        if (variable == NULL || variable->type != saved->type) continue;
+        if (saved->type == ZVALUE_STATUS) {
+            variable->number_value = saved->number;
+        } else if (saved->type == ZVALUE_NUMBER) {
+            copy = zsharp_copy_text(saved->text, strlen(saved->text));
+            if (copy == NULL) goto out_of_memory;
+            free(variable->number_text);
+            variable->number_text = copy;
+        } else if (saved->type == ZVALUE_TEXT) {
+            copy = zsharp_copy_text(saved->text, strlen(saved->text));
+            if (copy == NULL) goto out_of_memory;
+            free(variable->text_value);
+            variable->text_value = copy;
+        }
+    }
+    return 1;
+
+out_of_memory:
+    snprintf(error, error_size, "out of memory");
+    return 0;
+}
+
+static int save_window_room_state(WindowRoomState *state, ZSharpRoom *room,
+                                  char *error, size_t error_size) {
+    WindowSharedVariable *variables = NULL;
+    size_t count = 0;
+    size_t index;
+    for (index = 0; index < room->variable_count; index++) {
+        ZSharpVariable *variable = &room->variables[index];
+        WindowSharedVariable *resized;
+        WindowSharedVariable *saved;
+        const char *text = NULL;
+        if (variable->type != ZVALUE_NUMBER && variable->type != ZVALUE_TEXT &&
+            variable->type != ZVALUE_STATUS) continue;
+        resized = (WindowSharedVariable *)realloc(
+            variables, (count + 1) * sizeof(*variables));
+        if (resized == NULL) goto out_of_memory;
+        variables = resized;
+        saved = &variables[count++];
+        memset(saved, 0, sizeof(*saved));
+        saved->name = zsharp_copy_text(variable->name, strlen(variable->name));
+        saved->type = variable->type;
+        saved->number = variable->number_value;
+        if (variable->type == ZVALUE_NUMBER) text = variable->number_text;
+        else if (variable->type == ZVALUE_TEXT) text = variable->text_value;
+        if (saved->name == NULL) goto out_of_memory;
+        if (text != NULL) {
+            saved->text = zsharp_copy_text(text, strlen(text));
+            if (saved->text == NULL) goto out_of_memory;
+        }
+    }
+    for (index = 0; index < state->variable_count; index++) {
+        free(state->variables[index].name);
+        free(state->variables[index].text);
+    }
+    free(state->variables);
+    state->variables = variables;
+    state->variable_count = count;
+    state->initialized = 1;
+    return 1;
+
+out_of_memory:
+    for (index = 0; index < count; index++) {
+        free(variables[index].name);
+        free(variables[index].text);
+    }
+    free(variables);
+    snprintf(error, error_size, "out of memory");
+    return 0;
+}
+
+static void cleanup_window_room_states(WindowExecutionContext *context) {
+    size_t index;
+    for (index = 0; index < context->room_state_count; index++) {
+        WindowRoomState *state = context->room_states[index];
+        size_t variable_index;
+        for (variable_index = 0; variable_index < state->variable_count;
+             variable_index++) {
+            free(state->variables[variable_index].name);
+            free(state->variables[variable_index].text);
+        }
+        free(state->variables);
+#ifdef _WIN32
+        DeleteCriticalSection(&state->mutex);
+#else
+        pthread_mutex_destroy(&state->mutex);
+#endif
+        free(state->source_path);
+        free(state->room_name);
+        free(state);
+    }
+    free(context->room_states);
+    context->room_states = NULL;
+    context->room_state_count = 0;
+}
+
+static int window_task_cancelled(const WindowTask *task) {
+    return task->runtime != NULL && task->runtime->is_cancelled != NULL &&
+           task->runtime->is_cancelled(task->runtime->state);
+}
+
+static void run_window_task(WindowTask *task) {
+    ZSharpProgram program;
+    ZSharpDiagnostic diagnostic;
+    RuntimeHeap heap;
+    RuntimeModuleCache module_cache;
+    ZSharpRoom *room;
+    ZSharpFunction *function;
+    RuntimeValue ignored_return;
+    int ignored_did_return = 0;
+    char parse_error[512] = {0};
+    int initialized = 0;
+    int state_locked = 0;
+    int ok = 0;
+    memset(&program, 0, sizeof(program));
+    memset(&diagnostic, 0, sizeof(diagnostic));
+    memset(&heap, 0, sizeof(heap));
+    memset(&module_cache, 0, sizeof(module_cache));
+    module_cache.window_runtime = task->runtime;
+    if (!zsharp_project_parse_file(task->source_path, &program, &diagnostic,
+                                   parse_error, sizeof(parse_error))) {
+        if (diagnostic.message[0] != '\0') {
+            snprintf(task->error, sizeof(task->error), "%s:%u:%u: %s",
+                     task->source_path, diagnostic.line, diagnostic.column,
+                     diagnostic.message);
+        } else {
+            snprintf(task->error, sizeof(task->error), "%s",
+                     parse_error[0] == '\0' ? "could not load window task"
+                                             : parse_error);
+        }
+        goto done;
+    }
+    if (!initialize_program_objects(
+            &program, &heap, task->context->project_root,
+            task->context->providers, task->context->provider_count,
+            &module_cache, 1, task->error, sizeof(task->error))) {
+        goto done;
+    }
+    initialized = 1;
+    room = find_room(&program, task->room_name);
+    function = room == NULL ? NULL : find_function(room, task->function_name);
+    if (room == NULL || function == NULL) {
+        snprintf(task->error, sizeof(task->error),
+                 "window task could not resolve '%s:%s'",
+                 task->room_name, task->function_name);
+        goto done;
+    }
+    lock_window_room_state(task->room_state);
+    state_locked = 1;
+    if (!restore_window_room_state(task->room_state, room, task->error,
+                                   sizeof(task->error))) goto done;
+    ok = execute_function(
+        &program, room, function, NULL, &heap, task->context->project_root,
+        task->context->providers, task->context->provider_count,
+        &module_cache, 1, NULL, 0, NULL, &ignored_return,
+        &ignored_did_return, task->error, sizeof(task->error));
+    if (ok && !save_window_room_state(task->room_state, room, task->error,
+                                      sizeof(task->error))) ok = 0;
+done:
+    if (state_locked) unlock_window_room_state(task->room_state);
+    if (window_task_cancelled(task)) ok = 1;
+    task->failed = !ok;
+    cleanup_module_cache(&module_cache);
+    if (initialized) cleanup_program_objects(&program);
+    zsharp_program_free(&program);
+    heap_free(&heap);
+}
+
+#ifdef _WIN32
+static DWORD WINAPI window_task_entry(LPVOID data) {
+    run_window_task((WindowTask *)data);
+    return 0;
+}
+#else
+static void *window_task_entry(void *data) {
+    run_window_task((WindowTask *)data);
+    return NULL;
+}
+#endif
+
+static int start_window_task(WindowExecutionContext *context,
+                             const ZSharpWindowRuntime *runtime,
+                             const char *source_path, const char *room_name,
+                             const char *function_name, char *error,
+                             size_t error_size) {
+    WindowTask *task;
+    WindowTask **resized;
+    if (context->stopping) {
+        snprintf(error, error_size, "the window is closing");
+        return 0;
+    }
+    task = (WindowTask *)calloc(1, sizeof(*task));
+    if (task == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    task->context = context;
+    task->runtime = runtime;
+    task->source_path = zsharp_copy_text(source_path, strlen(source_path));
+    task->room_name = zsharp_copy_text(room_name, strlen(room_name));
+    task->function_name = zsharp_copy_text(function_name,
+                                           strlen(function_name));
+    task->room_state = find_or_add_window_room_state(
+        context, source_path, room_name, error, error_size);
+    if (task->source_path == NULL || task->room_name == NULL ||
+        task->function_name == NULL || task->room_state == NULL) {
+        free(task->source_path);
+        free(task->room_name);
+        free(task->function_name);
+        free(task);
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    resized = (WindowTask **)realloc(
+        context->tasks, (context->task_count + 1) * sizeof(*context->tasks));
+    if (resized == NULL) {
+        free(task->source_path);
+        free(task->room_name);
+        free(task->function_name);
+        free(task);
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    context->tasks = resized;
+    context->tasks[context->task_count++] = task;
+#ifdef _WIN32
+    task->thread = CreateThread(NULL, 0, window_task_entry, task, 0, NULL);
+    if (task->thread == NULL) {
+#else
+    if (pthread_create(&task->thread, NULL, window_task_entry, task) != 0) {
+#endif
+        context->task_count--;
+        free(task->source_path);
+        free(task->room_name);
+        free(task->function_name);
+        free(task);
+        snprintf(error, error_size, "could not start a Z# runtime task");
+        return 0;
+    }
+    return 1;
+}
+
+static int stop_window_tasks(WindowExecutionContext *context, char *error,
+                             size_t error_size) {
+    size_t index;
+    int ok = 1;
+    context->stopping = 1;
+    for (index = 0; index < context->task_count; index++) {
+        WindowTask *task = context->tasks[index];
+#ifdef _WIN32
+        WaitForSingleObject(task->thread, INFINITE);
+        CloseHandle(task->thread);
+#else
+        pthread_join(task->thread, NULL);
+#endif
+        if (ok && task->failed) {
+            snprintf(error, error_size, "%s",
+                     task->error[0] == '\0' ? "a Z# runtime task failed"
+                                             : task->error);
+            ok = 0;
+        }
+        free(task->source_path);
+        free(task->room_name);
+        free(task->function_name);
+        free(task);
+    }
+    free(context->tasks);
+    context->tasks = NULL;
+    context->task_count = 0;
+    cleanup_window_room_states(context);
+    return ok;
+}
+
+static int split_window_target(const char *target, char **storage,
+                               char **parts, size_t *count_output) {
+    char *copy = zsharp_copy_text(target, strlen(target));
+    char *cursor;
+    size_t count = 1;
+    if (copy == NULL) return 0;
+    parts[0] = copy;
+    for (cursor = copy; *cursor != '\0'; cursor++) {
+        if (*cursor == ':') {
+            *cursor = '\0';
+            if (count == 4 || cursor[1] == '\0') {
+                free(copy);
+                return 0;
+            }
+            parts[count++] = cursor + 1;
+        }
+    }
+    if (count != 3 && count != 4) {
+        free(copy);
+        return 0;
+    }
+    *storage = copy;
+    *count_output = count;
+    return 1;
+}
+
+static int execute_project_starts(WindowExecutionContext *context,
+                                  const ZSharpWindowRuntime *runtime,
+                                  char *error, size_t error_size) {
+    ZSharpSourceList sources;
+    size_t source_index;
+    int ok = 1;
+    if (!zsharp_project_list_sources(context->project_root, &sources,
+                                     error, error_size)) return 0;
+    for (source_index = 0; ok && source_index < sources.count;
+         source_index++) {
+        char *source_path = sources.items[source_index];
+        ZSharpProgram *program;
+        size_t room_index;
+        sources.items[source_index] = NULL;
+        program = load_project_module_path(
+            context->module_cache, source_path, context->heap,
+            context->project_root, context->providers,
+            context->provider_count, 1, error, error_size);
+        if (program == NULL) {
+            ok = 0;
+            break;
+        }
+        if (program->script_type == ZSCRIPT_WINDOW) continue;
+        for (room_index = 0; ok && room_index < program->room_count;
+             room_index++) {
+            ZSharpRoom *room = &program->rooms[room_index];
+            size_t function_index;
+            for (function_index = 0;
+                 function_index < room->function_count; function_index++) {
+                ZSharpFunction *function = &room->functions[function_index];
+                if (strcmp(function->name, "Start") != 0 ||
+                    function->disable_auto_run) continue;
+                if (!start_window_task(
+                        context, runtime, source_path,
+                        room->qualified_name == NULL ? room->name
+                                                     : room->qualified_name,
+                        function->name, error, error_size)) {
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+    }
+    zsharp_project_source_list_free(&sources);
+    return ok;
+}
+
+static int execute_window_callback(void *user_data, const char *target,
+                                   const ZSharpWindowRuntime *runtime,
+                                   char *error, size_t error_size) {
+    WindowExecutionContext *context = (WindowExecutionContext *)user_data;
+    char *storage = NULL;
+    char *parts[4] = {0};
+    size_t count = 0;
+    const char *file;
+    const char *room_name;
+    const char *function_name;
+    ZSharpProgram *target_program;
+    ZSharpRoom *room;
+    ZSharpFunction *function;
+    int ok;
+    if (strcmp(target, ZSHARP_WINDOW_PROJECT_STARTS) == 0) {
+        return execute_project_starts(context, runtime, error, error_size);
+    }
+    if (strcmp(target, ZSHARP_WINDOW_TASKS_STOP) == 0) {
+        return stop_window_tasks(context, error, error_size);
+    }
+    if (!split_window_target(target, &storage, parts, &count)) {
+        snprintf(error, error_size, "invalid window callback '%s'", target);
+        return 0;
+    }
+    if (count == 4 &&
+        (context->program->project_id == NULL ||
+         strcmp(parts[0], context->program->project_id) != 0)) {
+        const ZSharpProviderBinding *binding = find_provider(
+            context->providers, context->provider_count, parts[0]);
+        if (binding == NULL || binding->provider->call_function == NULL) {
+            snprintf(error, error_size,
+                     "external callback project '%s' has no function "
+                     "provider", parts[0]);
+            free(storage);
+            return 0;
+        }
+        ok = binding->provider->call_function(
+            binding->provider->user_data, parts[1], parts[2], parts[3],
+            error, error_size);
+        free(storage);
+        return ok;
+    }
+    file = parts[count - 3];
+    room_name = parts[count - 2];
+    function_name = parts[count - 1];
+    target_program = load_project_module(
+        context->module_cache, file, context->heap, context->project_root,
+        context->providers, context->provider_count, 1, error, error_size);
+    if (target_program == NULL) {
+        free(storage);
+        return 0;
+    }
+    room = find_room(target_program, room_name);
+    function = room == NULL ? NULL : find_function(room, function_name);
+    if (room == NULL || function == NULL) {
+        snprintf(error, error_size,
+                 "window callback could not resolve '%s'", target);
+        free(storage);
+        return 0;
+    }
+    if (function->parameter_count != 0) {
+        snprintf(error, error_size,
+                 "window callback '%s' must not require arguments", target);
+        free(storage);
+        return 0;
+    }
+    {
+        char *source_path = NULL;
+        if (!zsharp_project_find_source(context->project_root, file,
+                                        &source_path, error, error_size)) {
+            free(storage);
+            return 0;
+        }
+        ok = start_window_task(
+            context, runtime, source_path,
+            room->qualified_name == NULL ? room->name : room->qualified_name,
+            function->name, error, error_size);
+        free(source_path);
+    }
+    free(storage);
+    return ok;
+}
+
 int zsharp_vm_run_with_providers(
     ZSharpProgram *program, const char *project_root,
     const ZSharpProviderBinding *providers, size_t provider_count,
@@ -2653,6 +3334,24 @@ int zsharp_vm_run_with_providers(
         cleanup_module_cache(&module_cache);
         heap_free(&heap);
         return 0;
+    }
+    if (program->script_type == ZSCRIPT_WINDOW) {
+        WindowExecutionContext context;
+        context.program = program;
+        context.heap = &heap;
+        context.project_root = project_root;
+        context.providers = providers;
+        context.provider_count = provider_count;
+        context.module_cache = &module_cache;
+        context.tasks = NULL;
+        context.task_count = 0;
+        context.room_states = NULL;
+        context.room_state_count = 0;
+        context.stopping = 0;
+        ok = zsharp_window_run(program, project_root,
+                               execute_window_callback, &context,
+                               error, error_size);
+        goto done;
     }
     for (room_index = 0; room_index < program->room_count; room_index++) {
         ZSharpRoom *room = &program->rooms[room_index];

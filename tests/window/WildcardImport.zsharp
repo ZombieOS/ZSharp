@@ -1,0 +1,44 @@
+zsharp = type.script:window
+
+noticed Window WildcardWindow[] (
+ import ZSharp.Window.*():
+ import window_test.Handlers():
+
+ noticed design Design[] (
+  title: "Wildcard Window":
+  width: 320:
+  height: 180:
+  scalable: alive:
+  background: #F0F0F0:
+ )
+
+ noticed text[header] Header[] (
+  content: "Every Window feature is imported":
+  color: #000000:
+ )
+
+ noticed button Button[] (
+  text: "Click":
+  textColor: #FFFFFF:
+  buttonColor: #000000:
+  width: 15:
+  height: 10:
+  Click[
+   left: [Handlers:Actions:OnPlay]:
+   right: []:
+  ]:
+ )
+
+ noticed image Image[] (
+  file: "assets/images/ZSharp.png":
+  width: 30:
+  height: 30:
+ )
+
+ noticed textInput Input[] (
+  display: "Wildcard input":
+  type: text:
+  width: 20:
+  height: 10:
+ )
+)

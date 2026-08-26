@@ -5,6 +5,7 @@
 *.obj
 *.o
 *.exe
+*.zbc
 !java/src/main/resources/META-INF/zsharp/runtime/windows-x86_64/zsharp.exe
 !java/src/main/resources/META-INF/zsharp/runtime/windows-aarch64/zsharp.exe
 

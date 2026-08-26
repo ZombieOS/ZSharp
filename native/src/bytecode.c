@@ -9,7 +9,7 @@
 
 static const unsigned char BYTECODE_MAGIC[4] = {'Z', 'S', 'B', 'C'};
 static const uint16_t BYTECODE_MAJOR = 0;
-static const uint16_t BYTECODE_MINOR = 14;
+static const uint16_t BYTECODE_MINOR = 17;
 
 static void set_error(char *error, size_t error_size, const char *message) {
     if (error != NULL && error_size > 0) {
@@ -75,10 +75,42 @@ static void free_instruction(ZSharpInstruction *instruction) {
     free(instruction->call_outcome);
 }
 
+static void free_ui_property(ZSharpUIProperty *property) {
+    size_t index;
+    free(property->name);
+    free(property->text_value);
+    for (index = 0; index < property->item_count; index++) {
+        free(property->items[index]);
+    }
+    free(property->items);
+}
+
+static void free_window(ZSharpWindow *window) {
+    size_t index;
+    for (index = 0; index < window->import_count; index++) {
+        free(window->imports[index].path);
+    }
+    free(window->imports);
+    for (index = 0; index < window->element_count; index++) {
+        ZSharpUIElement *element = &window->elements[index];
+        size_t property_index;
+        free(element->variant);
+        free(element->name);
+        for (property_index = 0; property_index < element->property_count;
+             property_index++) {
+            free_ui_property(&element->properties[property_index]);
+        }
+        free(element->properties);
+    }
+    free(window->elements);
+    free(window->name);
+}
+
 void zsharp_program_free(ZSharpProgram *program) {
     size_t room_index;
     free(program->project_id);
     free(program->source_name);
+    free_window(&program->window);
     for (room_index = 0; room_index < program->room_count; room_index++) {
         ZSharpRoom *room = &program->rooms[room_index];
         size_t variable_index;
@@ -167,6 +199,18 @@ ZSharpInstruction *zsharp_function_add_instruction(ZSharpFunction *function) {
     ADD_ITEM(function, instructions, instruction_count, ZSharpInstruction);
 }
 
+ZSharpImport *zsharp_window_add_import(ZSharpWindow *window) {
+    ADD_ITEM(window, imports, import_count, ZSharpImport);
+}
+
+ZSharpUIElement *zsharp_window_add_element(ZSharpWindow *window) {
+    ADD_ITEM(window, elements, element_count, ZSharpUIElement);
+}
+
+ZSharpUIProperty *zsharp_ui_element_add_property(ZSharpUIElement *element) {
+    ADD_ITEM(element, properties, property_count, ZSharpUIProperty);
+}
+
 #undef ADD_ITEM
 
 static int write_bytes(FILE *file, const void *data, size_t size) {
@@ -251,6 +295,17 @@ static int write_instruction(FILE *file,
         case ZOP_NAMED_IF_START:
             return write_string(file, instruction->operand) &&
                    write_u32(file, instruction->index_operand);
+        case ZOP_UI_SET:
+            return write_string(file, instruction->operand) &&
+                   write_u32(file, (uint32_t)instruction->number_operand) &&
+                   write_u32(file, instruction->index_operand) &&
+                   write_string(file, instruction->call_function);
+        case ZOP_UI_SET_DYNAMIC:
+            return write_u32(file, (uint32_t)instruction->number_operand) &&
+                   write_u32(file, instruction->index_operand) &&
+                   write_string(file, instruction->call_function);
+        case ZOP_DELAY:
+            return write_string(file, instruction->operand);
         case ZOP_ADD:
         case ZOP_SUBTRACT:
         case ZOP_MULTIPLY:
@@ -374,6 +429,73 @@ static int write_variable(FILE *file, const ZSharpVariable *variable) {
     return 1;
 }
 
+static int write_ui_property(FILE *file,
+                             const ZSharpUIProperty *property) {
+    size_t index;
+    if (!write_string(file, property->name) ||
+        !write_u8(file, (uint8_t)property->type)) return 0;
+    switch (property->type) {
+        case ZUI_PROPERTY_TEXT:
+        case ZUI_PROPERTY_COLOR:
+        case ZUI_PROPERTY_IDENTIFIER:
+        case ZUI_PROPERTY_CALLBACK:
+            return write_string(file, property->text_value);
+        case ZUI_PROPERTY_STATUS:
+            return write_u8(file, (uint8_t)(property->status_value != 0));
+        case ZUI_PROPERTY_MEASUREMENT:
+            return write_string(file, property->text_value) &&
+                   write_u8(file, (uint8_t)property->unit);
+        case ZUI_PROPERTY_IDENTIFIER_ARRAY:
+            if (property->item_count > UINT32_MAX ||
+                !write_u32(file, (uint32_t)property->item_count)) return 0;
+            for (index = 0; index < property->item_count; index++) {
+                if (!write_string(file, property->items[index])) return 0;
+            }
+            return 1;
+        case ZUI_PROPERTY_EMPTY_ARRAY:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int write_window(FILE *file, const ZSharpWindow *window) {
+    size_t import_index;
+    size_t element_index;
+    if (!write_u8(file, (uint8_t)(window->is_public != 0)) ||
+        !write_string(file, window->name) ||
+        window->import_count > UINT32_MAX ||
+        !write_u32(file, (uint32_t)window->import_count)) return 0;
+    for (import_index = 0; import_index < window->import_count;
+         import_index++) {
+        if (!write_string(file, window->imports[import_index].path) ||
+            !write_u32(file, window->imports[import_index].part_count)) {
+            return 0;
+        }
+    }
+    if (window->element_count > UINT32_MAX ||
+        !write_u32(file, (uint32_t)window->element_count)) return 0;
+    for (element_index = 0; element_index < window->element_count;
+         element_index++) {
+        const ZSharpUIElement *element = &window->elements[element_index];
+        size_t property_index;
+        if (!write_u8(file, (uint8_t)(element->is_public != 0)) ||
+            !write_u8(file, (uint8_t)element->type) ||
+            !write_string(file, element->variant) ||
+            !write_string(file, element->name) ||
+            element->property_count > UINT32_MAX ||
+            !write_u32(file, (uint32_t)element->property_count)) return 0;
+        for (property_index = 0; property_index < element->property_count;
+             property_index++) {
+            if (!write_ui_property(file,
+                                   &element->properties[property_index])) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 int zsharp_bytecode_write(
     const char *path, const ZSharpProgram *program, const char *project_id,
     unsigned char project_identity[ZSHARP_SHA256_SIZE],
@@ -399,6 +521,12 @@ int zsharp_bytecode_write(
     ok = ok && hash_offset >= 0 &&
          write_bytes(file, empty_hash, sizeof(empty_hash)) &&
          write_string(file, program->source_name) &&
+         write_u8(file, (uint8_t)program->script_type) &&
+         write_u8(file, (uint8_t)(program->has_window != 0));
+    if (ok && program->has_window) {
+        ok = write_window(file, &program->window);
+    }
+    ok = ok &&
          program->room_count <= UINT32_MAX &&
          write_u32(file, (uint32_t)program->room_count);
     for (room_index = 0; ok && room_index < program->room_count; room_index++) {
@@ -597,6 +725,19 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
         case ZOP_NAMED_IF_START:
             return read_string(file, &instruction->operand) &&
                    read_u32(file, &instruction->index_operand);
+        case ZOP_UI_SET:
+            if (!read_string(file, &instruction->operand) ||
+                !read_u32(file, &value)) return 0;
+            instruction->number_operand = (int32_t)value;
+            return read_u32(file, &instruction->index_operand) &&
+                   read_string(file, &instruction->call_function);
+        case ZOP_UI_SET_DYNAMIC:
+            if (!read_u32(file, &value)) return 0;
+            instruction->number_operand = (int32_t)value;
+            return read_u32(file, &instruction->index_operand) &&
+                   read_string(file, &instruction->call_function);
+        case ZOP_DELAY:
+            return read_string(file, &instruction->operand);
         case ZOP_ADD:
         case ZOP_SUBTRACT:
         case ZOP_MULTIPLY:
@@ -749,6 +890,97 @@ static int read_variable(FILE *file, ZSharpVariable *variable) {
     return 1;
 }
 
+static int read_ui_property(FILE *file, ZSharpUIProperty *property) {
+    uint8_t type = 0;
+    uint8_t value = 0;
+    uint32_t count = 0;
+    uint32_t index;
+    if (!read_string(file, &property->name) || !read_u8(file, &type) ||
+        type < (uint8_t)ZUI_PROPERTY_TEXT ||
+        type > (uint8_t)ZUI_PROPERTY_EMPTY_ARRAY) return 0;
+    property->type = (ZSharpUIPropertyType)type;
+    switch (property->type) {
+        case ZUI_PROPERTY_TEXT:
+        case ZUI_PROPERTY_COLOR:
+        case ZUI_PROPERTY_IDENTIFIER:
+        case ZUI_PROPERTY_CALLBACK:
+            return read_string(file, &property->text_value);
+        case ZUI_PROPERTY_STATUS:
+            if (!read_u8(file, &value) || value > 1) return 0;
+            property->status_value = value != 0;
+            return 1;
+        case ZUI_PROPERTY_MEASUREMENT:
+            if (!read_string(file, &property->text_value) ||
+                !read_u8(file, &value) ||
+                (value != (uint8_t)ZUI_UNIT_ZU &&
+                 value != (uint8_t)ZUI_UNIT_PX)) return 0;
+            property->unit = (ZSharpUIUnit)value;
+            return 1;
+        case ZUI_PROPERTY_IDENTIFIER_ARRAY:
+            if (!read_u32(file, &count) || count > 1000000u) return 0;
+            if (count > 0) {
+                property->items =
+                    (char **)calloc(count, sizeof(*property->items));
+                if (property->items == NULL) return 0;
+            }
+            property->item_count = count;
+            for (index = 0; index < count; index++) {
+                if (!read_string(file, &property->items[index])) return 0;
+            }
+            return 1;
+        case ZUI_PROPERTY_EMPTY_ARRAY:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int read_window(FILE *file, ZSharpWindow *window) {
+    uint8_t visibility = 0;
+    uint32_t import_count = 0;
+    uint32_t import_index;
+    uint32_t element_count = 0;
+    uint32_t element_index;
+    if (!read_u8(file, &visibility) || visibility > 1 ||
+        !read_string(file, &window->name) ||
+        !read_u32(file, &import_count) || import_count > 100000u) return 0;
+    window->is_public = visibility != 0;
+    for (import_index = 0; import_index < import_count; import_index++) {
+        ZSharpImport *import = zsharp_window_add_import(window);
+        if (import == NULL || !read_string(file, &import->path) ||
+            !read_u32(file, &import->part_count) ||
+            import->part_count < 2 || import->part_count > 64) return 0;
+    }
+    if (!read_u32(file, &element_count) || element_count > 1000000u) {
+        return 0;
+    }
+    for (element_index = 0; element_index < element_count; element_index++) {
+        ZSharpUIElement *element = zsharp_window_add_element(window);
+        uint8_t type = 0;
+        uint32_t property_count = 0;
+        uint32_t property_index;
+        if (element == NULL || !read_u8(file, &visibility) ||
+            visibility > 1 || !read_u8(file, &type) ||
+            type < (uint8_t)ZUI_DESIGN ||
+            type > (uint8_t)ZUI_TEXT_INPUT ||
+            !read_string(file, &element->variant) ||
+            !read_string(file, &element->name) ||
+            !read_u32(file, &property_count) ||
+            property_count > 1000000u) return 0;
+        element->is_public = visibility != 0;
+        element->type = (ZSharpUIElementType)type;
+        for (property_index = 0; property_index < property_count;
+             property_index++) {
+            ZSharpUIProperty *property =
+                zsharp_ui_element_add_property(element);
+            if (property == NULL || !read_ui_property(file, property)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 int zsharp_bytecode_read(const char *path, ZSharpProgram *program,
                          char *error, size_t error_size) {
     FILE *file = fopen(path, "rb");
@@ -769,7 +1001,9 @@ int zsharp_bytecode_read(const char *path, ZSharpProgram *program,
     ok = read_bytes(file, magic, sizeof(magic)) &&
          memcmp(magic, BYTECODE_MAGIC, sizeof(magic)) == 0 &&
          read_u16(file, &major) && read_u16(file, &minor) &&
-         major == BYTECODE_MAJOR && minor == BYTECODE_MINOR &&
+         major == BYTECODE_MAJOR &&
+         (minor == 14 || minor == 15 || minor == 16 ||
+          minor == BYTECODE_MINOR) &&
          read_string(file, &program->project_id) &&
          read_bytes(file, program->project_identity,
                     sizeof(program->project_identity));
@@ -800,9 +1034,23 @@ int zsharp_bytecode_read(const char *path, ZSharpProgram *program,
         zsharp_program_free(program);
         return 0;
     }
-    ok =
-         read_string(file, &program->source_name) &&
-         read_u32(file, &room_count) && room_count <= 100000u;
+    ok = read_string(file, &program->source_name);
+    if (ok && minor >= 15) {
+        uint8_t script_type = 0;
+        uint8_t has_window = 0;
+        ok = read_u8(file, &script_type) &&
+             script_type <= (uint8_t)ZSCRIPT_3D &&
+             read_u8(file, &has_window) && has_window <= 1;
+        if (ok) {
+            program->script_type = (ZSharpScriptType)script_type;
+            program->has_window = has_window != 0;
+        }
+        if (ok && program->has_window) {
+            ok = program->script_type == ZSCRIPT_WINDOW &&
+                 read_window(file, &program->window);
+        }
+    }
+    ok = ok && read_u32(file, &room_count) && room_count <= 100000u;
     for (room_index = 0; ok && room_index < room_count; room_index++) {
         ZSharpRoom *room = zsharp_program_add_room(program);
         uint8_t visibility = 0;

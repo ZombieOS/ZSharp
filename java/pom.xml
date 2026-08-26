@@ -6,7 +6,7 @@
 
     <groupId>com.zombieos</groupId>
     <artifactId>zsharp</artifactId>
-    <version>1.0.0.1</version>
+    <version>1.0.1.0</version>
     <name>Z# Java Integration</name>
     <description>Run the Z# compiler and virtual machine from Java projects.</description>
     <url>https://github.com/ZombieOS/ZSharp</url>

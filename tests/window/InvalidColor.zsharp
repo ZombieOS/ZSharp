@@ -1,0 +1,9 @@
+zsharp = type.script:window
+
+noticed Window BadColor[] (
+ import ZSharp.Window.Design():
+ noticed design Design[] (
+  title: "Bad color":
+  background: #FFF:
+ )
+)

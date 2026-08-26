@@ -3,6 +3,7 @@
 #include "hash.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -204,6 +205,11 @@ int zsharp_sha256_file_except(const char *path, long skip_offset,
     if (ferror(file) || fclose(file) != 0) return 0;
     sha256_final(&context, output);
     return 1;
+}
+
+int zsharp_sha256_file(const char *path,
+                       unsigned char output[ZSHARP_SHA256_SIZE]) {
+    return zsharp_sha256_file_except(path, LONG_MAX, 0, output);
 }
 
 void zsharp_hash_hex(const unsigned char hash[ZSHARP_SHA256_SIZE],

@@ -7,6 +7,8 @@
 
 void zsharp_project_identity(const char *project_id,
                              unsigned char output[ZSHARP_SHA256_SIZE]);
+int zsharp_sha256_file(const char *path,
+                       unsigned char output[ZSHARP_SHA256_SIZE]);
 int zsharp_sha256_file_except(const char *path, long skip_offset,
                               size_t skip_length,
                               unsigned char output[ZSHARP_SHA256_SIZE]);
