@@ -66,7 +66,7 @@ Window (
   only when `zsharpwindow` is listed as a dependency.
 - `Startup` selects the window file opened when the application launches.
 - `Uninstall` reserves and validates the future custom uninstall window. The
-  1.0.1.1 command uses a terminal confirmation.
+  1.0.1.2 command uses a terminal confirmation.
 - Window paths are project-relative, use `/`, cannot escape the project, and
   must identify a `zsharp = type.script:window` file.
 - Settings checks and project compilation load and validate both target files.
@@ -89,7 +89,7 @@ Window (
   solid colors, measurements, design gradients, status fields, titles, icons,
   element positions/sizes, labels, and placeholders use this form. Input
   `contents` remains runtime-owned, and click targets and input types are not
-  mutable in 1.0.1.1.
+  mutable in 1.0.1.2.
 - A text variable containing `Element.property` or `File.Element.property`
   can be used as a reusable live target with `PathAlias.set: value:`. The path
   is resolved at runtime against the active window.

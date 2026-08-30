@@ -5,10 +5,11 @@ Official website and downloads: <https://www.zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
-Version 1.0.1.1 adds multiline window inputs, live text/caret information, and
-overflow-only scrollbars to the native Z# windows introduced in 1.0.1.0. The
-release also includes project launching and cross-platform `.zapp`/`.zgame`
-containers while retaining the Z1 language and toolchain. It is ready for
+Version 1.0.1.2 adds a Windows startup tray updater and prevents an older
+update manifest from downgrading a newer ZVM. It includes the multiline window
+inputs, live text/caret information, and overflow-only scrollbars introduced
+in 1.0.1.1, plus project launching and cross-platform `.zapp`/`.zgame`
+containers. It retains the Z1 language and toolchain and is ready for
 experiments and local projects; the public dependency registry, hardware APIs,
 and game engine are follow-up work.
 
@@ -70,13 +71,15 @@ The `.zbc` bytecode extension shown here is provisional. `.zsharp`, `.zapp`,
 and `.zgame` are official extensions.
 
 End users can install the standalone ZVM with the small platform bootstrap in
-`%USERPROFILE%\Downloads\ZSharp Publishing\1.0.1.1`. It downloads the current runtime from
+`%USERPROFILE%\Downloads\ZSharp Publishing\1.0.1.2`. It downloads the current runtime from
 `https://www.zsharp.zombieos.com/update.js?v=CURRENTVERSION-OS`, compares the
 installed version with the static GitHub Pages manifest, verifies
 `assets/download/ZVM-LATEST.zip` and the selected runtime, preserves the
 previous runtime, and configures the command and package associations for the
-current user. Standalone installations quietly repeat this version check on
-every ZVM launch. See [INSTALLING.md](INSTALLING.md).
+current user. On Windows, a single tray agent starts at sign-in, checks once
+immediately and then hourly, and notifies the user before installing a newer
+verified release. Linux and macOS repeat the quiet check when the ZVM launches.
+See [INSTALLING.md](INSTALLING.md).
 
 The first implementation supports `noticed`/`silent` rooms; `text`, `number`,
 status, text/number/object arrays; `brain`, number-returning, and text-returning functions;
@@ -171,7 +174,7 @@ user so opening either launches the package without opening a terminal. Running
 terminal normally.
 
 The `.zgame` container uses the same validated metadata and packaging
-foundation, but 1.0.1.1 does not install or run games. Opening one displays the
+foundation, but 1.0.1.2 does not install or run games. Opening one displays the
 Z# Hub message that games are currently unavailable. If an application cannot
 launch, the Hub displays `APPNAME failed to launch!` followed by the preserved
 compiler, settings, package, or runtime reason.
@@ -222,7 +225,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.zombieos:zsharp:1.0.1.1")
+    implementation("com.zombieos:zsharp:1.0.1.2")
 }
 ```
 
@@ -232,7 +235,7 @@ or Maven:
 <dependency>
     <groupId>com.zombieos</groupId>
     <artifactId>zsharp</artifactId>
-    <version>1.0.1.1</version>
+    <version>1.0.1.2</version>
 </dependency>
 ```
 

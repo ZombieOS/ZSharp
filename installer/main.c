@@ -649,6 +649,39 @@ static int valid_version(const char *version) {
     }
 }
 
+static int compare_versions(const char *left, const char *right) {
+    const char *left_cursor = left;
+    const char *right_cursor = right;
+    int part;
+    for (part = 0; part < 4; part++) {
+        const char *left_end = left_cursor;
+        const char *right_end = right_cursor;
+        const char *left_number;
+        const char *right_number;
+        size_t left_length;
+        size_t right_length;
+        int comparison;
+        while (isdigit((unsigned char)*left_end)) left_end++;
+        while (isdigit((unsigned char)*right_end)) right_end++;
+        left_number = left_cursor;
+        right_number = right_cursor;
+        while (left_number + 1 < left_end && *left_number == '0')
+            left_number++;
+        while (right_number + 1 < right_end && *right_number == '0')
+            right_number++;
+        left_length = (size_t)(left_end - left_number);
+        right_length = (size_t)(right_end - right_number);
+        if (left_length < right_length) return -1;
+        if (left_length > right_length) return 1;
+        comparison = memcmp(left_number, right_number, left_length);
+        if (comparison < 0) return -1;
+        if (comparison > 0) return 1;
+        left_cursor = *left_end == '.' ? left_end + 1 : left_end;
+        right_cursor = *right_end == '.' ? right_end + 1 : right_end;
+    }
+    return 0;
+}
+
 static int valid_sha256(char *sha256) {
     size_t index;
     if (strlen(sha256) != 64) return 0;
@@ -681,7 +714,8 @@ static int parse_release(const char *manifest, const char *platform,
                      "the update site returned invalid version metadata");
         return 0;
     }
-    release->update_available = strcmp(release->version, current_version) != 0;
+    release->update_available =
+        compare_versions(release->version, current_version) > 0;
     if (!release->update_available) return 1;
     if (!json_object(manifest, "download", &download_begin, &download_end)) {
         report_error(error, error_size,
@@ -1212,7 +1246,14 @@ int main(int argc, char **argv) {
         !parse_release(manifest, platform, current_version, &release,
                        error, sizeof(error))) goto done;
     if (!release.update_available) {
-        if (!quiet) printf("Z# %s is already current.\n", release.version);
+        if (!quiet) {
+            if (compare_versions(release.version, current_version) == 0)
+                printf("Z# %s is already current.\n", current_version);
+            else
+                printf("Installed Z# %s is newer than available %s; "
+                       "no update was installed.\n",
+                       current_version, release.version);
+        }
         result = 0;
         goto done;
     }

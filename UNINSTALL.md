@@ -1,6 +1,6 @@
 # Z# application and game uninstalling
 
-This document separates the uninstall behavior implemented in Z# 1.0.1.1 from
+This document separates the uninstall behavior implemented in Z# 1.0.1.2 from
 the larger hub, app-data, and cloud-backup design planned for later releases.
 It applies to application packages (`.zapp`) and game packages (`.zgame`).
 
@@ -22,14 +22,14 @@ The argument identifies the package and its PID. The runtime must resolve and
 validate that identity before presenting or deleting anything. Quoted paths
 are accepted when the package path contains spaces.
 
-In 1.0.1.1, the command reads and validates package metadata, displays the
+In 1.0.1.2, the command reads and validates package metadata, displays the
 package name, PID, type, version, and exact package path, and requires the user
 to type `yes`. It then permanently removes the package's content-addressed Z#
 cache, the package file, and any Desktop shortcut Z# created for that display
 name. Cancellation deletes nothing.
 
 Applications cannot register saves or other writable data with the runtime
-yet. Consequently, 1.0.1.1 does not claim to remove unrelated app-created
+yet. Consequently, 1.0.1.2 does not claim to remove unrelated app-created
 data. That requires the future managed-data ledger described below.
 
 ## Future Z# hub integration
@@ -71,7 +71,7 @@ Window (
 `Window (...)` is a settings section, not a callable function. It is valid
 only when the project depends on `zsharpwindow`.
 
-In 1.0.1.1, `Uninstall` is syntax-checked and packaged but the terminal
+In 1.0.1.2, `Uninstall` is syntax-checked and packaged but the terminal
 confirmation is used. A later runtime may open that window to explain what will
 be removed, offer cloud backup, and collect the user's choice. The Z# runtime
 will still perform and validate deletion; application-owned uninstall code
@@ -85,7 +85,7 @@ remain inside the project, and must identify a `.zsharp` file whose header is
 
 Uninstalling permanently deletes confirmed data without placing it in the
 Windows Recycle Bin, macOS Trash, or a Linux desktop trash directory. The
-1.0.1.1 runtime shows:
+1.0.1.2 runtime shows:
 
 - the app or game name and PID;
 - the package version and type;

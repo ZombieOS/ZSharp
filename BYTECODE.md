@@ -1,6 +1,6 @@
 # Z# bytecode identity and integrity
 
-Z# 1.0.1.1 automatically embeds two SHA-256 values in each compiled bytecode
+Z# 1.0.1.2 automatically embeds two SHA-256 values in each compiled bytecode
 file. Neither value is written in `project.zsettings`.
 
 Bytecode format `0.17` adds text-based aliases for live window-property paths.

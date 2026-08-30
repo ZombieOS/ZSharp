@@ -2,7 +2,7 @@ zsharp = type.settings
 
 Project: "Packaged Window Test":
 PID: "package_test":
-Version: [1.0.1.1]:
+Version: [1.0.1.2]:
 Authors: ["Z# Tests"]:
 Description: "A package/open regression fixture.":
 ZSharp: [1.0.1.0]:

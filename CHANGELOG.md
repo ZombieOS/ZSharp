@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.1.2 - Windows update tray patch - 2026-08-29
+
+- Added a single-instance Windows ZVM update agent that starts for the current
+  user at sign-in, checks immediately, and checks again every hour.
+- Added tray actions to check manually or exit the agent for the current
+  sign-in session.
+- Added a Windows notification before a newer verified ZVM release begins
+  downloading and installing.
+- Restarted the tray automatically after a successful ZVM replacement while
+  keeping registered apps, games, package caches, and application data intact.
+- Changed four-part update comparison to install only genuinely newer
+  releases. Matching versions do nothing, and an older web manifest can no
+  longer downgrade a newer runtime.
+- Retained the quiet standalone-launch update check for Linux and macOS, where
+  the Windows tray integration does not apply.
+- Added installer regression coverage for downgrade prevention.
+- Rebuilt the embedded Windows, Linux, and macOS runtimes for version 1.0.1.2.
+
 ## 1.0.1.1 - Window input and scrolling patch - 2026-08-29
 
 - Added multiline text inputs with `multiline: alive:`.

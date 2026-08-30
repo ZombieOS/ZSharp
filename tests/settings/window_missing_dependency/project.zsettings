@@ -2,10 +2,10 @@ zsharp = type.settings
 
 Project: "Invalid Window Settings":
 PID: "invalid_window":
-Version: [1.0.1.1]:
+Version: [1.0.1.2]:
 Authors: ["Z# Tests"]:
 Description: "Window settings without their required dependency.":
-ZSharp: [1.0.1.1]:
+ZSharp: [1.0.1.2]:
 
 Dependencies (
 ):

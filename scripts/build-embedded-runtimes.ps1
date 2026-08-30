@@ -22,13 +22,13 @@ $targets = @(
         Id = "windows-x86_64"
         Triple = "x86_64-windows-gnu"
         Executable = "zsharp.exe"
-        Libraries = @("-luser32", "-lgdi32", "-lcomdlg32", "-lole32", "-lwindowscodecs", "-lshell32", "-ladvapi32", "-luuid")
+        Libraries = @("-luser32", "-lgdi32", "-lcomdlg32", "-lole32", "-lwindowscodecs", "-lshell32", "-ladvapi32", "-luuid", "-lwinhttp")
     },
     @{
         Id = "windows-aarch64"
         Triple = "aarch64-windows-gnu"
         Executable = "zsharp.exe"
-        Libraries = @("-luser32", "-lgdi32", "-lcomdlg32", "-lole32", "-lwindowscodecs", "-lshell32", "-ladvapi32", "-luuid")
+        Libraries = @("-luser32", "-lgdi32", "-lcomdlg32", "-lole32", "-lwindowscodecs", "-lshell32", "-ladvapi32", "-luuid", "-lwinhttp")
     },
     @{
         Id = "linux-x86_64"

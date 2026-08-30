@@ -835,7 +835,11 @@ static int uninstall_package_command(const char *package_path) {
 
 int main(int argc, char **argv) {
 #ifdef _WIN32
-    if (argc > 1 && (strcmp(argv[1], "open-desktop") == 0 ||
+    if (argc > 1 && strcmp(argv[1], "update-agent") == 0) {
+        HWND console = GetConsoleWindow();
+        if (console != NULL) ShowWindow(console, SW_HIDE);
+        FreeConsole();
+    } else if (argc > 1 && (strcmp(argv[1], "open-desktop") == 0 ||
         strcmp(argv[1], "open") == 0)) {
         DWORD console_processes[2];
         DWORD count = GetConsoleProcessList(console_processes, 2);
@@ -846,8 +850,11 @@ int main(int argc, char **argv) {
         }
     }
 #endif
-    if (!(argc > 1 && strcmp(argv[1], "associate") == 0))
+    if (!(argc > 1 && (strcmp(argv[1], "associate") == 0 ||
+                       strcmp(argv[1], "update-agent") == 0)))
         zsharp_update_check_start();
+    if (argc > 1 && strcmp(argv[1], "update-agent") == 0)
+        return zsharp_update_agent_run();
     if (argc == 1) {
         char association_error[512] = {0};
         if (!zsharp_desktop_install_associations(association_error,
@@ -880,6 +887,17 @@ int main(int argc, char **argv) {
             fprintf(stderr, "association error: %s\n", error);
             return 1;
         }
+#ifdef _WIN32
+        if (!zsharp_update_agent_register(error, sizeof(error))) {
+            fprintf(stderr, "update agent error: %s\n", error);
+            return 1;
+        }
+        if (!zsharp_update_agent_start())
+            fputs("update agent warning: it will start at your next sign-in\n",
+                  stderr);
+        else
+            puts("Z# will check for updates from the system tray at sign-in.");
+#endif
         puts("Z# now opens .zapp and .zgame files for this user.");
         return 0;
     }

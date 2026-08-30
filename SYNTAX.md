@@ -3,7 +3,7 @@
 This guide explains how to write Z# and compares its concepts with C#, Java,
 and C. The official source extension is `.zsharp`.
 
-Z# 1.0.1.1 implements the Z1 compiler and virtual machine plus the specialized
+Z# 1.0.1.2 implements the Z1 compiler and virtual machine plus the specialized
 window, 2D, and 3D script headers in this guide. Window syntax is accepted,
 validated, stored in bytecode, and rendered by native Windows, Linux, and macOS
 `zsharpwindow` backends. `.zapp` and `.zgame` packaging is implemented.
@@ -60,7 +60,7 @@ PID: "project_id":
 Version: [1.0.0.0]:
 Authors: ["Author1", "Author2"]:
 Description: "This is a Z# Project!":
-ZSharp: [1.0.1.1]:
+ZSharp: [1.0.1.2]:
 
 Dependencies (
  playfab:1.0.0.0
@@ -904,7 +904,7 @@ Z# bytecode      -> ZVM (`zsharp`)
 ```
 
 A Java application starts on the JVM. When it uses
-`com.zombieos:zsharp:1.0.1.1`, the library locates or extracts the bundled
+`com.zombieos:zsharp:1.0.1.2`, the library locates or extracts the bundled
 native Z# runtime and starts it as a child process. The ZVM then compiles or
 runs the requested Z# file.
 
@@ -1202,7 +1202,7 @@ noticed brain Animate[] (
 The alias must contain `Element.property` or `File.Element.property`. It must
 refer to the active window when the callback runs.
 
-The setter supports these live fields in 1.0.1.1:
+The setter supports these live fields in 1.0.1.2:
 
 - design: `title`, `icon`, `scalable`, `background`, `width`, `height`,
   `locationX`, and `locationY`;
@@ -1227,7 +1227,7 @@ PID: "my_application":
 Version: [1.0.0.0]:
 Authors: ["Author"]:
 Description: "A Z# application":
-ZSharp: [1.0.1.1]:
+ZSharp: [1.0.1.2]:
 
 Dependencies (
  zsharpwindow:1.0.0.0
@@ -1274,7 +1274,7 @@ macOS:   ~/Library/Application Support/ZSharp/projects.registry
 
 Z# applications use `.zapp` and games use `.zgame`.
 
-These are cross-platform Z# container formats. The normal 1.0.1.1 container
+These are cross-platform Z# container formats. The normal 1.0.1.2 container
 stores the validated project plus its compiled startup, with a SHA-256 hash for
 each entry. The unbytecoded companion uses the standard ZIP container and ZIP
 CRC checks. The runtime rejects corrupt data, absolute paths, `..` traversal,
@@ -1313,7 +1313,7 @@ archive. Rename `Application-unbytecoded.zapp` to
 does not change their contents.
 
 The packager checks `project.zsettings`, validates every included `.zsharp`
-file, and requires a configured `Window Startup` in 1.0.1.1. Renaming an
+file, and requires a configured `Window Startup` in 1.0.1.2. Renaming an
 ordinary ZIP file is not enough; Z# source packages carry a format marker and
 must be produced by `zsharp package --unbytecode`.
 
@@ -1340,6 +1340,13 @@ Install or refresh the current user's associations with:
 zsharp associate
 ```
 
+On Windows, association also registers and starts the single-instance Z# tray
+updater for the current user. It checks once after sign-in and then hourly,
+notifies before a newer verified ZVM is installed, and provides **Check for
+updates** and **Exit** tray-menu actions. Version comparison is numeric across
+all four parts, so an older manifest never downgrades a newer installation.
+Linux and macOS keep the quiet launch-time update check.
+
 Opening an associated package or a Z#-created Desktop shortcut launches the app
 without opening a terminal. On Windows, Explorer launches are detached from the
 console; Linux desktop entries use `Terminal=false`; and macOS launcher apps run
@@ -1364,7 +1371,7 @@ Uninstall asks the user to type `yes`, then permanently removes that verified
 package cache, the selected package file, and any Z#-created Desktop shortcut
 without using Recycle Bin or Trash.
 The future hub, app-data ledger, and optional ZOS Cloud backup are not part of
-1.0.1.1. See [UNINSTALL.md](UNINSTALL.md) for current behavior and the planned
+1.0.1.2. See [UNINSTALL.md](UNINSTALL.md) for current behavior and the planned
 full safety model.
 
 `.zgame` has the same secure package and metadata foundation in this release.
@@ -1452,7 +1459,7 @@ The first part selects the language generation:
 ```
 
 The installed ZVM supplies runtime and client behavior. A 1.0.1.0 application
-therefore continues to run on ZVM 1.0.1.1 and automatically receives runtime
+therefore continues to run on ZVM 1.0.1.2 and automatically receives runtime
 fixes such as smoother window painting and silent Desktop launches; its package
 does not need to be rebuilt. The `ZSharp` version in `project.zsettings`
 describes the source version the project targets. New source fields and syntax

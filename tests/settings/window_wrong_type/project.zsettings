@@ -2,10 +2,10 @@ zsharp = type.settings
 
 Project: "Wrong Window Type":
 PID: "wrong_window_type":
-Version: [1.0.1.1]:
+Version: [1.0.1.2]:
 Authors: ["Z# Tests"]:
 Description: "A Window path that points to a normal script.":
-ZSharp: [1.0.1.1]:
+ZSharp: [1.0.1.2]:
 
 Dependencies (
  zsharpwindow:1.0.0.0
