@@ -35,6 +35,8 @@ typedef struct WindowControl {
     int has_text_color;
     int has_button_color;
     int is_image_input;
+    int is_multiline;
+    int placeholder_active;
 } WindowControl;
 
 typedef struct WindowState {
@@ -44,6 +46,11 @@ typedef struct WindowState {
     void *callback_data;
     HWND window;
     HBRUSH window_background;
+    HDC background_buffer;
+    HBITMAP background_bitmap;
+    HGDIOBJ background_previous;
+    int background_width;
+    int background_height;
     HICON window_icon;
     WindowControl *controls;
     size_t control_count;
@@ -54,6 +61,7 @@ typedef struct WindowState {
     int layout_height;
     int scroll_y;
     int content_height;
+    int vertical_scroll_visible;
     char callback_error[512];
     ZSharpPaint background_paint;
     ZSharpWindowRuntime runtime;
@@ -71,8 +79,18 @@ typedef struct WindowPropertyRequest {
     char error[512];
 } WindowPropertyRequest;
 
+typedef struct WindowReadRequest {
+    WindowState *state;
+    const char *path;
+    ZSharpWindowReadType value_type;
+    char *text_value;
+    int result;
+    char error[512];
+} WindowReadRequest;
+
 static const char *WINDOW_CLASS_NAME = "ZombieOS.ZSharp.Window.1";
 #define ZSHARP_WM_SET_PROPERTY (WM_APP + 37)
+#define ZSHARP_WM_GET_PROPERTY (WM_APP + 38)
 
 static void layout_controls(WindowState *state);
 static int set_window_property(void *data, const char *path,
@@ -85,6 +103,10 @@ static int runtime_set_window_property(void *data, const char *path,
                                        ZSharpWindowValueType value_type,
                                        const char *text_value,
                                        ZSharpUIUnit unit, char *error,
+                                       size_t error_size);
+static int runtime_get_window_property(void *data, const char *path,
+                                       ZSharpWindowReadType *value_type,
+                                       char **text_value, char *error,
                                        size_t error_size);
 static int window_is_cancelled(void *data);
 
@@ -114,6 +136,12 @@ static ZSharpUIElement *find_design(ZSharpWindow *window) {
         }
     }
     return NULL;
+}
+
+static int status_property(ZSharpUIElement *element, const char *name,
+                           int fallback) {
+    ZSharpUIProperty *value = find_property(element, name);
+    return value == NULL ? fallback : value->status_value;
 }
 
 static COLORREF parse_color(const char *text, COLORREF fallback) {
@@ -404,12 +432,44 @@ static void update_input_contents(WindowControl *control) {
     int length;
     char *text;
     if (contents == NULL || control->handle == NULL) return;
+    if (control->placeholder_active) {
+        text = zsharp_copy_text("", 0);
+        if (text == NULL) return;
+        free(contents->text_value);
+        contents->text_value = text;
+        return;
+    }
     length = GetWindowTextLengthA(control->handle);
     text = (char *)malloc((size_t)length + 1);
     if (text == NULL) return;
     GetWindowTextA(control->handle, text, length + 1);
     free(contents->text_value);
     contents->text_value = text;
+}
+
+static void update_multiline_scrollbar(WindowControl *control) {
+    RECT area;
+    HDC context;
+    TEXTMETRICA metrics;
+    LRESULT lines;
+    int line_height = 16;
+    int visible_lines;
+    if (control == NULL || !control->is_multiline ||
+        control->handle == NULL) return;
+    GetClientRect(control->handle, &area);
+    context = GetDC(control->handle);
+    if (context != NULL) {
+        HGDIOBJ previous = SelectObject(context, control->font);
+        if (GetTextMetricsA(context, &metrics))
+            line_height = metrics.tmHeight + metrics.tmExternalLeading;
+        SelectObject(context, previous);
+        ReleaseDC(control->handle, context);
+    }
+    if (line_height < 1) line_height = 1;
+    visible_lines = (area.bottom - area.top) / line_height;
+    if (visible_lines < 1) visible_lines = 1;
+    lines = SendMessageA(control->handle, EM_GETLINECOUNT, 0, 0);
+    ShowScrollBar(control->handle, SB_VERT, lines > visible_lines);
 }
 
 static void choose_image(WindowState *state, WindowControl *control) {
@@ -475,6 +535,21 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
             }
             return request->result;
         }
+        case ZSHARP_WM_GET_PROPERTY: {
+            WindowReadRequest *request = (WindowReadRequest *)lparam;
+            if (request == NULL) return 0;
+            if (window_is_cancelled(state)) {
+                snprintf(request->error, sizeof(request->error),
+                         "the window is closing");
+                request->result = 0;
+            } else {
+                request->result = runtime_get_window_property(
+                    state, request->path, &request->value_type,
+                    &request->text_value, request->error,
+                    sizeof(request->error));
+            }
+            return request->result;
+        }
         case WM_COMMAND: {
             HWND control_handle = (HWND)lparam;
             WindowControl *control = find_control(state, control_handle);
@@ -485,9 +560,26 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                 } else if (control->element->type == ZUI_BUTTON) {
                     run_callback(state, control->element, "left");
                 }
-            } else if (HIWORD(wparam) == EN_CHANGE &&
-                       control->element->type == ZUI_TEXT_INPUT) {
-                update_input_contents(control);
+            } else if (control->element->type == ZUI_TEXT_INPUT) {
+                if (HIWORD(wparam) == EN_SETFOCUS &&
+                    control->is_multiline && control->placeholder_active) {
+                    control->placeholder_active = 0;
+                    SetWindowTextA(control->handle, "");
+                } else if (HIWORD(wparam) == EN_KILLFOCUS &&
+                           control->is_multiline &&
+                           GetWindowTextLengthA(control->handle) == 0) {
+                    ZSharpUIProperty *display = find_property(
+                        control->element, "display");
+                    if (display != NULL && display->text_value != NULL &&
+                        display->text_value[0] != '\0') {
+                        control->placeholder_active = 1;
+                        SetWindowTextA(control->handle,
+                                       display->text_value);
+                    }
+                } else if (HIWORD(wparam) == EN_CHANGE) {
+                    update_input_contents(control);
+                    update_multiline_scrollbar(control);
+                }
             }
             return 0;
         }
@@ -502,7 +594,9 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
         case WM_CTLCOLORSTATIC: {
             WindowControl *control = find_control(state, (HWND)lparam);
             HDC context = (HDC)wparam;
-            if (control != NULL && control->has_text_color) {
+            if (control != NULL && control->placeholder_active) {
+                SetTextColor(context, RGB(128, 128, 128));
+            } else if (control != NULL && control->has_text_color) {
                 SetTextColor(context, control->text_color);
             }
             SetBkMode(context, TRANSPARENT);
@@ -550,12 +644,53 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
             }
             break;
         }
-        case WM_ERASEBKGND: {
+        case WM_PAINT: {
+            PAINTSTRUCT paint;
             RECT area;
+            HDC target = BeginPaint(window, &paint);
+            int width;
+            int height;
             GetClientRect(window, &area);
-            paint_rectangle((HDC)wparam, &area, &state->background_paint);
-            return 1;
+            width = area.right - area.left;
+            height = area.bottom - area.top;
+            if ((width != state->background_width ||
+                 height != state->background_height) &&
+                state->background_buffer != NULL) {
+                SelectObject(state->background_buffer,
+                             state->background_previous);
+                DeleteObject(state->background_bitmap);
+                DeleteDC(state->background_buffer);
+                state->background_buffer = NULL;
+                state->background_bitmap = NULL;
+                state->background_previous = NULL;
+            }
+            if (state->background_buffer == NULL && width > 0 && height > 0) {
+                state->background_buffer = CreateCompatibleDC(target);
+                state->background_bitmap = state->background_buffer == NULL
+                    ? NULL : CreateCompatibleBitmap(target, width, height);
+                if (state->background_bitmap != NULL) {
+                    state->background_previous = SelectObject(
+                        state->background_buffer, state->background_bitmap);
+                    state->background_width = width;
+                    state->background_height = height;
+                } else if (state->background_buffer != NULL) {
+                    DeleteDC(state->background_buffer);
+                    state->background_buffer = NULL;
+                }
+            }
+            if (state->background_buffer != NULL) {
+                paint_rectangle(state->background_buffer, &area,
+                                &state->background_paint);
+                BitBlt(target, area.left, area.top,
+                       width, height, state->background_buffer, 0, 0, SRCCOPY);
+            } else {
+                paint_rectangle(target, &area, &state->background_paint);
+            }
+            EndPaint(window, &paint);
+            return 0;
         }
+        case WM_ERASEBKGND:
+            return 1;
         case WM_SIZE:
             if (state->control_count != 0) layout_controls(state);
             return 0;
@@ -731,6 +866,7 @@ static void layout_controls(WindowState *state) {
     int client_height;
     int content_bottom = 0;
     int initial_scroll = state->scroll_y;
+    int needs_scroll;
     double responsive_scale;
     SCROLLINFO scroll;
     GetClientRect(state->window, &area);
@@ -786,12 +922,19 @@ static void layout_controls(WindowState *state) {
         if (y + height > content_bottom) content_bottom = y + height;
         MoveWindow(control->handle, x, y - state->scroll_y,
                    width, height, TRUE);
+        update_multiline_scrollbar(control);
         reload_control_image(state, control, width, height);
     }
-    state->content_height = content_bottom +
-        (int)(16.0 * responsive_scale + 0.5);
-    if (state->content_height < client_height)
-        state->content_height = client_height;
+    state->content_height = content_bottom > client_height
+        ? content_bottom + (int)(16.0 * responsive_scale + 0.5)
+        : client_height;
+    needs_scroll = state->content_height > client_height;
+    if (needs_scroll != state->vertical_scroll_visible) {
+        state->vertical_scroll_visible = needs_scroll;
+        ShowScrollBar(state->window, SB_VERT, needs_scroll);
+        layout_controls(state);
+        return;
+    }
     if (state->scroll_y > state->content_height - client_height)
         state->scroll_y = state->content_height - client_height;
     if (state->scroll_y < 0) state->scroll_y = 0;
@@ -859,11 +1002,21 @@ static int create_controls(WindowState *state, int client_width,
             ZSharpUIProperty *display = find_property(element, "display");
             int is_image = type != NULL &&
                            strcmp(type->text_value, "image") == 0;
+            int is_multiline = !is_image &&
+                status_property(element, "multiline", 0);
+            int wraps = status_property(element, "wrap", 1);
             class_name = is_image ? "BUTTON" : "EDIT";
-            display_text = is_image && display != NULL
+            display_text = (is_image || is_multiline) && display != NULL
                 ? display->text_value : "";
-            style |= is_image ? BS_PUSHBUTTON
-                              : WS_BORDER | ES_AUTOHSCROLL;
+            if (is_image) {
+                style |= BS_PUSHBUTTON;
+            } else if (is_multiline) {
+                style |= WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL |
+                         ES_WANTRETURN | WS_VSCROLL;
+                if (!wraps) style |= ES_AUTOHSCROLL | WS_HSCROLL;
+            } else {
+                style |= WS_BORDER | ES_AUTOHSCROLL;
+            }
         }
         x_property = find_property(element, "locationX");
         y_property = find_property(element, "locationY");
@@ -917,7 +1070,13 @@ static int create_controls(WindowState *state, int client_width,
             ZSharpUIProperty *display = find_property(element, "display");
             control->is_image_input = type != NULL &&
                 strcmp(type->text_value, "image") == 0;
-            if (!control->is_image_input && display != NULL &&
+            control->is_multiline = !control->is_image_input &&
+                status_property(element, "multiline", 0);
+            control->placeholder_active = control->is_multiline &&
+                display != NULL && display->text_value != NULL &&
+                display->text_value[0] != '\0';
+            if (!control->is_image_input && !control->is_multiline &&
+                display != NULL &&
                 display->text_value != NULL) {
                 WCHAR *cue = utf8_to_wide(display->text_value);
                 if (cue != NULL) {
@@ -926,6 +1085,7 @@ static int create_controls(WindowState *state, int client_width,
                     free(cue);
                 }
             }
+            update_multiline_scrollbar(control);
         } else if (element->type == ZUI_IMAGE) {
             ZSharpUIProperty *file = find_property(element, "file");
             char *image_path = file == NULL ? NULL
@@ -963,6 +1123,12 @@ static void cleanup_window_state(WindowState *state) {
     free(state->controls);
     if (state->window_background != NULL) {
         DeleteObject(state->window_background);
+    }
+    if (state->background_buffer != NULL) {
+        SelectObject(state->background_buffer, state->background_previous);
+        if (state->background_bitmap != NULL)
+            DeleteObject(state->background_bitmap);
+        DeleteDC(state->background_buffer);
     }
     if (state->window_icon != NULL) DestroyIcon(state->window_icon);
     zsharp_paint_free(&state->background_paint);
@@ -1098,10 +1264,17 @@ static int set_window_property(void *data, const char *path,
             SetWindowTextA(control->handle, property->text_value);
             if (element->type == ZUI_TEXT) layout_controls(state);
         } else if (strcmp(property->name, "display") == 0) {
-            WCHAR *cue = utf8_to_wide(property->text_value);
-            if (cue != NULL) {
-                SendMessageW(control->handle, 0x1501u, TRUE, (LPARAM)cue);
-                free(cue);
+            if (control->is_image_input) {
+                SetWindowTextA(control->handle, property->text_value);
+            } else if (control->is_multiline) {
+                if (control->placeholder_active)
+                    SetWindowTextA(control->handle, property->text_value);
+            } else {
+                WCHAR *cue = utf8_to_wide(property->text_value);
+                if (cue != NULL) {
+                    SendMessageW(control->handle, 0x1501u, TRUE, (LPARAM)cue);
+                    free(cue);
+                }
             }
         } else if (strcmp(property->name, "color") == 0 ||
                    strcmp(property->name, "textColor") == 0) {
@@ -1143,8 +1316,8 @@ static int set_window_property(void *data, const char *path,
             layout_controls(state);
     }
     RedrawWindow(state->window, NULL, NULL,
-                 RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW |
-                 RDW_ALLCHILDREN);
+                 RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN |
+                 RDW_NOERASE);
     return 1;
 }
 
@@ -1184,6 +1357,96 @@ static int runtime_set_window_property(void *data, const char *path,
     return request.result;
 }
 
+static int get_window_property_ui(WindowState *state, const char *path,
+                                  ZSharpWindowReadType *value_type,
+                                  char **text_value, char *error,
+                                  size_t error_size) {
+    ZSharpUIElement *element = NULL;
+    ZSharpWindowInputField field;
+    WindowControl *control;
+    ZSharpUIProperty *contents;
+    size_t total_characters;
+    size_t total_lines;
+    size_t current_line;
+    size_t current_column;
+    size_t cursor = 0;
+    if (!zsharp_window_model_resolve_input(
+            state->program, path, &element, &field, error, error_size))
+        return 0;
+    control = control_for_element(state, element);
+    if (control == NULL || control->handle == NULL) {
+        snprintf(error, error_size, "textInput '%s' is not active",
+                 element->name);
+        return 0;
+    }
+    update_input_contents(control);
+    contents = find_property(element, "contents");
+    if (contents == NULL || contents->text_value == NULL) {
+        snprintf(error, error_size, "textInput '%s' has no contents",
+                 element->name);
+        return 0;
+    }
+    if (field == ZWINDOW_INPUT_CONTENTS) {
+        *value_type = ZWINDOW_READ_TEXT;
+        *text_value = zsharp_copy_text(contents->text_value,
+                                       strlen(contents->text_value));
+        if (*text_value == NULL) {
+            snprintf(error, error_size, "out of memory");
+            return 0;
+        }
+        return 1;
+    }
+    if (!control->placeholder_active) {
+        DWORD selection_start = 0;
+        DWORD selection_end = 0;
+        SendMessageA(control->handle, EM_GETSEL, (WPARAM)&selection_start,
+                     (LPARAM)&selection_end);
+        cursor = (size_t)selection_end;
+    }
+    zsharp_window_text_metrics(contents->text_value, cursor,
+                               &total_characters, &total_lines,
+                               &current_line, &current_column);
+    *value_type = ZWINDOW_READ_NUMBER;
+    *text_value = zsharp_window_copy_size(
+        field == ZWINDOW_INPUT_TOTAL_CHARACTERS ? total_characters :
+        field == ZWINDOW_INPUT_CURRENT_COLUMN ? current_column :
+        field == ZWINDOW_INPUT_TOTAL_LINES ? total_lines : current_line);
+    if (*text_value == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    return 1;
+}
+
+static int runtime_get_window_property(void *data, const char *path,
+                                       ZSharpWindowReadType *value_type,
+                                       char **text_value, char *error,
+                                       size_t error_size) {
+    WindowState *state = (WindowState *)data;
+    WindowReadRequest request;
+    if (GetCurrentThreadId() == state->ui_thread_id)
+        return get_window_property_ui(state, path, value_type, text_value,
+                                      error, error_size);
+    if (window_is_cancelled(state)) {
+        snprintf(error, error_size, "the window is closing");
+        return 0;
+    }
+    memset(&request, 0, sizeof(request));
+    request.state = state;
+    request.path = path;
+    SendMessageA(state->window, ZSHARP_WM_GET_PROPERTY, 0,
+                 (LPARAM)&request);
+    if (!request.result) {
+        snprintf(error, error_size, "%s",
+                 request.error[0] == '\0' ? "the window read failed"
+                                           : request.error);
+        return 0;
+    }
+    *value_type = request.value_type;
+    *text_value = request.text_value;
+    return 1;
+}
+
 static int wait_with_window_events(void *data, const char *milliseconds,
                                    char *error, size_t error_size) {
     WindowState *state = (WindowState *)data;
@@ -1197,9 +1460,6 @@ static int wait_with_window_events(void *data, const char *milliseconds,
                  "wait/delay must be between 0ms and 604800000ms");
         return 0;
     }
-    RedrawWindow(state->window, NULL, NULL,
-                 RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW |
-                 RDW_ALLCHILDREN);
     duration = (ULONGLONG)(parsed + 0.5);
     deadline = GetTickCount64() + duration;
     if (GetCurrentThreadId() != state->ui_thread_id) {
@@ -1246,7 +1506,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     ZSharpUIProperty *scalable;
     ZSharpUIProperty *icon;
     WNDCLASSEXA window_class;
-    DWORD style = WS_OVERLAPPEDWINDOW | WS_VSCROLL;
+    DWORD style = WS_OVERLAPPEDWINDOW;
     RECT area;
     MSG message;
     double scale = display_scale();
@@ -1301,6 +1561,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.ui_thread_id = GetCurrentThreadId();
     state.runtime.state = &state;
     state.runtime.set_property = runtime_set_window_property;
+    state.runtime.get_property = runtime_get_window_property;
     state.runtime.wait = wait_with_window_events;
     state.runtime.is_cancelled = window_is_cancelled;
     if (!zsharp_paint_parse(
@@ -1323,7 +1584,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     window_class.lpfnWndProc = window_proc;
     window_class.hInstance = GetModuleHandleA(NULL);
     window_class.hCursor = LoadCursor(NULL, IDC_ARROW);
-    window_class.hbrBackground = state.window_background;
+    window_class.hbrBackground = NULL;
     window_class.lpszClassName = WINDOW_CLASS_NAME;
     if (!RegisterClassExA(&window_class) &&
         GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
@@ -1347,7 +1608,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     x += measurement_pixels(find_property(design, "locationX"), scale, 0);
     y -= measurement_pixels(find_property(design, "locationY"), scale, 0);
     state.window = CreateWindowExA(
-        0, WINDOW_CLASS_NAME,
+        WS_EX_COMPOSITED, WINDOW_CLASS_NAME,
         title == NULL ? program->window.name : title->text_value,
         style, x, y, outer_width, outer_height, NULL, NULL,
         GetModuleHandleA(NULL), &state);

@@ -5,10 +5,12 @@ Official website and downloads: <https://www.zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
-Version 1.0.1.0 adds native Z# windows on Windows, Linux, and macOS, project
-launching, and cross-platform `.zapp`/`.zgame` containers while retaining the
-Z1 language and toolchain. It is ready for experiments and local projects; the
-public dependency registry, hardware APIs, and game engine are follow-up work.
+Version 1.0.1.1 adds multiline window inputs, live text/caret information, and
+overflow-only scrollbars to the native Z# windows introduced in 1.0.1.0. The
+release also includes project launching and cross-platform `.zapp`/`.zgame`
+containers while retaining the Z1 language and toolchain. It is ready for
+experiments and local projects; the public dependency registry, hardware APIs,
+and game engine are follow-up work.
 
 The evolving official syntax decisions are recorded in
 [LANGUAGE.md](LANGUAGE.md). The user-facing language guide and comparisons are
@@ -68,7 +70,7 @@ The `.zbc` bytecode extension shown here is provisional. `.zsharp`, `.zapp`,
 and `.zgame` are official extensions.
 
 End users can install the standalone ZVM with the small platform bootstrap in
-`%USERPROFILE%\Downloads\ZSharp Publishing\1.0.1.0`. It downloads the current runtime from
+`%USERPROFILE%\Downloads\ZSharp Publishing\1.0.1.1`. It downloads the current runtime from
 `https://www.zsharp.zombieos.com/update.js?v=CURRENTVERSION-OS`, compares the
 installed version with the static GitHub Pages manifest, verifies
 `assets/download/ZVM-LATEST.zip` and the selected runtime, preserves the
@@ -164,10 +166,12 @@ script runs. Normal packages launch their embedded startup bytecode; source
 companions launch the validated `.zsharp` startup.
 On first installation, Z# offers to create a Desktop shortcut using the app's
 design icon. `zsharp associate` registers `.zapp` and `.zgame` for the current
-user so opening either starts a terminal and passes the package to Z#.
+user so opening either launches the package without opening a terminal. Running
+`zsharp open`, `zsharp run`, or another command in a terminal keeps using that
+terminal normally.
 
 The `.zgame` container uses the same validated metadata and packaging
-foundation, but 1.0.1.0 does not install or run games. Opening one displays the
+foundation, but 1.0.1.1 does not install or run games. Opening one displays the
 Z# Hub message that games are currently unavailable. If an application cannot
 launch, the Hub displays `APPNAME failed to launch!` followed by the preserved
 compiler, settings, package, or runtime reason.
@@ -218,7 +222,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.zombieos:zsharp:1.0.1.0")
+    implementation("com.zombieos:zsharp:1.0.1.1")
 }
 ```
 
@@ -228,7 +232,7 @@ or Maven:
 <dependency>
     <groupId>com.zombieos</groupId>
     <artifactId>zsharp</artifactId>
-    <version>1.0.1.0</version>
+    <version>1.0.1.1</version>
 </dependency>
 ```
 

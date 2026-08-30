@@ -895,6 +895,103 @@ static int validate_file_object_member(
     return ok;
 }
 
+static int is_window_input_read_name(const char *name) {
+    return strcmp(name, "contents") == 0 ||
+           strcmp(name, "totalcharacters") == 0 ||
+           strcmp(name, "currentcolumn") == 0 ||
+           strcmp(name, "totallines") == 0 ||
+           strcmp(name, "currentline") == 0;
+}
+
+static int validate_window_input_read(
+    const ZSharpProgram *program, const ZSharpSettings *settings,
+    const ZSharpRoom *room, const char *project_root, char **parts,
+    size_t count, char *error, size_t error_size) {
+    ZSharpProgram target;
+    ZSharpDiagnostic diagnostic;
+    char parse_error[512] = {0};
+    char *source_path = NULL;
+    const char *element_name = parts[count - 2];
+    const char *field_name = parts[count - 1];
+    size_t element_index;
+    int loaded = 0;
+    (void)program;
+    memset(&target, 0, sizeof(target));
+    memset(&diagnostic, 0, sizeof(diagnostic));
+    if (count == 3) {
+        if (!require_file_import(program, settings, room, parts[0], error,
+                                 error_size)) return 0;
+        if (!load_model_file(project_root, parts[0], &target, &source_path,
+                             error, error_size)) return 0;
+        loaded = 1;
+    } else if (count == 2 && settings->has_window &&
+               settings->window_startup != NULL) {
+        source_path = join_path(project_root, settings->window_startup);
+        if (source_path == NULL) {
+            snprintf(error, error_size, "out of memory");
+            return 0;
+        }
+        if (!zsharp_project_parse_file(source_path, &target, &diagnostic,
+                                       parse_error, sizeof(parse_error))) {
+            snprintf(error, error_size, "could not validate active window: %s",
+                     diagnostic.message[0] == '\0' ? parse_error
+                                                     : diagnostic.message);
+            free(source_path);
+            return 0;
+        }
+        loaded = 1;
+    }
+    if (!loaded || target.script_type != ZSCRIPT_WINDOW) {
+        snprintf(error, error_size,
+                 "text input values can only be read by a window project");
+        if (loaded) zsharp_program_free(&target);
+        free(source_path);
+        return 0;
+    }
+    for (element_index = 0; element_index < target.window.element_count;
+         element_index++) {
+        const ZSharpUIElement *element = &target.window.elements[element_index];
+        if (strcmp(element->name, element_name) != 0) continue;
+        if (element->type != ZUI_TEXT_INPUT) {
+            snprintf(error, error_size, "UI element '%s' is not a textInput",
+                     element_name);
+        } else if (strcmp(field_name, "contents") != 0) {
+            const ZSharpUIProperty *type = NULL;
+            size_t property_index;
+            for (property_index = 0;
+                 property_index < element->property_count; property_index++) {
+                if (strcmp(element->properties[property_index].name,
+                           "type") == 0) {
+                    type = &element->properties[property_index];
+                    break;
+                }
+            }
+            if (type == NULL || type->text_value == NULL ||
+                strcmp(type->text_value, "text") != 0) {
+                snprintf(error, error_size,
+                         "%s is only available on text textInputs",
+                         field_name);
+            } else {
+                zsharp_program_free(&target);
+                free(source_path);
+                return 1;
+            }
+        } else {
+            zsharp_program_free(&target);
+            free(source_path);
+            return 1;
+        }
+        zsharp_program_free(&target);
+        free(source_path);
+        return 0;
+    }
+    snprintf(error, error_size, "window has no textInput named '%s'",
+             element_name);
+    zsharp_program_free(&target);
+    free(source_path);
+    return 0;
+}
+
 static int validate_file_function(const ZSharpProgram *program,
                                   const ZSharpSettings *settings,
                                   const ZSharpRoom *caller,
@@ -1011,6 +1108,15 @@ static int validate_instruction(const ZSharpProgram *program,
         snprintf(error, error_size, "invalid qualified path '%s'",
                  instruction->operand);
         return 0;
+    }
+    if (instruction->op == ZOP_LOAD_PATH &&
+        ((count == 2 && model_find_variable(room, parts[0]) == NULL) ||
+         (count == 3 && model_find_room(program, parts[0]) == NULL)) &&
+        is_window_input_read_name(parts[count - 1])) {
+        ok = validate_window_input_read(program, settings, room, project_root,
+                                        parts, count, error, error_size);
+        free(storage);
+        return ok;
     }
     if (instruction->op == ZOP_SET_MEMBER_PATH ||
         instruction->op == ZOP_CALL_METHOD_PATH) {

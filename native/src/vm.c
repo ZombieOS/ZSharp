@@ -350,6 +350,58 @@ static int copy_text_value(RuntimeHeap *heap, const char *text,
     return 1;
 }
 
+static int is_window_input_read(const char *path) {
+    const char *field = path == NULL ? NULL : strrchr(path, '.');
+    if (field == NULL) return 0;
+    field++;
+    return strcmp(field, "contents") == 0 ||
+           strcmp(field, "totalcharacters") == 0 ||
+           strcmp(field, "currentcolumn") == 0 ||
+           strcmp(field, "totallines") == 0 ||
+           strcmp(field, "currentline") == 0;
+}
+
+static int read_window_input_value(RuntimeModuleCache *module_cache,
+                                   RuntimeHeap *heap, const char *path,
+                                   RuntimeValue *value, char *error,
+                                   size_t error_size) {
+    ZSharpWindowReadType read_type;
+    char *text = NULL;
+    if (module_cache->window_runtime == NULL ||
+        module_cache->window_runtime->get_property == NULL ||
+        !is_window_input_read(path)) return 0;
+    if (!module_cache->window_runtime->get_property(
+            module_cache->window_runtime->state, path, &read_type, &text,
+            error, error_size)) return -1;
+    if (text == NULL) {
+        snprintf(error, error_size,
+                 "the window returned no value for '%s'", path);
+        return -1;
+    }
+    memset(value, 0, sizeof(*value));
+    if (read_type == ZWINDOW_READ_TEXT) {
+        value->type = ZVALUE_TEXT;
+        value->text = heap_add_text(heap, text);
+        if (value->text == NULL) {
+            snprintf(error, error_size, "out of memory");
+            return -1;
+        }
+    } else if (read_type == ZWINDOW_READ_NUMBER) {
+        value->type = ZVALUE_NUMBER;
+        value->number_text = heap_add_text(heap, text);
+        if (value->number_text == NULL) {
+            snprintf(error, error_size, "out of memory");
+            return -1;
+        }
+    } else {
+        free(text);
+        snprintf(error, error_size,
+                 "the window returned an invalid value type for '%s'", path);
+        return -1;
+    }
+    return 1;
+}
+
 static int provider_to_runtime_value(RuntimeHeap *heap,
                                      const ZSharpProviderValue *provider,
                                      RuntimeValue *value, char *error,
@@ -558,6 +610,18 @@ static int resolve_value_path(
     if (!split_value_path(instruction->operand, instruction->argument_count,
                           &storage, parts, &part_count, error, error_size)) {
         return 0;
+    }
+    if ((part_count == 2 &&
+         !lookup_name(room, current_object, locals, local_count, parts[0],
+                      value)) ||
+        (part_count == 3 && find_room(program, parts[0]) == NULL)) {
+        int window_read = read_window_input_value(
+            module_cache, heap, instruction->operand, value, error,
+            error_size);
+        if (window_read != 0) {
+            free(storage);
+            return window_read > 0;
+        }
     }
     if (part_count == 2) {
         RuntimeValue base;

@@ -1,0 +1,19 @@
+zsharp = type.script:window
+
+noticed Window InvalidImageMultiline[] (
+ import ZSharp.Window.Design():
+ import ZSharp.Window.TextInput():
+
+ noticed design Design[] (
+  title: "Invalid image multiline":
+ )
+
+ noticed textInput ImageInput[] (
+  display: "Choose an image":
+  type: image:
+  supportedTypes: [png]:
+  multiline: alive:
+  width: 20:
+  height: 10:
+ )
+)

@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.0.1.0",
+    [string] $Version = "1.0.1.1",
 
     [string] $BaseUrl = "https://www.zsharp.zombieos.com",
 
@@ -33,8 +33,6 @@ if ([string]::IsNullOrWhiteSpace($PublishingRoot)) {
 } else {
     $outRoot = [IO.Path]::GetFullPath($PublishingRoot)
 }
-$updateTemplate = Join-Path $projectRoot "website\update.js.template"
-
 if (-not $siteRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase) -or
     -not $buildRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase) -or
     -not $latestRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -195,17 +193,18 @@ $archiveChecksum =
     (Get-FileHash -Algorithm SHA256 -LiteralPath $latestArchive).Hash.ToLowerInvariant()
 $archiveSize = (Get-Item -LiteralPath $latestArchive).Length
 $archiveUrl = "$BaseUrl/assets/download/ZVM-LATEST.zip"
-$platformsJson = $platforms | ConvertTo-Json -Depth 4
-$updateManifest = Get-Content -LiteralPath $updateTemplate -Raw
-$updateManifest = $updateManifest.Replace("__LATEST_VERSION__", $Version)
-$updateManifest = $updateManifest.Replace("__ARCHIVE_URL__", $archiveUrl)
-$updateManifest = $updateManifest.Replace("__ARCHIVE_SHA256__", $archiveChecksum)
-$updateManifest = $updateManifest.Replace("__ARCHIVE_SIZE__", `
-    $archiveSize.ToString([Globalization.CultureInfo]::InvariantCulture))
-$updateManifest = $updateManifest.Replace("__PLATFORMS_JSON__", $platformsJson)
-if ($updateManifest.Contains("__")) {
-    throw "The generated update manifest still contains a template marker"
+$manifest = [ordered]@{
+    schema = 1
+    latestVersion = $Version
+    download = [ordered]@{
+        url = $archiveUrl
+        sha256 = $archiveChecksum
+        size = $archiveSize
+    }
+    platforms = $platforms
 }
+$updateManifest = ($manifest | ConvertTo-Json -Depth 5) +
+    [Environment]::NewLine
 [System.IO.File]::WriteAllText(
     (Join-Path $outRoot "zsharp-update-$Version.js"),
     $updateManifest,
@@ -216,16 +215,7 @@ if ($updateManifest.Contains("__")) {
     $updateManifest,
     $utf8NoBom
 )
-$exampleResponse = [ordered]@{
-    schema = 1
-    latestVersion = $Version
-    download = [ordered]@{
-        url = $archiveUrl
-        sha256 = $archiveChecksum
-        size = $archiveSize
-    }
-    platforms = $platforms
-} | ConvertTo-Json -Depth 5
+$exampleResponse = $manifest | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText(
     (Join-Path $buildRoot "update-response.json"),
     $exampleResponse + [Environment]::NewLine,

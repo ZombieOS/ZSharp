@@ -1,0 +1,18 @@
+zsharp = type.script:window
+
+noticed Window InvalidWrap[] (
+ import ZSharp.Window.Design():
+ import ZSharp.Window.TextInput():
+
+ noticed design Design[] (
+  title: "Invalid wrap":
+ )
+
+ noticed textInput Input[] (
+  display: "Single line":
+  type: text:
+  wrap: alive:
+  width: 20:
+  height: 10:
+ )
+)

@@ -2459,6 +2459,10 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
         } else if (strcmp(name, "type") == 0) {
             type = ZUI_PROPERTY_IDENTIFIER;
             valid = 1;
+        } else if (strcmp(name, "multiline") == 0 ||
+                   strcmp(name, "wrap") == 0) {
+            type = ZUI_PROPERTY_STATUS;
+            valid = 1;
         } else if (strcmp(name, "supportedTypes") == 0) {
             type = ZUI_PROPERTY_IDENTIFIER_ARRAY;
             valid = 1;
@@ -2537,6 +2541,8 @@ static int require_ui_field(Parser *parser, ZSharpUIElement *element,
 static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
     ZSharpUIProperty *input_type;
     ZSharpUIProperty *supported;
+    ZSharpUIProperty *multiline;
+    ZSharpUIProperty *wrap;
     if (element->type == ZUI_DESIGN) {
         return require_ui_field(parser, element, "title");
     }
@@ -2559,6 +2565,8 @@ static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
         !require_ui_field(parser, element, "height")) return 0;
     input_type = find_ui_property(element, "type");
     supported = find_ui_property(element, "supportedTypes");
+    multiline = find_ui_property(element, "multiline");
+    wrap = find_ui_property(element, "wrap");
     if (strcmp(input_type->text_value, "text") != 0 &&
         strcmp(input_type->text_value, "image") != 0) {
         fail_at(parser, &parser->current,
@@ -2574,6 +2582,18 @@ static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
     if (strcmp(input_type->text_value, "text") == 0 && supported != NULL) {
         fail_at(parser, &parser->current,
                 "supportedTypes is only valid for an image textInput");
+        return 0;
+    }
+    if (strcmp(input_type->text_value, "image") == 0 &&
+        (multiline != NULL || wrap != NULL)) {
+        fail_at(parser, &parser->current,
+                "multiline and wrap are only valid for a text textInput");
+        return 0;
+    }
+    if (wrap != NULL &&
+        (multiline == NULL || !multiline->status_value)) {
+        fail_at(parser, &parser->current,
+                "textInput wrap requires multiline: alive");
         return 0;
     }
     if (find_ui_property(element, "contents") == NULL &&

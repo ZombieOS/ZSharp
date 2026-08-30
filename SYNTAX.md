@@ -3,7 +3,7 @@
 This guide explains how to write Z# and compares its concepts with C#, Java,
 and C. The official source extension is `.zsharp`.
 
-Z# 1.0.1.0 implements the Z1 compiler and virtual machine plus the specialized
+Z# 1.0.1.1 implements the Z1 compiler and virtual machine plus the specialized
 window, 2D, and 3D script headers in this guide. Window syntax is accepted,
 validated, stored in bytecode, and rendered by native Windows, Linux, and macOS
 `zsharpwindow` backends. `.zapp` and `.zgame` packaging is implemented.
@@ -60,7 +60,7 @@ PID: "project_id":
 Version: [1.0.0.0]:
 Authors: ["Author1", "Author2"]:
 Description: "This is a Z# Project!":
-ZSharp: [1.0.1.0]:
+ZSharp: [1.0.1.1]:
 
 Dependencies (
  playfab:1.0.0.0
@@ -904,7 +904,7 @@ Z# bytecode      -> ZVM (`zsharp`)
 ```
 
 A Java application starts on the JVM. When it uses
-`com.zombieos:zsharp:1.0.1.0`, the library locates or extracts the bundled
+`com.zombieos:zsharp:1.0.1.1`, the library locates or extracts the bundled
 native Z# runtime and starts it as a child process. The ZVM then compiles or
 runs the requested Z# file.
 
@@ -1108,6 +1108,8 @@ uses AppKit.
 noticed textInput Input1[] (
  display: "This is an input box.":
  type: text:
+ multiline: alive:
+ wrap: alive:
  locationX: 10:
  locationY: 15:
  width: 15:
@@ -1127,16 +1129,41 @@ noticed textInput ImageInput[] (
 )
 ```
 
-`contents` begins as an empty array. Runtime input changes the live value to a
-one-element array:
+`contents` starts empty and is exposed to imported script functions as the full
+live text or selected image path:
 
 ```zsharp
-contents: ["whatever they input"]:
-contents: ["image/location/image.png"]:
+text EnteredText = Startup.Input1.contents:
+text SelectedImage = Startup.ImageInput.contents:
 ```
 
 The runtime changes UI state rather than rewriting packaged source code.
-Functions in imported script files read the current `contents` value.
+Functions in imported script files can read these live text-input values:
+
+```zsharp
+text FullText = Startup.Input1.contents:
+number Characters = Startup.Input1.totalcharacters:
+number Column = Startup.Input1.currentcolumn:
+number Lines = Startup.Input1.totallines:
+number Line = Startup.Input1.currentline:
+```
+
+The shorter `Input1.property` form also works. `currentline` and
+`currentcolumn` are 1-based. An empty text input has zero characters, one line,
+and a cursor at line 1, column 1. Line breaks count as characters, with a
+Windows CRLF pair counted as one line-break character. The four numeric fields
+are read-only and apply to text inputs; image inputs expose `contents` only.
+
+Text inputs are single-line by default. Add `multiline: alive:` to allow line
+breaks. A multiline input wraps long lines by default; use `wrap: dead:` when
+long lines should remain on one line and scroll horizontally instead. `wrap`
+cannot be set unless multiline mode is alive, and neither field is valid for
+an image input.
+
+Native window scrollbars remain hidden while all elements fit within the
+visible window. A vertical scrollbar appears automatically when content
+extends below the viewport. Multiline input scrollbars are handled inside the
+input itself.
 
 ### Changing live window attributes
 
@@ -1175,7 +1202,7 @@ noticed brain Animate[] (
 The alias must contain `Element.property` or `File.Element.property`. It must
 refer to the active window when the callback runs.
 
-The setter supports these live fields in 1.0.1.0:
+The setter supports these live fields in 1.0.1.1:
 
 - design: `title`, `icon`, `scalable`, `background`, `width`, `height`,
   `locationX`, and `locationY`;
@@ -1200,7 +1227,7 @@ PID: "my_application":
 Version: [1.0.0.0]:
 Authors: ["Author"]:
 Description: "A Z# application":
-ZSharp: [1.0.1.0]:
+ZSharp: [1.0.1.1]:
 
 Dependencies (
  zsharpwindow:1.0.0.0
@@ -1247,7 +1274,7 @@ macOS:   ~/Library/Application Support/ZSharp/projects.registry
 
 Z# applications use `.zapp` and games use `.zgame`.
 
-These are cross-platform Z# container formats. The normal 1.0.1.0 container
+These are cross-platform Z# container formats. The normal 1.0.1.1 container
 stores the validated project plus its compiled startup, with a SHA-256 hash for
 each entry. The unbytecoded companion uses the standard ZIP container and ZIP
 CRC checks. The runtime rejects corrupt data, absolute paths, `..` traversal,
@@ -1286,7 +1313,7 @@ archive. Rename `Application-unbytecoded.zapp` to
 does not change their contents.
 
 The packager checks `project.zsettings`, validates every included `.zsharp`
-file, and requires a configured `Window Startup` in 1.0.1.0. Renaming an
+file, and requires a configured `Window Startup` in 1.0.1.1. Renaming an
 ordinary ZIP file is not enough; Z# source packages carry a format marker and
 must be produced by `zsharp package --unbytecode`.
 
@@ -1313,9 +1340,12 @@ Install or refresh the current user's associations with:
 zsharp associate
 ```
 
-Opening an associated package launches a terminal and executes the Z# open
-command. On Windows this uses the per-user file association, Linux uses a
-terminal-enabled desktop entry, and macOS uses a Terminal launcher app.
+Opening an associated package or a Z#-created Desktop shortcut launches the app
+without opening a terminal. On Windows, Explorer launches are detached from the
+console; Linux desktop entries use `Terminal=false`; and macOS launcher apps run
+Z# in the background. Explicit `zsharp open` and `zsharp run` commands continue
+using the terminal in which they were entered. Existing Z#-created shortcuts
+are upgraded to the silent launch form the next time their package runs.
 
 Opening an application verifies every entry and extracts it to a private,
 content-addressed cache before running the configured startup window. On its
@@ -1334,7 +1364,7 @@ Uninstall asks the user to type `yes`, then permanently removes that verified
 package cache, the selected package file, and any Z#-created Desktop shortcut
 without using Recycle Bin or Trash.
 The future hub, app-data ledger, and optional ZOS Cloud backup are not part of
-1.0.1.0. See [UNINSTALL.md](UNINSTALL.md) for current behavior and the planned
+1.0.1.1. See [UNINSTALL.md](UNINSTALL.md) for current behavior and the planned
 full safety model.
 
 `.zgame` has the same secure package and metadata foundation in this release.
@@ -1420,6 +1450,16 @@ The first part selects the language generation:
 2.x.x.x -> Z2
 3.x.x.x -> Z3
 ```
+
+The installed ZVM supplies runtime and client behavior. A 1.0.1.0 application
+therefore continues to run on ZVM 1.0.1.1 and automatically receives runtime
+fixes such as smoother window painting and silent Desktop launches; its package
+does not need to be rebuilt. The `ZSharp` version in `project.zsettings`
+describes the source version the project targets. New source fields and syntax
+must be added to the project's code before the application can use them, while
+runtime-only fixes apply automatically. A current Z1 runtime accepts older Z1
+projects but still rejects projects that require an unreleased future
+generation.
 
 For the current release plan:
 

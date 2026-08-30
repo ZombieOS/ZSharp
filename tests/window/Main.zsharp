@@ -48,6 +48,8 @@ noticed Window Main[] (
  noticed textInput NameInput[] (
   display: "Enter your name":
   type: text:
+  multiline: alive:
+  wrap: dead:
   locationX: 10:
   locationY: 15:
   width: 15:

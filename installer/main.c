@@ -1333,11 +1333,12 @@ int main(int argc, char **argv) {
     if (!replace_file(runtime_temporary, runtime, runtime_backup,
                       "Z# runtime", error, sizeof(error)))
         goto done;
-    if (!check_mode && getenv("ZSHARP_INSTALLER_SKIP_INTEGRATION") == NULL) {
+    if (getenv("ZSHARP_INSTALLER_SKIP_INTEGRATION") == NULL) {
 #ifdef _WIN32
         char integration_error[512] = {0};
-        if (!add_to_user_path(install_directory, integration_error,
-                              sizeof(integration_error)))
+        if (!check_mode && !add_to_user_path(
+                install_directory, integration_error,
+                sizeof(integration_error)))
             fprintf(stderr, "PATH warning: %s\n", integration_error);
 #endif
         if (!run_associate(runtime))

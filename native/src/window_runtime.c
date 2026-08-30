@@ -18,6 +18,181 @@ static const char *source_stem(const char *source, size_t *length) {
     return name;
 }
 
+static int input_field(const char *name, ZSharpWindowInputField *field) {
+    if (strcmp(name, "contents") == 0)
+        *field = ZWINDOW_INPUT_CONTENTS;
+    else if (strcmp(name, "totalcharacters") == 0)
+        *field = ZWINDOW_INPUT_TOTAL_CHARACTERS;
+    else if (strcmp(name, "currentcolumn") == 0)
+        *field = ZWINDOW_INPUT_CURRENT_COLUMN;
+    else if (strcmp(name, "totallines") == 0)
+        *field = ZWINDOW_INPUT_TOTAL_LINES;
+    else if (strcmp(name, "currentline") == 0)
+        *field = ZWINDOW_INPUT_CURRENT_LINE;
+    else
+        return 0;
+    return 1;
+}
+
+int zsharp_window_model_resolve_input(
+    ZSharpProgram *program, const char *path, ZSharpUIElement **element_output,
+    ZSharpWindowInputField *field_output, char *error, size_t error_size) {
+    char *copy;
+    char *parts[3] = {0};
+    size_t count = 1;
+    char *cursor;
+    const char *element_name;
+    ZSharpWindowInputField field;
+    size_t index;
+    if (program == NULL || path == NULL) {
+        snprintf(error, error_size, "text input property target is missing");
+        return 0;
+    }
+    copy = zsharp_copy_text(path, strlen(path));
+    if (copy == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    parts[0] = copy;
+    for (cursor = copy; *cursor != '\0'; cursor++) {
+        if (*cursor == '.') {
+            *cursor = '\0';
+            if (count == 3 || cursor[1] == '\0') {
+                snprintf(error, error_size,
+                         "text input reads use Input.property or "
+                         "File.Input.property");
+                free(copy);
+                return 0;
+            }
+            parts[count++] = cursor + 1;
+        }
+    }
+    if ((count != 2 && count != 3) ||
+        !input_field(parts[count - 1], &field)) {
+        snprintf(error, error_size,
+                 "text input reads use Input.contents, "
+                 "Input.totalcharacters, Input.currentcolumn, "
+                 "Input.totallines, or Input.currentline");
+        free(copy);
+        return 0;
+    }
+    if (count == 3) {
+        size_t stem_length;
+        const char *stem = source_stem(program->source_name, &stem_length);
+        if (strlen(parts[0]) != stem_length ||
+            memcmp(parts[0], stem, stem_length) != 0) {
+            snprintf(error, error_size,
+                     "active window file is '%.*s', not '%s'",
+                     (int)stem_length, stem, parts[0]);
+            free(copy);
+            return 0;
+        }
+    }
+    element_name = parts[count - 2];
+    for (index = 0; index < program->window.element_count; index++) {
+        ZSharpUIElement *element = &program->window.elements[index];
+        if (strcmp(element->name, element_name) != 0) continue;
+        if (element->type != ZUI_TEXT_INPUT) {
+            snprintf(error, error_size, "UI element '%s' is not a textInput",
+                     element_name);
+            free(copy);
+            return 0;
+        }
+        if (field != ZWINDOW_INPUT_CONTENTS) {
+            ZSharpUIProperty *type = NULL;
+            size_t property_index;
+            for (property_index = 0;
+                 property_index < element->property_count; property_index++) {
+                if (strcmp(element->properties[property_index].name,
+                           "type") == 0) {
+                    type = &element->properties[property_index];
+                    break;
+                }
+            }
+            if (type == NULL || type->text_value == NULL ||
+                strcmp(type->text_value, "text") != 0) {
+                snprintf(error, error_size,
+                         "%s is only available on text textInputs",
+                         parts[count - 1]);
+                free(copy);
+                return 0;
+            }
+        }
+        *element_output = element;
+        *field_output = field;
+        free(copy);
+        return 1;
+    }
+    snprintf(error, error_size, "active window has no textInput named '%s'",
+             element_name);
+    free(copy);
+    return 0;
+}
+
+static size_t utf8_width(unsigned char first) {
+    if ((first & 0x80u) == 0) return 1;
+    if ((first & 0xe0u) == 0xc0u) return 2;
+    if ((first & 0xf0u) == 0xe0u) return 3;
+    if ((first & 0xf8u) == 0xf0u) return 4;
+    return 1;
+}
+
+size_t zsharp_window_utf8_byte_offset(const char *text,
+                                      size_t character_offset) {
+    size_t byte = 0;
+    size_t character = 0;
+    size_t length = text == NULL ? 0 : strlen(text);
+    while (byte < length && character < character_offset) {
+        size_t width = utf8_width((unsigned char)text[byte]);
+        if (width > length - byte) width = 1;
+        byte += width;
+        character++;
+    }
+    return byte;
+}
+
+void zsharp_window_text_metrics(const char *text, size_t cursor_byte_offset,
+                                size_t *total_characters,
+                                size_t *total_lines, size_t *current_line,
+                                size_t *current_column) {
+    size_t byte = 0;
+    size_t length = text == NULL ? 0 : strlen(text);
+    size_t characters = 0;
+    size_t lines = 1;
+    size_t line = 1;
+    size_t column = 1;
+    if (cursor_byte_offset > length) cursor_byte_offset = length;
+    while (byte < length) {
+        size_t width = utf8_width((unsigned char)text[byte]);
+        int before_cursor = byte < cursor_byte_offset;
+        if (text[byte] == '\r' && byte + 1 < length && text[byte + 1] == '\n')
+            width = 2;
+        else if (width > length - byte)
+            width = 1;
+        characters++;
+        if (text[byte] == '\r' || text[byte] == '\n') {
+            lines++;
+            if (before_cursor) {
+                line++;
+                column = 1;
+            }
+        } else if (before_cursor) {
+            column++;
+        }
+        byte += width;
+    }
+    *total_characters = characters;
+    *total_lines = lines;
+    *current_line = line;
+    *current_column = column;
+}
+
+char *zsharp_window_copy_size(size_t value) {
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%zu", value);
+    return zsharp_copy_text(buffer, strlen(buffer));
+}
+
 static ZSharpUIPropertyType expected_property_type(
     ZSharpUIElementType element, const char *name) {
     int measurement = strcmp(name, "width") == 0 ||

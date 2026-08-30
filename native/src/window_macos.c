@@ -20,6 +20,7 @@ typedef void (*MacImp)(void);
 typedef struct MacPoint { double x, y; } MacPoint;
 typedef struct MacSize { double width, height; } MacSize;
 typedef struct MacRect { MacPoint origin; MacSize size; } MacRect;
+typedef struct MacRange { unsigned long location, length; } MacRange;
 
 typedef struct MacApi {
     void *appkit;
@@ -41,9 +42,11 @@ struct MacWindowState;
 
 typedef struct MacControl {
     MacId widget;
+    MacId input_view;
     MacId right_gesture;
     ZSharpUIElement *element;
     int is_image_input;
+    int is_multiline;
     struct MacWindowState *state;
 } MacControl;
 
@@ -81,6 +84,16 @@ typedef struct MacPropertyRequest {
     int result;
     char error[512];
 } MacPropertyRequest;
+
+typedef struct MacReadRequest {
+    MacWindowState *state;
+    const char *path;
+    ZSharpWindowReadType value_type;
+    char *text_value;
+    volatile int done;
+    int result;
+    char error[512];
+} MacReadRequest;
 
 static MacWindowState *active_state;
 static void layout_controls(MacWindowState *state);
@@ -156,6 +169,11 @@ static long send_long(MacApi *api, MacId object, const char *name) {
         object, selector(api, name));
 }
 
+static int responds_to(MacApi *api, MacId object, const char *name) {
+    return ((signed char (*)(MacId, MacSelector, MacSelector))api->message)(
+        object, selector(api, "respondsToSelector:"), selector(api, name)) != 0;
+}
+
 static const char *send_utf8(MacApi *api, MacId object) {
     return ((const char *(*)(MacId, MacSelector))api->message)(
         object, selector(api, "UTF8String"));
@@ -171,6 +189,17 @@ static MacRect send_rect(MacApi *api, MacId object, const char *name) {
         object, selector(api, name));
 #endif
     return result;
+}
+
+static MacRange send_range(MacApi *api, MacId object, const char *name) {
+    return ((MacRange (*)(MacId, MacSelector))api->message)(
+        object, selector(api, name));
+}
+
+static MacId send_id_integer(MacApi *api, MacId object, const char *name,
+                             unsigned long value) {
+    return ((MacId (*)(MacId, MacSelector, unsigned long))api->message)(
+        object, selector(api, name), value);
 }
 
 static MacId ns_string(MacApi *api, const char *text) {
@@ -246,6 +275,12 @@ static ZSharpUIElement *design_element(ZSharpWindow *window) {
     return NULL;
 }
 
+static int status_property(ZSharpUIElement *element, const char *name,
+                           int fallback) {
+    ZSharpUIProperty *value = property(element, name);
+    return value == NULL ? fallback : value->status_value;
+}
+
 static char *path_join(const char *root, const char *relative) {
     size_t a = strlen(root), b = strlen(relative);
     int slash = a != 0 && root[a - 1] != '/';
@@ -311,7 +346,10 @@ static void update_input(MacWindowState *state, MacControl *control) {
     const char *text;
     char *copy;
     if (contents == NULL || control->is_image_input) return;
-    value = send_id(&state->api, control->widget, "stringValue");
+    value = send_id(&state->api,
+                    control->input_view == NULL ? control->widget
+                                                : control->input_view,
+                    control->is_multiline ? "string" : "stringValue");
     text = value == NULL ? "" : send_utf8(&state->api, value);
     if (text == NULL) text = "";
     copy = zsharp_copy_text(text, strlen(text));
@@ -600,7 +638,7 @@ static void layout_controls(MacWindowState *state) {
     MacId clip = send_id(&state->api, state->scroll_view, "contentView");
     MacRect viewport = send_rect(&state->api, clip, "bounds");
     size_t index;
-    double content_bottom = viewport.size.height;
+    double content_bottom = 0.0;
     double responsive_scale = state->layout_width > 0.0
         ? viewport.size.width / state->layout_width : 1.0;
     if (responsive_scale > 1.0) responsive_scale = 1.0;
@@ -647,7 +685,8 @@ static void layout_controls(MacWindowState *state) {
     {
         MacSize document_size;
         document_size.width = viewport.size.width;
-        document_size.height = content_bottom + 16.0;
+        document_size.height = content_bottom > viewport.size.height
+            ? content_bottom + 16.0 : viewport.size.height;
         send_void_size(&state->api, state->content, "setFrameSize:",
                        document_size);
     }
@@ -758,10 +797,13 @@ static int set_window_property_ui(void *data, const char *path,
                          ns_color(api, changed->text_value, "#000000"));
         } else if (element->type == ZUI_TEXT_INPUT &&
                    strcmp(changed->name, "display") == 0) {
-            send_void_id(api, control->widget,
-                         control->is_image_input ? "setTitle:"
-                                                 : "setPlaceholderString:",
-                         ns_string(api, changed->text_value));
+            MacId target = control->input_view == NULL
+                ? control->widget : control->input_view;
+            const char *setter = control->is_image_input ? "setTitle:"
+                : "setPlaceholderString:";
+            if (control->is_image_input || responds_to(api, target, setter))
+                send_void_id(api, target, setter,
+                             ns_string(api, changed->text_value));
         } else if (element->type == ZUI_IMAGE &&
                    strcmp(changed->name, "file") == 0) {
             char *image_path = path_join(state->project_root,
@@ -795,6 +837,102 @@ static void apply_property_request(void *data) {
         request->result = set_window_property_ui(
             state, request->path, request->value_type, request->text_value,
             request->unit, request->error, sizeof(request->error));
+    }
+    __atomic_store_n(&request->done, 1, __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+}
+
+static int get_window_property_ui(MacWindowState *state, const char *path,
+                                  ZSharpWindowReadType *value_type,
+                                  char **text_value, char *error,
+                                  size_t error_size) {
+    ZSharpUIElement *element = NULL;
+    ZSharpWindowInputField field;
+    MacControl *control;
+    ZSharpUIProperty *contents;
+    MacId input;
+    MacId selection_target;
+    size_t cursor_bytes;
+    size_t total_characters;
+    size_t total_lines;
+    size_t current_line;
+    size_t current_column;
+    if (!zsharp_window_model_resolve_input(
+            state->program, path, &element, &field, error, error_size))
+        return 0;
+    control = control_for_element(state, element);
+    if (control == NULL) {
+        snprintf(error, error_size, "textInput '%s' is not active",
+                 element->name);
+        return 0;
+    }
+    update_input(state, control);
+    contents = property(element, "contents");
+    if (contents == NULL || contents->text_value == NULL) {
+        snprintf(error, error_size, "textInput '%s' has no contents",
+                 element->name);
+        return 0;
+    }
+    if (field == ZWINDOW_INPUT_CONTENTS) {
+        *value_type = ZWINDOW_READ_TEXT;
+        *text_value = zsharp_copy_text(contents->text_value,
+                                       strlen(contents->text_value));
+        if (*text_value == NULL) {
+            snprintf(error, error_size, "out of memory");
+            return 0;
+        }
+        return 1;
+    }
+    input = control->input_view == NULL ? control->widget
+                                        : control->input_view;
+    selection_target = control->is_multiline
+        ? input : send_id(&state->api, control->widget, "currentEditor");
+    cursor_bytes = strlen(contents->text_value);
+    if (selection_target != NULL &&
+        responds_to(&state->api, selection_target, "selectedRange")) {
+        MacRange selection = send_range(&state->api, selection_target,
+                                        "selectedRange");
+        MacId string = send_id(&state->api, input,
+                               control->is_multiline ? "string"
+                                                     : "stringValue");
+        unsigned long length = string == NULL ? 0ul :
+            (unsigned long)send_long(&state->api, string, "length");
+        if (selection.location > length) selection.location = length;
+        if (string != NULL) {
+            MacId prefix = send_id_integer(&state->api, string,
+                                            "substringToIndex:",
+                                            selection.location);
+            const char *prefix_text = prefix == NULL ? NULL :
+                send_utf8(&state->api, prefix);
+            if (prefix_text != NULL) cursor_bytes = strlen(prefix_text);
+        }
+    }
+    zsharp_window_text_metrics(contents->text_value, cursor_bytes,
+                               &total_characters, &total_lines,
+                               &current_line, &current_column);
+    *value_type = ZWINDOW_READ_NUMBER;
+    *text_value = zsharp_window_copy_size(
+        field == ZWINDOW_INPUT_TOTAL_CHARACTERS ? total_characters :
+        field == ZWINDOW_INPUT_CURRENT_COLUMN ? current_column :
+        field == ZWINDOW_INPUT_TOTAL_LINES ? total_lines : current_line);
+    if (*text_value == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    return 1;
+}
+
+static void apply_read_request(void *data) {
+    MacReadRequest *request = (MacReadRequest *)data;
+    MacWindowState *state = request->state;
+    if (mac_window_cancelled(state)) {
+        snprintf(request->error, sizeof(request->error),
+                 "the window is closing");
+        request->result = 0;
+    } else {
+        request->result = get_window_property_ui(
+            state, request->path, &request->value_type, &request->text_value,
+            request->error, sizeof(request->error));
     }
     __atomic_store_n(&request->done, 1, __ATOMIC_RELEASE);
     __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
@@ -837,6 +975,50 @@ static int runtime_set_window_property(void *data, const char *path,
         snprintf(error, error_size, "%s",
                  request->error[0] == '\0' ? "the window update failed"
                                            : request->error);
+    }
+    {
+        int result = request->result;
+        free(request);
+        return result;
+    }
+}
+
+static int runtime_get_window_property(void *data, const char *path,
+                                       ZSharpWindowReadType *value_type,
+                                       char **text_value, char *error,
+                                       size_t error_size) {
+    MacWindowState *state = (MacWindowState *)data;
+    MacReadRequest *request;
+    struct timespec pause = {0, 1000000L};
+    if (mac_window_cancelled(state)) {
+        snprintf(error, error_size, "the window is closing");
+        return 0;
+    }
+    request = (MacReadRequest *)calloc(1, sizeof(*request));
+    if (request == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    request->state = state;
+    request->path = path;
+    __atomic_add_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+    if (mac_window_cancelled(state)) {
+        __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+        free(request);
+        snprintf(error, error_size, "the window is closing");
+        return 0;
+    }
+    state->api.dispatch_async_f(state->api.dispatch_get_main_queue(), request,
+                                apply_read_request);
+    while (!__atomic_load_n(&request->done, __ATOMIC_ACQUIRE))
+        nanosleep(&pause, NULL);
+    if (!request->result) {
+        snprintf(error, error_size, "%s",
+                 request->error[0] == '\0' ? "the window read failed"
+                                           : request->error);
+    } else {
+        *value_type = request->value_type;
+        *text_value = request->text_value;
     }
     {
         int result = request->result;
@@ -975,6 +1157,8 @@ static int create_controls(MacWindowState *state, MacId content,
             ZSharpUIProperty *display = property(element, "display");
             control->is_image_input = type != NULL &&
                 strcmp(type->text_value, "image") == 0;
+            control->is_multiline = !control->is_image_input &&
+                status_property(element, "multiline", 0);
             if (control->is_image_input) {
                 widget = ((MacId (*)(MacId, MacSelector, MacId, MacId,
                                      MacSelector))api->message)(
@@ -983,6 +1167,67 @@ static int create_controls(MacWindowState *state, MacId content,
                     ns_string(api, display == NULL ? "Choose an image"
                                                    : display->text_value),
                     state->target, selector(api, "zsharpAction:"));
+            } else if (control->is_multiline) {
+                int wraps = status_property(element, "wrap", 1);
+                MacId scroll = ((MacId (*)(MacId, MacSelector, MacRect))
+                    api->message)(
+                        send_id(api, (MacId)api->get_class("NSScrollView"),
+                                "alloc"),
+                        selector(api, "initWithFrame:"), frame);
+                MacRect text_frame;
+                MacId text_view;
+                MacId text_container;
+                if (scroll == NULL) {
+                    widget = NULL;
+                } else {
+                    MacId clip = send_id(api, scroll, "contentView");
+                    text_frame = send_rect(api, clip, "bounds");
+                    text_view = ((MacId (*)(MacId, MacSelector, MacRect))
+                        api->message)(
+                            send_id(api, (MacId)api->get_class("NSTextView"),
+                                    "alloc"),
+                            selector(api, "initWithFrame:"), text_frame);
+                    if (text_view == NULL) {
+                        widget = NULL;
+                    } else {
+                        send_void_bool(api, scroll, "setHasVerticalScroller:",
+                                       1);
+                        send_void_bool(api, scroll, "setHasHorizontalScroller:",
+                                       !wraps);
+                        send_void_bool(api, scroll, "setAutohidesScrollers:",
+                                       1);
+                        send_void_integer(api, scroll, "setBorderType:", 2);
+                        send_void_bool(api, text_view, "setRichText:", 0);
+                        send_void_bool(api, text_view,
+                                       "setVerticallyResizable:", 1);
+                        send_void_bool(api, text_view,
+                                       "setHorizontallyResizable:", !wraps);
+                        send_void_integer(api, text_view,
+                                          "setAutoresizingMask:", 2);
+                        text_container = send_id(api, text_view,
+                                                 "textContainer");
+                        if (text_container != NULL) {
+                            MacSize container_size;
+                            container_size.width = wraps
+                                ? text_frame.size.width : 10000000.0;
+                            container_size.height = 10000000.0;
+                            send_void_bool(api, text_container,
+                                           "setWidthTracksTextView:", wraps);
+                            send_void_size(api, text_container,
+                                           "setContainerSize:",
+                                           container_size);
+                        }
+                        if (display != NULL && responds_to(
+                                api, text_view, "setPlaceholderString:"))
+                            send_void_id(api, text_view,
+                                         "setPlaceholderString:",
+                                         ns_string(api, display->text_value));
+                        send_void_id(api, scroll, "setDocumentView:",
+                                     text_view);
+                        control->input_view = text_view;
+                        widget = scroll;
+                    }
+                }
             } else {
                 widget = send_id_id(api, (MacId)api->get_class("NSTextField"),
                                     "textFieldWithString:", ns_string(api, ""));
@@ -1051,6 +1296,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.callback_data = user_data;
     state.runtime.state = &state;
     state.runtime.set_property = runtime_set_window_property;
+    state.runtime.get_property = runtime_get_window_property;
     state.runtime.wait = wait_with_window_events;
     state.runtime.is_cancelled = mac_window_cancelled;
     design = design_element(&program->window);

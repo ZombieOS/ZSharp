@@ -16,6 +16,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 static char command_failure[512];
 
 static void remember_failure(const char *message) {
@@ -668,6 +673,19 @@ static void offer_desktop_shortcut(const char *app_name,
     free(icon);
 }
 
+static void refresh_desktop_shortcut(const char *app_name,
+                                     const char *package_path,
+                                     const char *project_root,
+                                     const char *startup_path) {
+    char error[512] = {0};
+    char *icon = startup_window_icon(startup_path);
+    if (!zsharp_desktop_refresh_shortcut(
+            app_name, package_path, project_root, icon,
+            error, sizeof(error)))
+        fprintf(stderr, "shortcut warning: %s\n", error);
+    free(icon);
+}
+
 static int open_package_command(const char *package_path, int argc,
                                 char **argv, int first_option) {
     ZSharpPackageInfo info;
@@ -744,13 +762,18 @@ static int open_package_command(const char *package_path, int argc,
         free(startup_bytecode);
         return 1;
     }
-    if (new_install && getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") == NULL) {
-        char association_error[512] = {0};
-        if (getenv("ZSHARP_SKIP_ASSOCIATION_INSTALL") == NULL &&
-            !zsharp_desktop_install_associations(association_error,
-                                                  sizeof(association_error)))
-            fprintf(stderr, "association warning: %s\n", association_error);
-        offer_desktop_shortcut(app_name, package_path, root, startup);
+    if (getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") == NULL) {
+        if (new_install) {
+            char association_error[512] = {0};
+            if (getenv("ZSHARP_SKIP_ASSOCIATION_INSTALL") == NULL &&
+                !zsharp_desktop_install_associations(
+                    association_error, sizeof(association_error)))
+                fprintf(stderr, "association warning: %s\n",
+                        association_error);
+            offer_desktop_shortcut(app_name, package_path, root, startup);
+        } else {
+            refresh_desktop_shortcut(app_name, package_path, root, startup);
+        }
     }
     zsharp_settings_free(&settings);
     zsharp_package_info_free(&info);
@@ -811,6 +834,18 @@ static int uninstall_package_command(const char *package_path) {
 }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    if (argc > 1 && (strcmp(argv[1], "open-desktop") == 0 ||
+        strcmp(argv[1], "open") == 0)) {
+        DWORD console_processes[2];
+        DWORD count = GetConsoleProcessList(console_processes, 2);
+        if (strcmp(argv[1], "open-desktop") == 0 || count <= 1) {
+            HWND console = GetConsoleWindow();
+            if (console != NULL) ShowWindow(console, SW_HIDE);
+            FreeConsole();
+        }
+    }
+#endif
     if (!(argc > 1 && strcmp(argv[1], "associate") == 0))
         zsharp_update_check_start();
     if (argc == 1) {
@@ -879,7 +914,8 @@ int main(int argc, char **argv) {
         return package_command(argv[2], argv[3], argv[4],
                                include_unbytecoded);
     }
-    if (strcmp(argv[1], "open") == 0) {
+    if (strcmp(argv[1], "open") == 0 ||
+        strcmp(argv[1], "open-desktop") == 0) {
         if (argc < 3 || !is_package_file(argv[2])) {
             fputs("error: use 'zsharp open <file.zapp|file.zgame>'\n", stderr);
             return 2;

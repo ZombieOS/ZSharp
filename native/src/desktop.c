@@ -206,7 +206,7 @@ int zsharp_desktop_install_associations(char *error, size_t error_size) {
         return 0;
     }
     swprintf(command, sizeof(command) / sizeof(command[0]),
-             L"\"%ls\" open \"%%1\"", executable);
+             L"\"%ls\" open-desktop \"%%1\"", executable);
     if (!set_registry_default(HKEY_CURRENT_USER,
             L"Software\\Classes\\.zapp", L"ZSharp.Application") ||
         !set_registry_default(HKEY_CURRENT_USER,
@@ -275,7 +275,7 @@ int zsharp_desktop_create_shortcut(const char *display_name,
     swprintf(shortcut_path, sizeof(shortcut_path) / sizeof(shortcut_path[0]),
              L"%ls\\%ls.lnk", desktop, wide_name);
     swprintf(arguments, sizeof(arguments) / sizeof(arguments[0]),
-             L"open \"%ls\"", package_absolute);
+             L"open-desktop \"%ls\"", package_absolute);
     initialized = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) {
         desktop_error(error, error_size, "could not initialize shortcut support");
@@ -322,6 +322,36 @@ done:
     free(name);
     free(wide_package);
     return ok;
+}
+
+int zsharp_desktop_refresh_shortcut(const char *display_name,
+                                    const char *package_path,
+                                    const char *project_root,
+                                    const char *icon_relative,
+                                    char *error, size_t error_size) {
+    WCHAR desktop[MAX_PATH];
+    WCHAR shortcut_path[32768];
+    WCHAR *wide_name;
+    char *name = safe_name(display_name);
+    DWORD attributes;
+    if (name == NULL || !windows_desktop(
+            desktop, (DWORD)(sizeof(desktop) / sizeof(desktop[0])))) {
+        free(name);
+        desktop_error(error, error_size, "could not locate the Windows desktop");
+        return 0;
+    }
+    wide_name = wide_text(name);
+    free(name);
+    if (wide_name == NULL) return 0;
+    swprintf(shortcut_path,
+             sizeof(shortcut_path) / sizeof(shortcut_path[0]),
+             L"%ls\\%ls.lnk", desktop, wide_name);
+    free(wide_name);
+    attributes = GetFileAttributesW(shortcut_path);
+    if (attributes == INVALID_FILE_ATTRIBUTES) return 1;
+    return zsharp_desktop_create_shortcut(
+        display_name, package_path, project_root, icon_relative,
+        error, error_size);
 }
 
 int zsharp_desktop_remove_shortcut(const char *display_name,
@@ -510,7 +540,7 @@ int zsharp_desktop_install_associations(char *error, size_t error_size) {
     if (launcher == NULL) goto done;
     sprintf(launcher,
         "[Desktop Entry]\nType=Application\nName=Z# Package Launcher\n"
-        "Exec=%s open %%f\nTerminal=true\nNoDisplay=true\n"
+        "Exec=%s open %%f\nTerminal=false\nNoDisplay=true\n"
         "MimeType=application/x-zsharp-app;application/x-zsharp-game;\n",
         quoted_executable);
     if (!write_file(desktop_file, launcher, 1, error, error_size) ||
@@ -584,7 +614,7 @@ int zsharp_desktop_create_shortcut(const char *display_name,
     if (contents == NULL) goto done;
     sprintf(contents,
         "[Desktop Entry]\nType=Application\nName=%s\nExec=%s open %s\n"
-        "Terminal=true\nIcon=%s\nCategories=Utility;\n",
+        "Terminal=false\nIcon=%s\nCategories=Utility;\n",
         name, quoted_executable, quoted_package, icon == NULL ? "zsharp" : icon);
     ok = write_file(path, contents, 1, error, error_size);
 done:
@@ -599,6 +629,37 @@ done:
     free(name);
     free(desktop);
     return ok;
+}
+
+int zsharp_desktop_refresh_shortcut(const char *display_name,
+                                    const char *package_path,
+                                    const char *project_root,
+                                    const char *icon_relative,
+                                    char *error, size_t error_size) {
+    const char *home = getenv("HOME");
+    const char *desktop_override = getenv("ZSHARP_DESKTOP_DIRECTORY");
+    char *desktop;
+    char *name;
+    char *filename;
+    char *path;
+    int exists;
+    if (home == NULL || home[0] == '\0') return 1;
+    desktop = desktop_override != NULL && desktop_override[0] != '\0'
+        ? copy_text(desktop_override) : join_path(home, "Desktop");
+    name = safe_name(display_name);
+    filename = name == NULL ? NULL : (char *)malloc(strlen(name) + 9);
+    if (filename != NULL) sprintf(filename, "%s.desktop", name);
+    path = desktop == NULL || filename == NULL ? NULL
+        : join_path(desktop, filename);
+    exists = path != NULL && access(path, F_OK) == 0;
+    free(path);
+    free(filename);
+    free(name);
+    free(desktop);
+    if (!exists) return 1;
+    return zsharp_desktop_create_shortcut(
+        display_name, package_path, project_root, icon_relative,
+        error, error_size);
 }
 
 int zsharp_desktop_remove_shortcut(const char *display_name,
@@ -675,16 +736,14 @@ static char *apple_script_text(const char *executable, const char *package) {
         if (script != NULL) snprintf(script, size,
             "on open droppedItems\n repeat with itemRef in droppedItems\n"
             "  set commandText to quoted form of %s & \" open \" & quoted form of POSIX path of itemRef\n"
-            "  tell application \"Terminal\" to activate\n"
-            "  tell application \"Terminal\" to do script commandText\n"
+            "  do shell script commandText & \" >/dev/null 2>&1 &\"\n"
             " end repeat\nend open\n", quoted_executable);
     } else {
         size = strlen(quoted_executable) + strlen(quoted_package) + 384;
         script = (char *)malloc(size);
         if (script != NULL) snprintf(script, size,
             "on run\n set commandText to quoted form of %s & \" open \" & quoted form of %s\n"
-            " tell application \"Terminal\" to activate\n"
-            " tell application \"Terminal\" to do script commandText\n"
+            " do shell script commandText & \" >/dev/null 2>&1 &\"\n"
             "end run\n", quoted_executable, quoted_package);
     }
     free(quoted_executable);
@@ -828,6 +887,36 @@ done:
     free(name);
     free(desktop);
     return ok;
+}
+
+int zsharp_desktop_refresh_shortcut(const char *display_name,
+                                    const char *package_path,
+                                    const char *project_root,
+                                    const char *icon_relative,
+                                    char *error, size_t error_size) {
+    const char *home = getenv("HOME");
+    const char *desktop_override = getenv("ZSHARP_DESKTOP_DIRECTORY");
+    char *desktop;
+    char *name;
+    char *bundle;
+    char *path;
+    int exists;
+    if (home == NULL || home[0] == '\0') return 1;
+    desktop = desktop_override != NULL && desktop_override[0] != '\0'
+        ? copy_text(desktop_override) : join_path(home, "Desktop");
+    name = safe_name(display_name);
+    bundle = name == NULL ? NULL : (char *)malloc(strlen(name) + 5);
+    if (bundle != NULL) sprintf(bundle, "%s.app", name);
+    path = desktop == NULL || bundle == NULL ? NULL : join_path(desktop, bundle);
+    exists = path != NULL && access(path, F_OK) == 0;
+    free(path);
+    free(bundle);
+    free(name);
+    free(desktop);
+    if (!exists) return 1;
+    return zsharp_desktop_create_shortcut(
+        display_name, package_path, project_root, icon_relative,
+        error, error_size);
 }
 
 static int remove_applet_tree(const char *path) {

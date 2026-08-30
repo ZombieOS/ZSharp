@@ -1,12 +1,16 @@
 # Z# bytecode identity and integrity
 
-Z# 1.0.1.0 automatically embeds two SHA-256 values in each compiled bytecode
+Z# 1.0.1.1 automatically embeds two SHA-256 values in each compiled bytecode
 file. Neither value is written in `project.zsettings`.
 
 Bytecode format `0.17` adds text-based aliases for live window-property paths.
 For example, a text value containing `Main.Design.background` can be used with
 `Background.set: #FFFFFF:`. Format `0.16` added direct live window-property and
 wait/delay instructions.
+Text-input reads use the existing `ZOP_LOAD_PATH` instruction. While a window
+callback is active, paths ending in `contents`, `totalcharacters`,
+`currentcolumn`, `totallines`, or `currentline` are resolved against the live
+native text input; no bytecode-format bump is needed.
 It also records the script kind and the complete validated
 window model, including imports, UI elements, properties, units, and callback
 references. The reader remains compatible with ordinary `0.14`, window

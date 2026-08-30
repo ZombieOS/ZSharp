@@ -15,6 +15,7 @@
 typedef void GtkWidget;
 typedef void GdkPixbuf;
 typedef struct GtkAllocation { int x, y, width, height; } GtkAllocation;
+typedef struct GtkTextIterStorage { void *words[16]; } GtkTextIterStorage;
 typedef struct GdkRGBA { double red, green, blue, alpha; } GdkRGBA;
 typedef struct GdkEventButton {
     int type;
@@ -56,6 +57,17 @@ typedef struct GtkApi {
     GtkWidget *(*entry_new)(void);
     void (*entry_set_placeholder_text)(void *, const char *);
     const char *(*entry_get_text)(void *);
+    int (*editable_get_position)(void *);
+    GtkWidget *(*text_view_new)(void);
+    void *(*text_view_get_buffer)(void *);
+    void (*text_view_set_wrap_mode)(void *, int);
+    void (*text_buffer_set_text)(void *, const char *, int);
+    void (*text_buffer_get_start_iter)(void *, void *);
+    void (*text_buffer_get_end_iter)(void *, void *);
+    char *(*text_buffer_get_text)(void *, const void *, const void *, int);
+    void *(*text_buffer_get_insert)(void *);
+    void (*text_buffer_get_iter_at_mark)(void *, void *, void *);
+    int (*text_iter_get_offset)(const void *);
     GtkWidget *(*image_new_from_pixbuf)(void *);
     void (*image_set_from_pixbuf)(void *, void *);
     GtkWidget *(*file_chooser_button_new)(const char *, int);
@@ -99,8 +111,12 @@ struct LinuxWindowState;
 
 typedef struct LinuxControl {
     GtkWidget *widget;
+    GtkWidget *input_widget;
+    void *text_buffer;
     ZSharpUIElement *element;
     int is_image_input;
+    int is_multiline;
+    int placeholder_active;
     int image_width;
     int image_height;
     void *css_provider;
@@ -140,6 +156,16 @@ typedef struct LinuxPropertyRequest {
     int result;
     char error[512];
 } LinuxPropertyRequest;
+
+typedef struct LinuxReadRequest {
+    LinuxWindowState *state;
+    const char *path;
+    ZSharpWindowReadType value_type;
+    char *text_value;
+    volatile int done;
+    int result;
+    char error[512];
+} LinuxReadRequest;
 
 static void *load_symbol(void *library, const char *name) {
     return library == NULL ? NULL : dlsym(library, name);
@@ -194,6 +220,27 @@ static int gtk_api_load(GtkApi *api, char *error, size_t error_size) {
     GTK_REQUIRED(api, entry_set_placeholder_text, api->gtk,
                  "gtk_entry_set_placeholder_text");
     GTK_REQUIRED(api, entry_get_text, api->gtk, "gtk_entry_get_text");
+    GTK_REQUIRED(api, editable_get_position, api->gtk,
+                 "gtk_editable_get_position");
+    GTK_REQUIRED(api, text_view_new, api->gtk, "gtk_text_view_new");
+    GTK_REQUIRED(api, text_view_get_buffer, api->gtk,
+                 "gtk_text_view_get_buffer");
+    GTK_REQUIRED(api, text_view_set_wrap_mode, api->gtk,
+                 "gtk_text_view_set_wrap_mode");
+    GTK_REQUIRED(api, text_buffer_set_text, api->gtk,
+                 "gtk_text_buffer_set_text");
+    GTK_REQUIRED(api, text_buffer_get_start_iter, api->gtk,
+                 "gtk_text_buffer_get_start_iter");
+    GTK_REQUIRED(api, text_buffer_get_end_iter, api->gtk,
+                 "gtk_text_buffer_get_end_iter");
+    GTK_REQUIRED(api, text_buffer_get_text, api->gtk,
+                 "gtk_text_buffer_get_text");
+    GTK_REQUIRED(api, text_buffer_get_insert, api->gtk,
+                 "gtk_text_buffer_get_insert");
+    GTK_REQUIRED(api, text_buffer_get_iter_at_mark, api->gtk,
+                 "gtk_text_buffer_get_iter_at_mark");
+    GTK_REQUIRED(api, text_iter_get_offset, api->gtk,
+                 "gtk_text_iter_get_offset");
     GTK_REQUIRED(api, image_new_from_pixbuf, api->gtk,
                  "gtk_image_new_from_pixbuf");
     GTK_REQUIRED(api, image_set_from_pixbuf, api->gtk,
@@ -276,6 +323,12 @@ static ZSharpUIElement *design_element(ZSharpWindow *window) {
         if (window->elements[index].type == ZUI_DESIGN)
             return &window->elements[index];
     return NULL;
+}
+
+static int status_property(ZSharpUIElement *element, const char *name,
+                           int fallback) {
+    ZSharpUIProperty *value = property(element, name);
+    return value == NULL ? fallback : value->status_value;
 }
 
 static char *path_join(const char *root, const char *relative) {
@@ -490,6 +543,64 @@ static void entry_changed(GtkWidget *widget, void *data) {
     update_contents(state, control, state->api.entry_get_text(widget));
 }
 
+static char *text_buffer_text(LinuxWindowState *state,
+                              LinuxControl *control) {
+    GtkTextIterStorage start;
+    GtkTextIterStorage end;
+    if (control->text_buffer == NULL) return NULL;
+    memset(&start, 0, sizeof(start));
+    memset(&end, 0, sizeof(end));
+    state->api.text_buffer_get_start_iter(control->text_buffer, &start);
+    state->api.text_buffer_get_end_iter(control->text_buffer, &end);
+    return state->api.text_buffer_get_text(control->text_buffer, &start, &end,
+                                           1);
+}
+
+static void text_buffer_changed(void *buffer, void *data) {
+    LinuxControl *control = (LinuxControl *)data;
+    LinuxWindowState *state = control_state(control);
+    char *text;
+    (void)buffer;
+    if (control->placeholder_active) {
+        update_contents(state, control, "");
+        return;
+    }
+    text = text_buffer_text(state, control);
+    if (text != NULL) {
+        update_contents(state, control, text);
+        state->api.g_free(text);
+    }
+}
+
+static int multiline_focus_in(GtkWidget *widget, void *event, void *data) {
+    LinuxControl *control = (LinuxControl *)data;
+    (void)widget;
+    (void)event;
+    if (control->placeholder_active) {
+        control->placeholder_active = 0;
+        control->state->api.text_buffer_set_text(control->text_buffer, "", -1);
+    }
+    return 0;
+}
+
+static int multiline_focus_out(GtkWidget *widget, void *event, void *data) {
+    LinuxControl *control = (LinuxControl *)data;
+    LinuxWindowState *state = control_state(control);
+    ZSharpUIProperty *display = property(control->element, "display");
+    char *text = text_buffer_text(state, control);
+    (void)widget;
+    (void)event;
+    if (text != NULL && text[0] == '\0' && display != NULL &&
+        display->text_value != NULL && display->text_value[0] != '\0') {
+        control->placeholder_active = 1;
+        state->api.text_buffer_set_text(control->text_buffer,
+                                        display->text_value, -1);
+        update_contents(state, control, "");
+    }
+    if (text != NULL) state->api.g_free(text);
+    return 0;
+}
+
 static void file_selected(GtkWidget *widget, void *data) {
     LinuxControl *control = (LinuxControl *)data;
     LinuxWindowState *state = control_state(control);
@@ -502,7 +613,7 @@ static void file_selected(GtkWidget *widget, void *data) {
 
 static void layout_controls(LinuxWindowState *state, int width, int height) {
     size_t index;
-    int content_bottom = height;
+    int content_bottom = 0;
     double responsive_scale = state->layout_width > 0
         ? (double)width / (double)state->layout_width : 1.0;
     if (responsive_scale > 1.0) responsive_scale = 1.0;
@@ -559,8 +670,8 @@ static void layout_controls(LinuxWindowState *state, int width, int height) {
         }
         if (y + h > content_bottom) content_bottom = y + h;
     }
-    state->api.widget_set_size_request(state->fixed, width,
-                                       content_bottom + 16);
+    content_bottom = content_bottom > height ? content_bottom + 16 : height;
+    state->api.widget_set_size_request(state->fixed, width, content_bottom);
 }
 
 static void window_allocated(GtkWidget *widget, GtkAllocation *allocation,
@@ -793,8 +904,14 @@ static int set_window_property_ui(void *data, const char *path,
         } else if (element->type == ZUI_TEXT_INPUT &&
                    strcmp(changed->name, "display") == 0 &&
                    !control->is_image_input) {
-            state->api.entry_set_placeholder_text(control->widget,
-                                                   changed->text_value);
+            if (control->is_multiline) {
+                if (control->placeholder_active)
+                    state->api.text_buffer_set_text(control->text_buffer,
+                                                    changed->text_value, -1);
+            } else {
+                state->api.entry_set_placeholder_text(control->widget,
+                                                       changed->text_value);
+            }
         } else if (element->type == ZUI_IMAGE &&
                    strcmp(changed->name, "file") == 0) {
             int width = state->api.widget_get_allocated_width(control->widget);
@@ -850,6 +967,109 @@ static int apply_property_request(void *data) {
     return 0;
 }
 
+static int get_window_property_ui(LinuxWindowState *state, const char *path,
+                                  ZSharpWindowReadType *value_type,
+                                  char **text_value, char *error,
+                                  size_t error_size) {
+    ZSharpUIElement *element = NULL;
+    ZSharpWindowInputField field;
+    LinuxControl *control;
+    ZSharpUIProperty *contents;
+    size_t cursor_characters = 0;
+    size_t cursor_bytes;
+    size_t total_characters;
+    size_t total_lines;
+    size_t current_line;
+    size_t current_column;
+    if (!zsharp_window_model_resolve_input(
+            state->program, path, &element, &field, error, error_size))
+        return 0;
+    control = control_for_element(state, element);
+    if (control == NULL) {
+        snprintf(error, error_size, "textInput '%s' is not active",
+                 element->name);
+        return 0;
+    }
+    if (!control->is_image_input) {
+        if (control->is_multiline) {
+            if (control->placeholder_active) {
+                update_contents(state, control, "");
+            } else {
+                GtkTextIterStorage caret;
+                void *mark;
+                char *text = text_buffer_text(state, control);
+                if (text != NULL) {
+                    update_contents(state, control, text);
+                    state->api.g_free(text);
+                }
+                memset(&caret, 0, sizeof(caret));
+                mark = state->api.text_buffer_get_insert(control->text_buffer);
+                if (mark != NULL) {
+                    int offset;
+                    state->api.text_buffer_get_iter_at_mark(
+                        control->text_buffer, &caret, mark);
+                    offset = state->api.text_iter_get_offset(&caret);
+                    if (offset > 0) cursor_characters = (size_t)offset;
+                }
+            }
+        } else {
+            int offset;
+            update_contents(state, control,
+                            state->api.entry_get_text(control->widget));
+            offset = state->api.editable_get_position(control->widget);
+            if (offset > 0) cursor_characters = (size_t)offset;
+        }
+    }
+    contents = property(element, "contents");
+    if (contents == NULL || contents->text_value == NULL) {
+        snprintf(error, error_size, "textInput '%s' has no contents",
+                 element->name);
+        return 0;
+    }
+    if (field == ZWINDOW_INPUT_CONTENTS) {
+        *value_type = ZWINDOW_READ_TEXT;
+        *text_value = zsharp_copy_text(contents->text_value,
+                                       strlen(contents->text_value));
+        if (*text_value == NULL) {
+            snprintf(error, error_size, "out of memory");
+            return 0;
+        }
+        return 1;
+    }
+    cursor_bytes = zsharp_window_utf8_byte_offset(contents->text_value,
+                                                   cursor_characters);
+    zsharp_window_text_metrics(contents->text_value, cursor_bytes,
+                               &total_characters, &total_lines,
+                               &current_line, &current_column);
+    *value_type = ZWINDOW_READ_NUMBER;
+    *text_value = zsharp_window_copy_size(
+        field == ZWINDOW_INPUT_TOTAL_CHARACTERS ? total_characters :
+        field == ZWINDOW_INPUT_CURRENT_COLUMN ? current_column :
+        field == ZWINDOW_INPUT_TOTAL_LINES ? total_lines : current_line);
+    if (*text_value == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    return 1;
+}
+
+static int apply_read_request(void *data) {
+    LinuxReadRequest *request = (LinuxReadRequest *)data;
+    LinuxWindowState *state = request->state;
+    if (linux_window_cancelled(state)) {
+        snprintf(request->error, sizeof(request->error),
+                 "the window is closing");
+        request->result = 0;
+    } else {
+        request->result = get_window_property_ui(
+            state, request->path, &request->value_type, &request->text_value,
+            request->error, sizeof(request->error));
+    }
+    __atomic_store_n(&request->done, 1, __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+    return 0;
+}
+
 static int runtime_set_window_property(void *data, const char *path,
                                        ZSharpWindowValueType value_type,
                                        const char *text_value,
@@ -891,6 +1111,54 @@ static int runtime_set_window_property(void *data, const char *path,
         snprintf(error, error_size, "%s",
                  request->error[0] == '\0' ? "the window update failed"
                                            : request->error);
+    }
+    {
+        int result = request->result;
+        free(request);
+        return result;
+    }
+}
+
+static int runtime_get_window_property(void *data, const char *path,
+                                       ZSharpWindowReadType *value_type,
+                                       char **text_value, char *error,
+                                       size_t error_size) {
+    LinuxWindowState *state = (LinuxWindowState *)data;
+    LinuxReadRequest *request;
+    struct timespec pause = {0, 1000000L};
+    if (linux_window_cancelled(state)) {
+        snprintf(error, error_size, "the window is closing");
+        return 0;
+    }
+    request = (LinuxReadRequest *)calloc(1, sizeof(*request));
+    if (request == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    request->state = state;
+    request->path = path;
+    __atomic_add_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+    if (linux_window_cancelled(state)) {
+        __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+        free(request);
+        snprintf(error, error_size, "the window is closing");
+        return 0;
+    }
+    if (state->api.idle_add(apply_read_request, request) == 0) {
+        __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+        free(request);
+        snprintf(error, error_size, "could not schedule a window read");
+        return 0;
+    }
+    while (!__atomic_load_n(&request->done, __ATOMIC_ACQUIRE))
+        nanosleep(&pause, NULL);
+    if (!request->result) {
+        snprintf(error, error_size, "%s",
+                 request->error[0] == '\0' ? "the window read failed"
+                                           : request->error);
+    } else {
+        *value_type = request->value_type;
+        *text_value = request->text_value;
     }
     {
         int result = request->result;
@@ -988,10 +1256,33 @@ static int create_controls(LinuxWindowState *state, int width, int height,
             ZSharpUIProperty *display = property(element, "display");
             control->is_image_input = type != NULL &&
                 strcmp(type->text_value, "image") == 0;
+            control->is_multiline = !control->is_image_input &&
+                status_property(element, "multiline", 0);
             if (control->is_image_input)
                 widget = state->api.file_chooser_button_new(
                     display == NULL ? "Choose an image" : display->text_value,
                     0);
+            else if (control->is_multiline) {
+                int wraps = status_property(element, "wrap", 1);
+                control->input_widget = state->api.text_view_new();
+                widget = state->api.scrolled_window_new(NULL, NULL);
+                if (widget != NULL && control->input_widget != NULL) {
+                    control->text_buffer = state->api.text_view_get_buffer(
+                        control->input_widget);
+                    state->api.text_view_set_wrap_mode(control->input_widget,
+                                                       wraps ? 3 : 0);
+                    state->api.scrolled_window_set_policy(widget,
+                                                          wraps ? 2 : 1, 1);
+                    state->api.container_add(widget, control->input_widget);
+                    if (display != NULL && display->text_value != NULL &&
+                        display->text_value[0] != '\0') {
+                        control->placeholder_active = 1;
+                        state->api.text_buffer_set_text(control->text_buffer,
+                                                        display->text_value,
+                                                        -1);
+                    }
+                }
+            }
             else {
                 widget = state->api.entry_new();
                 if (widget != NULL && display != NULL)
@@ -1013,11 +1304,22 @@ static int create_controls(LinuxWindowState *state, int width, int height,
             state->api.signal_connect_data(widget, "button-press-event",
                 (void *)button_pressed, control, NULL, 0);
         } else if (element->type == ZUI_TEXT_INPUT) {
-            state->api.signal_connect_data(widget,
-                control->is_image_input ? "file-set" : "changed",
-                control->is_image_input ? (void *)file_selected
-                                        : (void *)entry_changed,
-                control, NULL, 0);
+            if (control->is_image_input) {
+                state->api.signal_connect_data(widget, "file-set",
+                    (void *)file_selected, control, NULL, 0);
+            } else if (control->is_multiline) {
+                state->api.signal_connect_data(control->text_buffer, "changed",
+                    (void *)text_buffer_changed, control, NULL, 0);
+                state->api.signal_connect_data(control->input_widget,
+                    "focus-in-event", (void *)multiline_focus_in,
+                    control, NULL, 0);
+                state->api.signal_connect_data(control->input_widget,
+                    "focus-out-event", (void *)multiline_focus_out,
+                    control, NULL, 0);
+            } else {
+                state->api.signal_connect_data(widget, "changed",
+                    (void *)entry_changed, control, NULL, 0);
+            }
         }
         state->control_count++;
         if (element->type == ZUI_BUTTON &&
@@ -1061,6 +1363,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.callback_data = user_data;
     state.runtime.state = &state;
     state.runtime.set_property = runtime_set_window_property;
+    state.runtime.get_property = runtime_get_window_property;
     state.runtime.wait = wait_with_window_events;
     state.runtime.is_cancelled = linux_window_cancelled;
     state.screen_width = width * 4;

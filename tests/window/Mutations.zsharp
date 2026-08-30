@@ -1,9 +1,20 @@
 zsharp = type.script
 
 noticed room Actions[] (
+ import window_test.Main():
  noticed text Background = "Main.Design.background":
 
  noticed brain Theme[] (
+  text FullInput = Main.NameInput.contents:
+  number CharacterCount = Main.NameInput.totalcharacters:
+  number CurrentColumn = Main.NameInput.currentcolumn:
+  number LineCount = Main.NameInput.totallines:
+  number CurrentLine = Main.NameInput.currentline:
+  Print(FullInput):
+  Print(CharacterCount):
+  Print(CurrentColumn):
+  Print(LineCount):
+  Print(CurrentLine):
   Main.Design.title.set: "Updated Z# Window":
   Background.set: linear-gradient(1:#FFFFFF:#000000):
   wait(1ms):

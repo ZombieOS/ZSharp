@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.1.1 - Window input and scrolling patch - 2026-08-29
+
+- Added multiline text inputs with `multiline: alive:`.
+- Added live full-content, character-count, line-count, current-line, and
+  current-column reads for text inputs. Line and column positions are 1-based.
+- Added optional line wrapping with `wrap: alive:` or horizontal scrolling with
+  `wrap: dead:`.
+- Made native window scrollbars remain hidden until the window content actually
+  extends beyond the visible height.
+- Added compiler validation that limits `multiline` and `wrap` to text inputs
+  and requires multiline mode before `wrap` can be configured.
+- Added composited, double-buffered Windows background painting so rapidly
+  changing gradients no longer erase and flash text controls between frames.
+- Changed file associations and Z#-created Desktop shortcuts to launch apps
+  without opening a terminal. Explicit terminal commands continue using the
+  current terminal normally, and existing shortcuts migrate on their next app
+  launch.
+- Rebuilt the embedded Windows, Linux, and macOS runtimes for version 1.0.1.1.
+- Confirmed backward runtime compatibility: older Z1 applications receive
+  1.0.1.1 client/runtime fixes without repackaging, while new source-facing
+  features still have to be added to the project code.
+
 ## 1.0.1.0 - Specialized script syntax - 2026-08-25
 
 - Added `type.script:window`, `type.script:2D`, and `type.script:3D` headers.

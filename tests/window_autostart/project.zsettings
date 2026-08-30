@@ -2,10 +2,10 @@ zsharp = type.settings
 
 Project: "Window Auto Start Test":
 PID: "window_autostart_test":
-Version: [1.0.1.0]:
+Version: [1.0.1.1]:
 Authors: ["ZombieOS"]:
 Description: "Automatic window project Start test":
-ZSharp: [1.0.1.0]:
+ZSharp: [1.0.1.1]:
 
 Dependencies (
  zsharpwindow:1.0.0.0

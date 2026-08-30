@@ -88,6 +88,13 @@ if(WIN32)
             "native window smoke test failed (${window_result})\n"
             "stdout: ${window_output}\nstderr: ${window_error}")
     endif()
+    string(FIND "${window_output}" "\n0\n1\n1\n1\n"
+           input_metrics_index)
+    if(input_metrics_index EQUAL -1)
+        message(FATAL_ERROR
+            "live text-input metrics returned unexpected values\n"
+            "stdout: ${window_output}\nstderr: ${window_error}")
+    endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env
                 ZSHARP_WINDOW_AUTOCLOSE_MS=100
@@ -137,6 +144,12 @@ expect_failure("loops do not use a closing colon"
                "${WINDOW_DIR}" check InvalidLoopColon.zsharp)
 expect_failure("misspelled UI field" "use 'height'"
                "${WINDOW_DIR}" check InvalidField.zsharp)
+expect_failure("image inputs cannot be multiline"
+               "multiline and wrap are only valid for a text textInput"
+               "${WINDOW_DIR}" check InvalidImageMultiline.zsharp)
+expect_failure("wrap requires multiline input"
+               "textInput wrap requires multiline: alive"
+               "${WINDOW_DIR}" check InvalidWrap.zsharp)
 expect_failure("missing window feature import" "ZSharp.Window.Text"
                "${WINDOW_DIR}" check MissingFeatureImport.zsharp)
 expect_success("project wildcard import" "${PROJECT_ROOT}"
@@ -248,6 +261,22 @@ if(WIN32)
                 ZSHARP_DISABLE_PROJECT_STARTS=1
                 ZSHARP_SKIP_DESKTOP_INTEGRATION=1
                 "ZSHARP_PACKAGE_CACHE=${TEST_PACKAGE_CACHE}"
+                "${ZSHARP_BIN}" open-desktop "${TEST_PACKAGE}"
+        WORKING_DIRECTORY "${PROJECT_ROOT}"
+        RESULT_VARIABLE desktop_open_result
+        ERROR_VARIABLE desktop_open_error
+    )
+    if(NOT desktop_open_result EQUAL 0)
+        message(FATAL_ERROR
+            "desktop package launch failed (${desktop_open_result})\n"
+            "stderr: ${desktop_open_error}")
+    endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+                ZSHARP_WINDOW_AUTOCLOSE_MS=100
+                ZSHARP_DISABLE_PROJECT_STARTS=1
+                ZSHARP_SKIP_DESKTOP_INTEGRATION=1
+                "ZSHARP_PACKAGE_CACHE=${TEST_PACKAGE_CACHE}"
                 "${ZSHARP_BIN}" run "${TEST_SOURCE_PACKAGE}"
         WORKING_DIRECTORY "${PROJECT_ROOT}"
         RESULT_VARIABLE source_package_result
@@ -284,6 +313,24 @@ if(WIN32)
         message(FATAL_ERROR
             "desktop shortcut prompt failed (${shortcut_result})\n"
             "stdout: ${shortcut_output}\nstderr: ${shortcut_error}")
+    endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+                ZSHARP_WINDOW_AUTOCLOSE_MS=100
+                ZSHARP_DISABLE_PROJECT_STARTS=1
+                ZSHARP_SKIP_ASSOCIATION_INSTALL=1
+                "ZSHARP_DESKTOP_DIRECTORY=${TEST_DESKTOP}"
+                "ZSHARP_PACKAGE_CACHE=${TEST_SHORTCUT_CACHE}"
+                "${ZSHARP_BIN}" open "${TEST_PACKAGE}"
+        WORKING_DIRECTORY "${PROJECT_ROOT}"
+        RESULT_VARIABLE shortcut_refresh_result
+        ERROR_VARIABLE shortcut_refresh_error
+    )
+    if(NOT shortcut_refresh_result EQUAL 0 OR
+       NOT EXISTS "${TEST_DESKTOP}/Packaged Window Test.lnk")
+        message(FATAL_ERROR
+            "desktop shortcut refresh failed (${shortcut_refresh_result})\n"
+            "stderr: ${shortcut_refresh_error}")
     endif()
     set(uninstall_package "${CMAKE_CURRENT_BINARY_DIR}/UninstallTest.zapp")
     file(COPY_FILE "${TEST_PACKAGE}" "${uninstall_package}" ONLY_IF_DIFFERENT)

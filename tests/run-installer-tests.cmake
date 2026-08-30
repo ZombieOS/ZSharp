@@ -29,7 +29,7 @@ set(install_directory "${TEST_ROOT}/install")
 file(WRITE "${manifest}"
     "{\n"
     "  \"schema\": 1,\n"
-    "  \"latestVersion\": \"1.0.1.0\",\n"
+    "  \"latestVersion\": \"1.0.1.1\",\n"
     "  \"download\": {\n"
     "    \"url\": \"https://example.invalid/ZVM-LATEST.zip\",\n"
     "    \"sha256\": \"${archive_sha256}\",\n"
@@ -95,12 +95,12 @@ endif()
 
 set(current_manifest "${TEST_ROOT}/current-update.js")
 file(WRITE "${current_manifest}"
-    "{\"schema\":1,\"latestVersion\":\"1.0.1.0\"}")
+    "{\"schema\":1,\"latestVersion\":\"1.0.1.1\"}")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             "ZSHARP_INSTALLER_INSTALL_DIR=${install_directory}"
             ZSHARP_INSTALLER_SKIP_INTEGRATION=1
-            "${installed_updater}" --check --current-version 1.0.1.0
+            "${installed_updater}" --check --current-version 1.0.1.1
             --manifest-file "${current_manifest}"
     RESULT_VARIABLE current_result
     OUTPUT_VARIABLE current_output
@@ -124,7 +124,7 @@ file(WRITE "${rejected_manifest}"
     "\"path\":\"runtimes/${TEST_PLATFORM}/${runtime_name}\","
     "\"sha256\":\"${runtime_sha256}\","
     "\"size\":${runtime_size}},"
-    "\"latestVersion\":\"1.0.1.0\","
+    "\"latestVersion\":\"1.0.1.1\","
     "\"download\":{\"url\":\"https://example.invalid/ZVM-LATEST.zip\","
     "\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\","
     "\"size\":${archive_size}}}")
@@ -153,7 +153,7 @@ execute_process(
     OUTPUT_VARIABLE version_output
     ERROR_VARIABLE version_error
 )
-if(NOT version_result EQUAL 0 OR NOT version_output MATCHES "Z# 1.0.1.0")
+if(NOT version_result EQUAL 0 OR NOT version_output MATCHES "Z# 1.0.1.1")
     message(FATAL_ERROR
         "The installed ZVM did not run (${version_result})\n"
         "stdout: ${version_output}\nstderr: ${version_error}")
