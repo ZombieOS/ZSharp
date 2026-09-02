@@ -234,6 +234,57 @@ int zsharp_desktop_install_associations(char *error, size_t error_size) {
     return 1;
 }
 
+int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
+    WCHAR desktop[MAX_PATH];
+    WCHAR executable[32768];
+    WCHAR shortcut_path[32768];
+    IShellLinkW *link = NULL;
+    IPersistFile *persist = NULL;
+    HRESULT initialized;
+    HRESULT result;
+    int ok = 0;
+    if (!windows_desktop(desktop,
+                         (DWORD)(sizeof(desktop) / sizeof(desktop[0]))) ||
+        !windows_executable(executable,
+                            (DWORD)(sizeof(executable) / sizeof(executable[0])))) {
+        desktop_error(error, error_size,
+                      "could not locate the Windows desktop or zsharp.exe");
+        return 0;
+    }
+    swprintf(shortcut_path,
+             sizeof(shortcut_path) / sizeof(shortcut_path[0]),
+             L"%ls\\Z# Hub.lnk", desktop);
+    initialized = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) {
+        desktop_error(error, error_size, "could not initialize shortcut support");
+        return 0;
+    }
+    result = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
+                              &IID_IShellLinkW, (void **)&link);
+    if (SUCCEEDED(result)) result = IShellLinkW_SetPath(link, executable);
+    if (SUCCEEDED(result)) result = IShellLinkW_SetArguments(link, L"hub");
+    if (SUCCEEDED(result))
+        result = IShellLinkW_SetDescription(
+            link, L"Open the Z# Hub for installed apps and games");
+    if (SUCCEEDED(result))
+        result = IShellLinkW_SetIconLocation(link, executable, 0);
+    if (SUCCEEDED(result))
+        result = IShellLinkW_QueryInterface(link, &IID_IPersistFile,
+                                            (void **)&persist);
+    if (SUCCEEDED(result))
+        result = IPersistFile_Save(persist, shortcut_path, TRUE);
+    if (persist != NULL) IPersistFile_Release(persist);
+    if (link != NULL) IShellLinkW_Release(link);
+    if (SUCCEEDED(initialized)) CoUninitialize();
+    if (FAILED(result)) {
+        desktop_error(error, error_size,
+                      "could not create the Z# Hub desktop shortcut");
+        return 0;
+    }
+    ok = 1;
+    return ok;
+}
+
 int zsharp_desktop_create_shortcut(const char *display_name,
                                    const char *package_path,
                                    const char *project_root,
@@ -569,6 +620,53 @@ done:
     return ok;
 }
 
+int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
+    const char *home = getenv("HOME");
+    const char *desktop_override = getenv("ZSHARP_DESKTOP_DIRECTORY");
+    char *desktop = NULL;
+    char *path = NULL;
+    char *executable = NULL;
+    char *quoted_executable = NULL;
+    char *contents = NULL;
+    int ok = 0;
+    if ((desktop_override == NULL || desktop_override[0] == '\0') &&
+        (home == NULL || home[0] == '\0')) {
+        desktop_error(error, error_size, "HOME is not available");
+        return 0;
+    }
+    desktop = desktop_override != NULL && desktop_override[0] != '\0'
+        ? copy_text(desktop_override) : join_path(home, "Desktop");
+    path = desktop == NULL ? NULL : join_path(desktop, "Z# Hub.desktop");
+    executable = executable_path(error, error_size);
+    quoted_executable = executable == NULL
+        ? NULL : desktop_exec_quote(executable);
+    if (desktop == NULL || path == NULL || executable == NULL ||
+        quoted_executable == NULL || !make_directories(desktop)) {
+        desktop_error(error, error_size,
+                      "could not prepare the Z# Hub desktop shortcut");
+        goto done;
+    }
+    contents = (char *)malloc(strlen(quoted_executable) + 256);
+    if (contents == NULL) {
+        desktop_error(error, error_size, "out of memory");
+        goto done;
+    }
+    sprintf(contents,
+        "[Desktop Entry]\nType=Application\nName=Z# Hub\n"
+        "Comment=Open installed Z# apps and games\nExec=%s hub\n"
+        "Terminal=false\nIcon=zsharp\nCategories=Development;Utility;\n"
+        "StartupNotify=true\n",
+        quoted_executable);
+    ok = write_file(path, contents, 1, error, error_size);
+done:
+    free(contents);
+    free(quoted_executable);
+    free(executable);
+    free(path);
+    free(desktop);
+    return ok;
+}
+
 int zsharp_desktop_create_shortcut(const char *display_name,
                                    const char *package_path,
                                    const char *project_root,
@@ -770,6 +868,59 @@ static int compile_applet(const char *app_path, const char *script,
 done:
     free(source);
     free(cache);
+    return ok;
+}
+
+static int remove_applet_tree(const char *path);
+
+int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
+    const char *home = getenv("HOME");
+    const char *desktop_override = getenv("ZSHARP_DESKTOP_DIRECTORY");
+    char *desktop = NULL;
+    char *app = NULL;
+    char *executable = NULL;
+    char *quoted_executable = NULL;
+    char *script = NULL;
+    size_t size;
+    int ok = 0;
+    if ((desktop_override == NULL || desktop_override[0] == '\0') &&
+        (home == NULL || home[0] == '\0')) {
+        desktop_error(error, error_size, "HOME is not available");
+        return 0;
+    }
+    desktop = desktop_override != NULL && desktop_override[0] != '\0'
+        ? copy_text(desktop_override) : join_path(home, "Desktop");
+    app = desktop == NULL ? NULL : join_path(desktop, "Z# Hub.app");
+    executable = executable_path(error, error_size);
+    quoted_executable = executable == NULL ? NULL : apple_quote(executable);
+    if (desktop == NULL || app == NULL || executable == NULL ||
+        quoted_executable == NULL || !make_directories(desktop)) {
+        desktop_error(error, error_size,
+                      "could not prepare the Z# Hub desktop shortcut");
+        goto done;
+    }
+    size = strlen(quoted_executable) + 256;
+    script = (char *)malloc(size);
+    if (script == NULL) {
+        desktop_error(error, error_size, "out of memory");
+        goto done;
+    }
+    snprintf(script, size,
+        "on run\n set commandText to quoted form of %s & \" hub\"\n"
+        " do shell script commandText & \" >/dev/null 2>&1 &\"\nend run\n",
+        quoted_executable);
+    if (!remove_applet_tree(app)) {
+        desktop_error(error, error_size,
+                      "could not replace the Z# Hub desktop shortcut");
+        goto done;
+    }
+    ok = compile_applet(app, script, error, error_size);
+done:
+    free(script);
+    free(quoted_executable);
+    free(executable);
+    free(app);
+    free(desktop);
     return ok;
 }
 

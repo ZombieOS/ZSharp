@@ -22,6 +22,7 @@ typedef struct ZSharpSettings {
     char **authors;
     size_t author_count;
     char *description;
+    char *icon;
     uint32_t zsharp_version[ZSHARP_VERSION_PART_COUNT];
     ZSharpDependency *dependencies;
     size_t dependency_count;

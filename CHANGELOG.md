@@ -33,6 +33,24 @@
 - Added a playable `examples/test-game` project and dependency, packaging,
   source/bytecode launch, automatic `Start[]`, object parsing, and live Vulkan
   smoke coverage.
+- Replaced the placeholder Hub alert with a graphical installed app/game list,
+  package launching, path-based package addition, and non-destructive removal.
+  Packages are remembered automatically when opened.
+- Added optional `Icon` project metadata, official Z# logo fallback, clickable
+  Hub project cards, project and required-Z# version details, accumulated
+  playtime, last-played timestamps, and a clearly labeled **Coming soon**
+  achievements section. Project icons now carry through to Z#-created Desktop
+  shortcuts as well.
+- Removed stray button-border corner marks, fixed Add Package's internal
+  window path, and made Hub/update launches stay out of a second terminal.
+- Added updater result notifications for both an already-current ZVM and a
+  successfully installed newer version.
+- Added a cross-platform `Z# Hub` desktop launcher that is created on install,
+  refreshed on update, and repairable with `zsharp hub shortcut`.
+- Added `zsharp update` for an immediate verified update check through the
+  bundled platform installer.
+- Added `zsharp publish [repository]` to build and test local release files in
+  `Downloads/ZSharp Publishing/VERSION` without pushing or uploading anything.
 
 ## 1.0.1.2 - Windows update tray patch - 2026-08-29
 

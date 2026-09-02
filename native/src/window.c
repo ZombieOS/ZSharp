@@ -5,6 +5,7 @@
 #include "paint.h"
 #include "window_runtime.h"
 
+#include <ctype.h>
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -266,6 +267,9 @@ static int measurement_pixels(const ZSharpUIProperty *property,
 static char *join_path(const char *root, const char *relative) {
     size_t root_length = strlen(root);
     size_t relative_length = strlen(relative);
+    if (relative[0] == '/' || relative[0] == '\\' ||
+        (isalpha((unsigned char)relative[0]) && relative[1] == ':'))
+        return zsharp_copy_text(relative, relative_length);
     int separator = root_length > 0 && root[root_length - 1] != '/' &&
                     root[root_length - 1] != '\\';
     char *path = (char *)malloc(root_length + (size_t)separator +
@@ -581,6 +585,9 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                 } else if (control->element->type == ZUI_BUTTON) {
                     run_callback(state, control->element, "left");
                 }
+            } else if (HIWORD(wparam) == STN_CLICKED &&
+                       control->element->type == ZUI_IMAGE) {
+                run_callback(state, control->element, "left");
             } else if (control->element->type == ZUI_TEXT_INPUT) {
                 if (HIWORD(wparam) == EN_SETFOCUS &&
                     control->is_multiline && control->placeholder_active) {
@@ -606,7 +613,9 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
         }
         case WM_CONTEXTMENU: {
             WindowControl *control = find_control(state, (HWND)wparam);
-            if (control != NULL && control->element->type == ZUI_BUTTON) {
+            if (control != NULL &&
+                (control->element->type == ZUI_BUTTON ||
+                 control->element->type == ZUI_IMAGE)) {
                 run_callback(state, control->element, "right");
                 return 0;
             }
@@ -682,7 +691,22 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                                                 state->scale, 0);
                 COLORREF color = control->has_button_color
                     ? control->button_color : RGB(240, 240, 240);
+                RECT control_area;
                 memset(&hover_paint, 0, sizeof(hover_paint));
+                GetWindowRect(control->handle, &control_area);
+                MapWindowPoints(NULL, state->window,
+                                (POINT *)&control_area, 2);
+                if (state->background_buffer != NULL) {
+                    BitBlt(draw->hDC, draw->rcItem.left, draw->rcItem.top,
+                           draw->rcItem.right - draw->rcItem.left,
+                           draw->rcItem.bottom - draw->rcItem.top,
+                           state->background_buffer,
+                           control_area.left + draw->rcItem.left,
+                           control_area.top + draw->rcItem.top, SRCCOPY);
+                } else {
+                    FillRect(draw->hDC, &draw->rcItem,
+                             state->window_background);
+                }
                 if (hover_background != NULL &&
                     zsharp_paint_parse(hover_background->text_value,
                                        &hover_paint, paint_error,
@@ -1123,7 +1147,9 @@ static int create_controls(WindowState *state, int client_width,
         } else if (element->type == ZUI_IMAGE) {
             class_name = "STATIC";
             display_text = "";
-            style |= SS_BITMAP | SS_CENTERIMAGE | WS_BORDER;
+            style |= SS_BITMAP | SS_CENTERIMAGE;
+            if (find_property(element, "left") != NULL)
+                style |= SS_NOTIFY;
         } else {
             ZSharpUIProperty *type = find_property(element, "type");
             ZSharpUIProperty *display = find_property(element, "display");

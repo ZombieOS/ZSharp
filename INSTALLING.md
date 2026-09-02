@@ -58,6 +58,21 @@ older ZVM exists at the same location, it is preserved as
 `zsharp.previous.exe` on Windows or `zsharp.previous` on Linux and macOS before
 replacement.
 
+Every successful installation or version update also creates or refreshes a
+`Z# Hub` launcher on the current user's desktop. It opens the graphical Hub
+without a terminal window. Project icons come from the optional `Icon` entry
+in `project.zsettings`, with the official Z# logo as the fallback. Selecting
+an icon or project name shows its version, playtime, and last-played time;
+achievements are labeled **Coming soon**. If desktop integration is temporarily unavailable,
+installation still succeeds and prints a repair command:
+
+```text
+zsharp hub shortcut
+```
+
+On a headless machine, set `ZSHARP_INSTALLER_SKIP_HUB_SHORTCUT=1` before
+running the installer to intentionally omit the desktop launcher.
+
 An interactive first-time installation then offers to open the official Z#
 Test App download in the user's browser. The prompt is skipped for automatic,
 quiet, and update-check runs. Declining it does not change the installation.
@@ -149,7 +164,34 @@ software library.
 
 ## Uploading the download site
 
-Release maintainers build the installers and website payload with:
+Release maintainers can prepare every local release artifact from the language
+repository with:
+
+```text
+zsharp publish
+```
+
+This builds and tests the native runtime, packages the test game, creates the
+native Windows archive, builds and signs the Java/Maven files, and generates
+the installers, checksums, update manifest, and website upload ZIP. It never
+pushes Git commits, creates tags, uploads a GitHub Release, changes the website,
+or sends anything to Maven Central. The optional
+`zsharp publish [repository]` form can be used outside the repository folder.
+
+Game runtimes are built natively by the **Build native game runtimes** GitHub
+workflow. Before the final local publishing pass, extract each downloaded
+artifact into:
+
+```text
+%USERPROFILE%\Downloads\ZSharp Publishing\VERSION\Native Runtimes\PLATFORM
+```
+
+The command stages any runtime found there. If a current runtime is missing,
+it leaves a readable `PUBLISHING-STATUS.txt` in the version folder and stops
+before creating an incomplete cross-platform installer or Maven bundle. Run
+the same command again after adding the missing artifacts.
+
+The lower-level installer and website builder remains available as:
 
 ```text
 powershell -File scripts/build-installers.ps1 -Zig path/to/zig.exe

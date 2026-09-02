@@ -73,7 +73,14 @@ zsharp run path/to/project/Packages/MyGame.zgame
 zsharp uninstall path/to/project/Packages/MyApp.zapp
 zsharp associate
 zsharp hub
+zsharp hub shortcut
+zsharp update
+zsharp publish
 ```
+
+Command documentation uses `<value>` for a required argument and `[value]`
+for an optional argument. For example, `zsharp publish [repository]` can be run
+from the Z# language repository with no argument, or be given its path.
 
 The `.zbc` bytecode extension shown here is provisional. `.zsharp`, `.zapp`,
 and `.zgame` are official extensions.
@@ -84,7 +91,8 @@ End users can install the standalone ZVM with the small platform bootstrap in
 installed version with the static GitHub Pages manifest, verifies
 `assets/download/ZVM-LATEST.zip` and the selected runtime, preserves the
 previous runtime, and configures the command and package associations for the
-current user. On Windows, a single tray agent starts at sign-in, checks once
+current user. Every successful install creates or refreshes a `Z# Hub`
+launcher on the user's desktop. On Windows, a single tray agent starts at sign-in, checks once
 immediately and then hourly, and notifies the user before installing a newer
 verified release. Linux and macOS repeat the quiet check when the ZVM launches.
 See [INSTALLING.md](INSTALLING.md).
@@ -181,6 +189,22 @@ design icon. `zsharp associate` registers `.zapp` and `.zgame` for the current
 user so opening either launches the package without opening a terminal. Running
 `zsharp open`, `zsharp run`, or another command in a terminal keeps using that
 terminal normally.
+
+Opening a package also adds it to the Z# Hub. `zsharp hub` opens the graphical
+Hub, where remembered apps and games can be launched, new package paths can be
+added, and entries can be forgotten without deleting the package. An optional
+`Icon: "assets/icon.png":` entry in `project.zsettings` supplies the image at
+the left of the project name and the app's Z#-created Desktop shortcut;
+otherwise the official Z# logo is used. Clicking the icon or project name
+shows its type, PID, project version, required Z# version, accumulated
+playtime, and last-played time. Achievements are marked **Coming soon**. The
+script-friendly forms are `zsharp hub list`, `zsharp hub add <package>`, and
+`zsharp hub remove <PID>`. `zsharp hub shortcut` repairs or recreates the
+desktop Hub launcher. Missing package files are omitted automatically.
+`zsharp update` starts the installed verified updater without opening another
+terminal and checks the official update manifest immediately. A desktop
+notification reports either `Z# is up to date.` or a successful version
+change.
 
 The `.zgame` container uses the same integrity, cache, association, shortcut,
 and uninstall foundation as `.zapp`. Its startup creates an SDL3 high-DPI game

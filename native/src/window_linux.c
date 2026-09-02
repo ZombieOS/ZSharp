@@ -44,6 +44,7 @@ typedef struct GtkApi {
     void (*window_set_position)(void *, int);
     int (*window_set_icon_from_file)(void *, const char *, void **);
     GtkWidget *(*fixed_new)(void);
+    GtkWidget *(*event_box_new)(void);
     GtkWidget *(*scrolled_window_new)(void *, void *);
     void (*scrolled_window_set_policy)(void *, int, int);
     void (*container_add)(void *, void *);
@@ -202,6 +203,7 @@ static int gtk_api_load(GtkApi *api, char *error, size_t error_size) {
     GTK_REQUIRED(api, window_set_position, api->gtk,
                  "gtk_window_set_position");
     GTK_REQUIRED(api, fixed_new, api->gtk, "gtk_fixed_new");
+    GTK_REQUIRED(api, event_box_new, api->gtk, "gtk_event_box_new");
     GTK_REQUIRED(api, scrolled_window_new, api->gtk,
                  "gtk_scrolled_window_new");
     GTK_REQUIRED(api, scrolled_window_set_policy, api->gtk,
@@ -335,6 +337,7 @@ static int status_property(ZSharpUIElement *element, const char *name,
 
 static char *path_join(const char *root, const char *relative) {
     size_t a = strlen(root), b = strlen(relative);
+    if (relative[0] == '/') return zsharp_copy_text(relative, b);
     int slash = a != 0 && root[a - 1] != '/';
     char *result = (char *)malloc(a + (size_t)slash + b + 1);
     if (result == NULL) return NULL;
@@ -743,6 +746,22 @@ static int button_pressed(GtkWidget *widget, GdkEventButton *event,
     return 0;
 }
 
+static int image_pressed(GtkWidget *widget, GdkEventButton *event,
+                         void *data) {
+    LinuxControl *control = (LinuxControl *)data;
+    (void)widget;
+    if (event == NULL) return 0;
+    if (event->button == 1u) {
+        run_target(control_state(control), control, "left");
+        return 1;
+    }
+    if (event->button == 3u) {
+        run_target(control_state(control), control, "right");
+        return 1;
+    }
+    return 0;
+}
+
 static void entry_changed(GtkWidget *widget, void *data) {
     LinuxControl *control = (LinuxControl *)data;
     LinuxWindowState *state = control_state(control);
@@ -861,7 +880,10 @@ static void layout_controls(LinuxWindowState *state, int width, int height) {
             GdkPixbuf *pixbuf = path == NULL ? NULL :
                 state->api.pixbuf_new_from_file_at_scale(path, w, h, 1, NULL);
             if (pixbuf != NULL) {
-                state->api.image_set_from_pixbuf(control->widget, pixbuf);
+                state->api.image_set_from_pixbuf(
+                    control->input_widget != NULL ? control->input_widget
+                                                   : control->widget,
+                    pixbuf);
                 if (state->api.object_unref != NULL)
                     state->api.object_unref(pixbuf);
                 control->image_width = w;
@@ -1133,7 +1155,10 @@ static int set_window_property_ui(void *data, const char *path,
                          changed->text_value);
                 return 0;
             }
-            state->api.image_set_from_pixbuf(control->widget, pixbuf);
+            state->api.image_set_from_pixbuf(
+                control->input_widget != NULL ? control->input_widget
+                                               : control->widget,
+                pixbuf);
             control->image_width = width;
             control->image_height = height;
             if (state->api.object_unref != NULL)
@@ -1449,7 +1474,16 @@ static int create_controls(LinuxWindowState *state, int width, int height,
             if (path != NULL && state->api.pixbuf_new_from_file_at_scale != NULL)
                 pixbuf = state->api.pixbuf_new_from_file_at_scale(path, w, h, 1,
                                                                   NULL);
-            widget = state->api.image_new_from_pixbuf(pixbuf);
+            control->input_widget = state->api.image_new_from_pixbuf(pixbuf);
+            if (property(element, "left") != NULL ||
+                property(element, "right") != NULL) {
+                widget = state->api.event_box_new();
+                if (widget != NULL && control->input_widget != NULL)
+                    state->api.container_add(widget, control->input_widget);
+            } else {
+                widget = control->input_widget;
+                control->input_widget = NULL;
+            }
             if (pixbuf != NULL) {
                 control->image_width = w;
                 control->image_height = h;
@@ -1510,6 +1544,11 @@ static int create_controls(LinuxWindowState *state, int width, int height,
                 (void *)button_clicked, control, NULL, 0);
             state->api.signal_connect_data(widget, "button-press-event",
                 (void *)button_pressed, control, NULL, 0);
+        } else if (element->type == ZUI_IMAGE &&
+                   (property(element, "left") != NULL ||
+                    property(element, "right") != NULL)) {
+            state->api.signal_connect_data(widget, "button-press-event",
+                (void *)image_pressed, control, NULL, 0);
         } else if (element->type == ZUI_TEXT_INPUT) {
             if (control->is_image_input) {
                 state->api.signal_connect_data(widget, "file-set",
@@ -1689,13 +1728,14 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
         state.api.object_unref(state.background_css);
     {
         size_t index;
-        for (index = 0; index < state.control_count; index++)
+        for (index = 0; index < state.control_count; index++) {
             if (state.controls[index].css_provider != NULL &&
                 state.api.object_unref != NULL)
                 state.api.object_unref(state.controls[index].css_provider);
             if (state.controls[index].zss_provider != NULL &&
                 state.api.object_unref != NULL)
                 state.api.object_unref(state.controls[index].zss_provider);
+        }
     }
     free(state.controls);
     gtk_api_close(&state.api);

@@ -1054,19 +1054,39 @@ done:
     return ok;
 }
 
-static int run_associate(const char *runtime) {
+static int run_runtime_command(const char *runtime, const char *argument1,
+                               const char *argument2) {
     WCHAR *wide_runtime = wide_text(runtime);
+    WCHAR *wide_argument1 = wide_text(argument1);
+    WCHAR *wide_argument2 = argument2 == NULL ? NULL : wide_text(argument2);
     WCHAR *command;
     STARTUPINFOW startup;
     PROCESS_INFORMATION process;
     DWORD code = 1;
     size_t capacity;
     int ok = 0;
-    if (wide_runtime == NULL) return 0;
-    capacity = wcslen(wide_runtime) + 16;
+    if (wide_runtime == NULL || wide_argument1 == NULL ||
+        (argument2 != NULL && wide_argument2 == NULL)) {
+        free(wide_argument2);
+        free(wide_argument1);
+        free(wide_runtime);
+        return 0;
+    }
+    capacity = wcslen(wide_runtime) + wcslen(wide_argument1) +
+               (wide_argument2 == NULL ? 0 : wcslen(wide_argument2)) + 8;
     command = (WCHAR *)malloc(capacity * sizeof(*command));
-    if (command == NULL) { free(wide_runtime); return 0; }
-    swprintf(command, capacity, L"\"%ls\" associate", wide_runtime);
+    if (command == NULL) {
+        free(wide_argument2);
+        free(wide_argument1);
+        free(wide_runtime);
+        return 0;
+    }
+    if (wide_argument2 == NULL)
+        swprintf(command, capacity, L"\"%ls\" %ls", wide_runtime,
+                 wide_argument1);
+    else
+        swprintf(command, capacity, L"\"%ls\" %ls %ls", wide_runtime,
+                 wide_argument1, wide_argument2);
     memset(&startup, 0, sizeof(startup));
     memset(&process, 0, sizeof(process));
     startup.cb = sizeof(startup);
@@ -1081,22 +1101,41 @@ static int run_associate(const char *runtime) {
     }
     SetEnvironmentVariableW(L"ZSHARP_SKIP_UPDATE_CHECK", NULL);
     free(command);
+    free(wide_argument2);
+    free(wide_argument1);
     free(wide_runtime);
     return ok;
 }
 
+static int run_associate(const char *runtime) {
+    return run_runtime_command(runtime, "associate", NULL);
+}
+
+static int run_hub_shortcut(const char *runtime) {
+    return run_runtime_command(runtime, "hub", "shortcut");
+}
+
 #else
 
-static int run_associate(const char *runtime) {
+static int run_runtime_command(const char *runtime, const char *argument1,
+                               const char *argument2) {
     pid_t child = fork();
     int status;
     if (child == 0) {
         setenv("ZSHARP_SKIP_UPDATE_CHECK", "1", 1);
-        execl(runtime, runtime, "associate", (char *)NULL);
+        execl(runtime, runtime, argument1, argument2, (char *)NULL);
         _exit(127);
     }
     return child > 0 && waitpid(child, &status, 0) >= 0 &&
            WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int run_associate(const char *runtime) {
+    return run_runtime_command(runtime, "associate", NULL);
+}
+
+static int run_hub_shortcut(const char *runtime) {
+    return run_runtime_command(runtime, "hub", "shortcut");
 }
 
 #endif
@@ -1105,8 +1144,52 @@ static void print_help(void) {
     puts("Z# ZVM bootstrap installer\n");
     puts("Usage:");
     puts("  zsharp-installer [--yes] [--manifest URL] [--install-dir PATH]");
-    puts("  zsharp-installer --check --current-version VERSION [--quiet]");
+    puts("  zsharp-installer --check --current-version VERSION [--quiet] "
+         "[--notify-result]");
     puts("  zsharp-installer --manifest-file FILE [--yes] [--install-dir PATH]");
+}
+
+static void show_result_notification(const char *title, const char *message) {
+#ifdef _WIN32
+    HWND window = CreateWindowExA(0, "STATIC", "ZSharpInstallerNotification",
+                                  0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                                  GetModuleHandleA(NULL), NULL);
+    NOTIFYICONDATAA icon;
+    if (window == NULL) return;
+    memset(&icon, 0, sizeof(icon));
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = window;
+    icon.uID = 1;
+    icon.uFlags = NIF_ICON | NIF_TIP | NIF_INFO;
+    icon.hIcon = LoadIconA(NULL, IDI_APPLICATION);
+    snprintf(icon.szTip, sizeof(icon.szTip), "Z#");
+    snprintf(icon.szInfoTitle, sizeof(icon.szInfoTitle), "%s", title);
+    snprintf(icon.szInfo, sizeof(icon.szInfo), "%s", message);
+    icon.dwInfoFlags = NIIF_INFO;
+    icon.uTimeout = 10000;
+    if (Shell_NotifyIconA(NIM_ADD, &icon)) {
+        Sleep(4000);
+        Shell_NotifyIconA(NIM_DELETE, &icon);
+    }
+    DestroyWindow(window);
+#else
+    pid_t child = fork();
+    if (child < 0) return;
+    if (child == 0) {
+#if defined(__APPLE__)
+        char script[768];
+        snprintf(script, sizeof(script),
+                 "display notification \"%s\" with title \"%s\"",
+                 message, title);
+        execl("/usr/bin/osascript", "osascript", "-e", script,
+              (char *)NULL);
+#else
+        execlp("notify-send", "notify-send", title, message, (char *)NULL);
+#endif
+        _exit(127);
+    }
+    waitpid(child, NULL, 0);
+#endif
 }
 
 static void wait_on_windows(int automatic) {
@@ -1133,6 +1216,7 @@ int main(int argc, char **argv) {
     int automatic = 0;
     int check_mode = 0;
     int quiet = 0;
+    int notify_result = 0;
     int custom_manifest = manifest_url != NULL && manifest_url[0] != '\0';
     unsigned long wait_process_id = 0;
     int index;
@@ -1170,6 +1254,8 @@ int main(int argc, char **argv) {
             check_mode = 1;
             automatic = 1;
         } else if (strcmp(argv[index], "--quiet") == 0) quiet = 1;
+        else if (strcmp(argv[index], "--notify-result") == 0)
+            notify_result = 1;
         else if (strcmp(argv[index], "--help") == 0 ||
                  strcmp(argv[index], "-h") == 0) {
             print_help();
@@ -1269,6 +1355,9 @@ int main(int argc, char **argv) {
         !parse_release(manifest, platform, current_version, &release,
                        error, sizeof(error))) goto done;
     if (!release.update_available) {
+        if (notify_result &&
+            compare_versions(release.version, current_version) == 0)
+            show_result_notification("Z#", "Z# is up to date.");
         if (!quiet) {
             if (compare_versions(release.version, current_version) == 0)
                 printf("Z# %s is already current.\n", current_version);
@@ -1445,9 +1534,19 @@ int main(int argc, char **argv) {
         if (!run_associate(runtime))
             fputs("association warning: run 'zsharp associate' later\n", stderr);
     }
+    if (getenv("ZSHARP_INSTALLER_SKIP_HUB_SHORTCUT") == NULL &&
+        !run_hub_shortcut(runtime))
+        fputs("shortcut warning: run 'zsharp hub shortcut' later\n", stderr);
     if (!quiet)
         printf("\nZ# %s installed successfully.\nZVM: %s\n",
                release.version, runtime);
+    if (notify_result) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "Z# has updated from %s to %s", current_version,
+                 release.version);
+        show_result_notification("Z#", message);
+    }
 #ifndef _WIN32
     {
         const char *path = getenv("PATH");

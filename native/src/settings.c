@@ -287,6 +287,61 @@ static int validate_window_path(SettingsParser *parser, const char *name,
     return 1;
 }
 
+static int icon_extension(const char *path) {
+    static const char *extensions[] = {".png"};
+    size_t path_length = strlen(path);
+    size_t index;
+    for (index = 0; index < sizeof(extensions) / sizeof(extensions[0]); index++) {
+        const char *extension = extensions[index];
+        size_t extension_length = strlen(extension);
+        size_t character;
+        if (path_length < extension_length) continue;
+        for (character = 0; character < extension_length; character++) {
+            if (tolower((unsigned char)path[path_length - extension_length +
+                                                character]) !=
+                tolower((unsigned char)extension[character])) break;
+        }
+        if (character == extension_length) return 1;
+    }
+    return 0;
+}
+
+static int validate_icon_path(SettingsParser *parser, const char *path) {
+    const char *segment = path;
+    const char *cursor = path;
+    if (path[0] == '\0') {
+        settings_fail(parser, &parser->current, "Icon path cannot be empty");
+        return 0;
+    }
+    if (path[0] == '/' || strchr(path, '\\') != NULL ||
+        strchr(path, ':') != NULL) {
+        settings_fail(parser, &parser->current,
+                      "Icon must be a project-relative path using '/'");
+        return 0;
+    }
+    while (1) {
+        if (*cursor == '/' || *cursor == '\0') {
+            size_t length = (size_t)(cursor - segment);
+            if (length == 0 ||
+                (length == 1 && segment[0] == '.') ||
+                (length == 2 && segment[0] == '.' && segment[1] == '.')) {
+                settings_fail(parser, &parser->current,
+                              "Icon path cannot contain empty, '.', or '..' segments");
+                return 0;
+            }
+            if (*cursor == '\0') break;
+            segment = cursor + 1;
+        }
+        cursor++;
+    }
+    if (!icon_extension(path)) {
+        settings_fail(parser, &parser->current,
+                      "Icon must identify a PNG image");
+        return 0;
+    }
+    return 1;
+}
+
 static char *read_settings_source(const char *path) {
     FILE *file = fopen(path, "rb");
     long size;
@@ -325,6 +380,7 @@ void zsharp_settings_free(ZSharpSettings *settings) {
     }
     free(settings->authors);
     free(settings->description);
+    free(settings->icon);
     for (index = 0; index < settings->dependency_count; index++) {
         free(settings->dependencies[index].project_id);
     }
@@ -434,6 +490,21 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
                 settings_consume_text(&parser, "a project description");
             settings_consume_type(&parser, ZTOKEN_COLON,
                                   "':' after the project description");
+        } else if (settings_match_word(&parser, "Icon")) {
+            if ((seen & 256u) != 0) {
+                settings_fail(&parser, &parser.current,
+                              "duplicate Icon setting");
+                break;
+            }
+            seen |= 256u;
+            settings_consume_type(&parser, ZTOKEN_COLON,
+                                  "':' after 'Icon'");
+            settings->icon = settings_consume_text(
+                &parser, "a quoted project icon path");
+            if (settings->icon != NULL)
+                validate_icon_path(&parser, settings->icon);
+            settings_consume_type(&parser, ZTOKEN_COLON,
+                                  "':' after the project icon path");
         } else if (settings_match_word(&parser, "ZSharp")) {
             if ((seen & 32u) != 0) {
                 settings_fail(&parser, &parser.current,

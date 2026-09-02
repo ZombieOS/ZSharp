@@ -38,6 +38,24 @@ The settings file begins with:
 zsharp = type.settings
 ```
 
+Project metadata may include an optional Hub icon:
+
+```zsharp
+Project: "My App":
+PID: "my_app":
+Version: [1.0.0.0]:
+Authors: ["Author"]:
+Description: "A Z# app":
+Icon: "assets/icon.png":
+ZSharp: [1.0.2.0]:
+```
+
+`Icon` accepts a project-relative PNG. Paths use `/`
+and cannot leave the project. If `Icon` is omitted, the Hub downloads and
+caches the official Z# logo from `https://www.zsharp.zombieos.com/zsharp.png`.
+The same project icon is used for Desktop shortcuts created by Z#; a window's
+design icon remains the fallback for older projects without `Icon`.
+
 The specialized script headers are:
 
 ```zsharp

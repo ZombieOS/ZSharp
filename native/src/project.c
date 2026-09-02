@@ -1496,6 +1496,17 @@ int zsharp_project_validate_settings(const ZSharpSettings *settings,
     const char *names[2] = {"Startup", "Uninstall"};
     const char *paths[2];
     size_t index;
+    if (settings->icon != NULL) {
+        char *icon_path = join_path(project_root, settings->icon);
+        int valid = icon_path != NULL && path_is_file(icon_path);
+        free(icon_path);
+        if (!valid) {
+            snprintf(error, error_size,
+                     "project Icon '%s' could not be loaded",
+                     settings->icon);
+            return 0;
+        }
+    }
     if (!settings->has_window) return 1;
     paths[0] = settings->window_startup;
     paths[1] = settings->window_uninstall;

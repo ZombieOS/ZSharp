@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 int zsharp_desktop_install_associations(char *error, size_t error_size);
+int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size);
 
 int zsharp_desktop_create_shortcut(const char *display_name,
                                    const char *package_path,

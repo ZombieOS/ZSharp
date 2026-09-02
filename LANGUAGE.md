@@ -20,6 +20,7 @@ PID: "project_id":
 Version: [1.0.0.0]:
 Authors: ["Author1", "Author2"]:
 Description: "This is a Z# Project!":
+Icon: "assets/icon.png":
 ZSharp: [1.0.0.0]:
 
 Dependencies (
@@ -34,6 +35,11 @@ Dependencies (
 - `Version` is the project's four-part version used by dependent projects.
 - `Authors` may contain any number of author names.
 - `Description` uses `\n` for a new line.
+- `Icon` is optional and selects the project image shown by the Z# Hub. It is
+  a project-relative PNG path. It also takes priority
+  for Z#-created Desktop shortcuts. When it is omitted, the Hub uses the
+  official Z# logo and window apps may fall back to their design icon for a
+  shortcut.
 - `ZSharp` is the four-part language version. Its first number selects the
   generation, such as `1.0.0.0` for Z1.
 - A dependency is written as `projectId:projectVersion`.

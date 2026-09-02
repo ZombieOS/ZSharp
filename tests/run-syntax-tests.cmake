@@ -9,18 +9,32 @@ if(NOT DEFINED ZSHARP_BIN OR NOT DEFINED PROJECT_ROOT OR
 endif()
 
 set(WINDOW_DIR "${PROJECT_ROOT}/tests/window")
+set(ICON_INVALID_PROJECT "${CMAKE_CURRENT_BINARY_DIR}/icon-invalid-project")
 set(ENV{ZSHARP_SKIP_UPDATE_CHECK} "1")
+set(ENV{ZSHARP_PACKAGE_REGISTRY} "${TEST_PROJECT_REGISTRY}.packages")
+set(ENV{ZSHARP_PLAY_STATS_REGISTRY} "${TEST_PROJECT_REGISTRY}.playtime")
 file(REMOVE "${TEST_OUTPUT}" "${TEST_OUTPUT}.mutation"
             "${TEST_PACKAGE}" "${TEST_SOURCE_PACKAGE}"
             "${TEST_GAME_PACKAGE}" "${TEST_GAME_SOURCE_PACKAGE}")
 file(REMOVE_RECURSE "${TEST_PACKAGE_CACHE}" "${TEST_SHORTCUT_CACHE}"
                     "${TEST_DESKTOP}" "${TEST_PACKAGE_PROJECT}"
-                    "${TEST_GAME_PROJECT}")
+                    "${TEST_GAME_PROJECT}" "${ICON_INVALID_PROJECT}")
 file(REMOVE "${TEST_PROJECT_REGISTRY}")
+file(REMOVE "${TEST_PROJECT_REGISTRY}.packages")
+file(REMOVE "${TEST_PROJECT_REGISTRY}.playtime")
 file(MAKE_DIRECTORY "${TEST_PACKAGE_PROJECT}")
 file(MAKE_DIRECTORY "${TEST_GAME_PROJECT}")
 file(COPY "${PROJECT_ROOT}/tests/package/"
      DESTINATION "${TEST_PACKAGE_PROJECT}")
+file(MAKE_DIRECTORY "${TEST_PACKAGE_PROJECT}/assets")
+file(WRITE "${TEST_PACKAGE_PROJECT}/assets/project-icon.png" "test icon")
+file(APPEND "${TEST_PACKAGE_PROJECT}/project.zsettings"
+     "\nIcon: \"assets/project-icon.png\":\n")
+file(MAKE_DIRECTORY "${ICON_INVALID_PROJECT}")
+file(COPY "${PROJECT_ROOT}/tests/package/"
+     DESTINATION "${ICON_INVALID_PROJECT}")
+file(APPEND "${ICON_INVALID_PROJECT}/project.zsettings"
+     "\nIcon: \"assets/missing.png\":\n")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${TEST_GAME_PROJECT}")
 
@@ -59,6 +73,8 @@ endfunction()
 
 expect_success("window settings" "${WINDOW_DIR}"
                check project.zsettings)
+expect_failure("missing project icon" "project Icon"
+               "${ICON_INVALID_PROJECT}" check project.zsettings)
 expect_failure("settings cannot run directly"
                "project.zsettings cannot be run directly"
                "${WINDOW_DIR}" run project.zsettings)
@@ -209,6 +225,47 @@ endif()
 expect_success("application packaging" "${PROJECT_ROOT}"
                package app "${TEST_PACKAGE_PROJECT}" PackageTest
                --unbytecode)
+execute_process(
+    COMMAND "${ZSHARP_BIN}" hub add "${TEST_PACKAGE}"
+    WORKING_DIRECTORY "${PROJECT_ROOT}"
+    RESULT_VARIABLE hub_add_result
+    OUTPUT_VARIABLE hub_add_output
+    ERROR_VARIABLE hub_add_error
+)
+execute_process(
+    COMMAND "${ZSHARP_BIN}" hub list
+    WORKING_DIRECTORY "${PROJECT_ROOT}"
+    RESULT_VARIABLE hub_list_result
+    OUTPUT_VARIABLE hub_list_output
+    ERROR_VARIABLE hub_list_error
+)
+if(NOT hub_add_result EQUAL 0 OR NOT hub_list_result EQUAL 0 OR
+   NOT hub_list_output MATCHES "package_test" OR
+   NOT hub_list_output MATCHES "Packaged Window Test")
+    message(FATAL_ERROR
+        "Hub package registration failed\n"
+        "add: ${hub_add_output}${hub_add_error}\n"
+        "list: ${hub_list_output}${hub_list_error}")
+endif()
+execute_process(
+    COMMAND "${ZSHARP_BIN}" hub remove package_test
+    WORKING_DIRECTORY "${PROJECT_ROOT}"
+    RESULT_VARIABLE hub_remove_result
+    ERROR_VARIABLE hub_remove_error
+)
+execute_process(
+    COMMAND "${ZSHARP_BIN}" hub list
+    WORKING_DIRECTORY "${PROJECT_ROOT}"
+    RESULT_VARIABLE hub_empty_result
+    OUTPUT_VARIABLE hub_empty_output
+    ERROR_VARIABLE hub_empty_error
+)
+if(NOT hub_remove_result EQUAL 0 OR NOT hub_empty_result EQUAL 0 OR
+   NOT hub_empty_output MATCHES "0 installed packages")
+    message(FATAL_ERROR
+        "Hub package removal failed\n${hub_remove_error}\n"
+        "${hub_empty_output}${hub_empty_error}")
+endif()
 expect_success("game packaging" "${PROJECT_ROOT}"
                package game "${TEST_GAME_PROJECT}" PackageTest --unbytecode)
 if(NOT EXISTS "${TEST_PACKAGE}" OR NOT EXISTS "${TEST_SOURCE_PACKAGE}")
@@ -271,6 +328,13 @@ if(WIN32)
     if(NOT package_output MATCHES "running bytecoded startup")
         message(FATAL_ERROR
             "normal application package did not use bytecode\n${package_output}")
+    endif()
+    if(NOT EXISTS "${TEST_PROJECT_REGISTRY}.playtime")
+        message(FATAL_ERROR "package launch did not create Hub playtime data")
+    endif()
+    file(READ "${TEST_PROJECT_REGISTRY}.playtime" playtime_contents)
+    if(NOT playtime_contents MATCHES "package_test")
+        message(FATAL_ERROR "Hub playtime data did not contain package_test")
     endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env
@@ -453,7 +517,9 @@ file(REMOVE_RECURSE "${TEST_PACKAGE_CACHE}")
 file(REMOVE_RECURSE "${TEST_SHORTCUT_CACHE}" "${TEST_DESKTOP}")
 file(REMOVE_RECURSE "${TEST_PACKAGE_PROJECT}")
 file(REMOVE_RECURSE "${TEST_GAME_PROJECT}")
+file(REMOVE_RECURSE "${ICON_INVALID_PROJECT}")
 file(REMOVE "${TEST_PROJECT_REGISTRY}")
+file(REMOVE "${TEST_PROJECT_REGISTRY}.playtime")
 if(DEFINED shortcut_answer)
     file(REMOVE "${shortcut_answer}")
 endif()

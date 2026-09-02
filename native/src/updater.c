@@ -356,7 +356,8 @@ static int launch_installer_check(void) {
              (unsigned long)GetCurrentProcessId());
     swprintf(command, sizeof(command) / sizeof(command[0]),
              L"\"%ls\" --check --quiet --current-version %hs "
-             L"--wait-pid %hs", wide_installer, version, process_id);
+             L"--notify-result --wait-pid %hs", wide_installer, version,
+             process_id);
     memset(&startup, 0, sizeof(startup));
     memset(&process, 0, sizeof(process));
     startup.cb = sizeof(startup);
@@ -418,9 +419,7 @@ static LRESULT CALLBACK agent_window_proc(HWND window, UINT message,
             return 0;
         }
         case ZSHARP_AGENT_CURRENT_MESSAGE:
-            agent_notify(L"Z# is up to date",
-                         L"You already have the newest ZVM version.",
-                         NIIF_INFO);
+            agent_notify(L"Z#", L"Z# is up to date.", NIIF_INFO);
             return 0;
         case ZSHARP_AGENT_ERROR_MESSAGE:
             agent_notify(L"Z# could not check for updates",
@@ -634,5 +633,104 @@ void zsharp_update_check_start(void) {
         if (child > 0) waitpid(child, NULL, 0);
     }
     free(installer);
+#endif
+}
+
+int zsharp_update_now(char *error, size_t error_size) {
+    char version[64];
+    char process_id[32];
+    char *runtime = executable_path();
+    char *directory = runtime == NULL ? NULL : parent_directory(runtime);
+#ifdef _WIN32
+    const char *override = getenv("ZSHARP_UPDATE_INSTALLER");
+    char *installer = override != NULL && override[0] != '\0'
+        ? _strdup(override)
+        : (directory == NULL ? NULL
+                             : join_path(directory, "zsharp-installer.exe"));
+    WCHAR *wide_installer = installer == NULL ? NULL : wide_text(installer);
+    WCHAR command[65536];
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION process;
+    int started = 0;
+    current_version(version, sizeof(version));
+    snprintf(process_id, sizeof(process_id), "%lu",
+             (unsigned long)GetCurrentProcessId());
+    if (installer == NULL || wide_installer == NULL ||
+        GetFileAttributesA(installer) == INVALID_FILE_ATTRIBUTES) {
+        snprintf(error, error_size,
+                 "zsharp-installer.exe was not found beside the ZVM");
+        goto windows_done;
+    }
+    swprintf(command, sizeof(command) / sizeof(command[0]),
+             L"\"%ls\" --check --quiet --notify-result "
+             L"--current-version %hs --wait-pid %hs",
+             wide_installer, version, process_id);
+    memset(&startup, 0, sizeof(startup));
+    memset(&process, 0, sizeof(process));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessW(wide_installer, command, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW | DETACHED_PROCESS,
+                        NULL, NULL, &startup, &process)) {
+        snprintf(error, error_size, "could not start the Z# updater");
+        goto windows_done;
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    started = 1;
+windows_done:
+    free(wide_installer);
+    free(installer);
+    free(directory);
+    free(runtime);
+    return started;
+#else
+    const char *override = getenv("ZSHARP_UPDATE_INSTALLER");
+    char *installer = override != NULL && override[0] != '\0'
+        ? strdup(override)
+        : (directory == NULL ? NULL : join_path(directory,
+                                                 "zsharp-installer"));
+    pid_t child;
+    current_version(version, sizeof(version));
+    snprintf(process_id, sizeof(process_id), "%lu", (unsigned long)getpid());
+    if (installer == NULL || access(installer, X_OK) != 0) {
+        snprintf(error, error_size,
+                 "zsharp-installer was not found beside the ZVM");
+        free(installer);
+        free(directory);
+        free(runtime);
+        return 0;
+    }
+    child = fork();
+    if (child < 0) {
+        snprintf(error, error_size, "could not start the Z# updater");
+        free(installer);
+        free(directory);
+        free(runtime);
+        return 0;
+    }
+    if (child == 0) {
+        pid_t grandchild = fork();
+        if (grandchild < 0) _exit(127);
+        if (grandchild > 0) _exit(0);
+        setsid();
+        {
+            int null_file = open("/dev/null", O_RDWR);
+            if (null_file >= 0) {
+                dup2(null_file, STDIN_FILENO);
+                dup2(null_file, STDOUT_FILENO);
+                dup2(null_file, STDERR_FILENO);
+                if (null_file > STDERR_FILENO) close(null_file);
+            }
+        }
+        execl(installer, installer, "--check", "--quiet",
+              "--notify-result", "--current-version", version,
+              "--wait-pid", process_id, (char *)NULL);
+        _exit(127);
+    }
+    waitpid(child, NULL, 0);
+    free(installer);
+    free(directory);
+    free(runtime);
+    return 1;
 #endif
 }

@@ -26,6 +26,8 @@ file(SIZE "${test_archive}" archive_size)
 file(SHA256 "${test_archive}" archive_sha256)
 set(manifest "${TEST_ROOT}/update.js")
 set(install_directory "${TEST_ROOT}/install")
+set(test_desktop "${TEST_ROOT}/desktop")
+file(MAKE_DIRECTORY "${test_desktop}")
 file(WRITE "${manifest}"
     "{\n"
     "  \"schema\": 1,\n"
@@ -49,6 +51,7 @@ function(run_installer label)
         COMMAND "${CMAKE_COMMAND}" -E env
                 "ZSHARP_INSTALLER_ARTIFACT_FILE=${test_archive}"
                 "ZSHARP_INSTALLER_INSTALL_DIR=${install_directory}"
+                "ZSHARP_DESKTOP_DIRECTORY=${test_desktop}"
                 ZSHARP_INSTALLER_SKIP_INTEGRATION=1
                 "${INSTALLER_BIN}" --manifest-file "${manifest}" --yes
         RESULT_VARIABLE installer_result
@@ -68,16 +71,27 @@ if(WIN32)
     set(backup_runtime "${install_directory}/zsharp.previous.exe")
     set(installed_updater "${install_directory}/zsharp-installer.exe")
     set(rejected_runtime "${TEST_ROOT}/rejected/zsharp.exe")
+    set(hub_shortcut "${test_desktop}/Z# Hub.lnk")
+elseif(APPLE)
+    set(installed_runtime "${install_directory}/zsharp")
+    set(backup_runtime "${install_directory}/zsharp.previous")
+    set(installed_updater "${install_directory}/zsharp-installer")
+    set(rejected_runtime "${TEST_ROOT}/rejected/zsharp")
+    set(hub_shortcut "${test_desktop}/Z# Hub.app")
 else()
     set(installed_runtime "${install_directory}/zsharp")
     set(backup_runtime "${install_directory}/zsharp.previous")
     set(installed_updater "${install_directory}/zsharp-installer")
     set(rejected_runtime "${TEST_ROOT}/rejected/zsharp")
+    set(hub_shortcut "${test_desktop}/Z# Hub.desktop")
 endif()
 
 run_installer("clean bootstrap installation")
 if(NOT EXISTS "${installed_runtime}" OR NOT EXISTS "${installed_updater}")
     message(FATAL_ERROR "The bootstrap installer did not create the ZVM and updater")
+endif()
+if(NOT EXISTS "${hub_shortcut}")
+    message(FATAL_ERROR "The bootstrap installer did not create the Z# Hub desktop shortcut")
 endif()
 file(SHA256 "${installed_runtime}" installed_sha256)
 if(NOT installed_sha256 STREQUAL runtime_sha256)

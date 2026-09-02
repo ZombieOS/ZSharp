@@ -5,9 +5,11 @@
 #include "bytecode.h"
 #include "desktop.h"
 #include "game_runtime.h"
+#include "hub.h"
 #include "package.h"
 #include "project.h"
 #include "provider_loader.h"
+#include "publisher.h"
 #include "registry.h"
 #include "updater.h"
 #include "vm.h"
@@ -16,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -44,7 +47,9 @@ static void print_help(void) {
     puts("  zsharp open <file.zapp|file.zgame>");
     puts("  zsharp uninstall <file.zapp|file.zgame>");
     puts("  zsharp associate");
-    puts("  zsharp hub");
+    puts("  zsharp hub [list|add <file.zapp|file.zgame>|remove <PID>|shortcut]");
+    puts("  zsharp update");
+    puts("  zsharp publish [repository]");
     puts("  zsharp project <project-directory|project.zsettings>");
     puts("  zsharp run <file.zsharp|file.zapp|file.zgame> [options]...");
     puts("  zsharp run-bytecode <file.zbc> [--provider Project=library]...");
@@ -654,7 +659,8 @@ static char *startup_window_icon(const char *startup_path) {
 static void offer_desktop_shortcut(const char *app_name,
                                    const char *package_path,
                                    const char *project_root,
-                                   const char *startup_path) {
+                                   const char *startup_path,
+                                   const char *project_icon) {
     char answer[32];
     char error[512] = {0};
     char *icon;
@@ -666,7 +672,9 @@ static void offer_desktop_shortcut(const char *app_name,
         puts("Desktop shortcut skipped.");
         return;
     }
-    icon = startup_window_icon(startup_path);
+    icon = project_icon == NULL
+        ? startup_window_icon(startup_path)
+        : zsharp_copy_text(project_icon, strlen(project_icon));
     if (!zsharp_desktop_create_shortcut(app_name, package_path, project_root,
                                         icon, error, sizeof(error)))
         fprintf(stderr, "shortcut warning: %s\n", error);
@@ -678,9 +686,12 @@ static void offer_desktop_shortcut(const char *app_name,
 static void refresh_desktop_shortcut(const char *app_name,
                                      const char *package_path,
                                      const char *project_root,
-                                     const char *startup_path) {
+                                     const char *startup_path,
+                                     const char *project_icon) {
     char error[512] = {0};
-    char *icon = startup_window_icon(startup_path);
+    char *icon = project_icon == NULL
+        ? startup_window_icon(startup_path)
+        : zsharp_copy_text(project_icon, strlen(project_icon));
     if (!zsharp_desktop_refresh_shortcut(
             app_name, package_path, project_root, icon,
             error, sizeof(error)))
@@ -759,6 +770,7 @@ static int open_package_command(const char *package_path, int argc,
     ZSharpPackageKind package_kind;
     int new_install = 0;
     int result;
+    time_t play_started;
     if (!zsharp_package_read_info(package_path, &preview, error,
                                   sizeof(error))) {
         fprintf(stderr, "package error: %s\n", error);
@@ -821,6 +833,13 @@ static int open_package_command(const char *package_path, int argc,
         free(startup_bytecode);
         return 1;
     }
+    {
+        char registry_error[512] = {0};
+        if (!zsharp_registry_remember_package(package_path, &info,
+                                              registry_error,
+                                              sizeof(registry_error)))
+            fprintf(stderr, "Hub warning: %s\n", registry_error);
+    }
     if (getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") == NULL) {
         if (new_install) {
             char association_error[512] = {0};
@@ -829,14 +848,16 @@ static int open_package_command(const char *package_path, int argc,
                     association_error, sizeof(association_error)))
                 fprintf(stderr, "association warning: %s\n",
                         association_error);
-            offer_desktop_shortcut(app_name, package_path, root, startup);
+            offer_desktop_shortcut(app_name, package_path, root, startup,
+                                   settings.icon);
         } else {
-            refresh_desktop_shortcut(app_name, package_path, root, startup);
+            refresh_desktop_shortcut(app_name, package_path, root, startup,
+                                     settings.icon);
         }
     }
     zsharp_settings_free(&settings);
-    zsharp_package_info_free(&info);
     free(root);
+    play_started = time(NULL);
     if (file_exists(startup_bytecode)) {
         puts("running bytecoded startup");
         result = run_bytecode_command(startup_bytecode, argc, argv,
@@ -850,8 +871,19 @@ static int open_package_command(const char *package_path, int argc,
     if (result != 0)
         show_app_failure(app_name,
                          command_failure[0] == '\0'
-                             ? "The application returned a launch error."
-                             : command_failure);
+                              ? "The application returned a launch error."
+                              : command_failure);
+    {
+        time_t play_finished = time(NULL);
+        uint64_t play_seconds = play_finished > play_started
+            ? (uint64_t)(play_finished - play_started) : 0;
+        char stats_error[512] = {0};
+        if (!zsharp_registry_record_play(info.project_id, play_seconds,
+                                         (int64_t)play_started, stats_error,
+                                         sizeof(stats_error)))
+            fprintf(stderr, "Hub playtime warning: %s\n", stats_error);
+    }
+    zsharp_package_info_free(&info);
     free(app_name);
     return result;
 }
@@ -884,6 +916,10 @@ static int uninstall_package_command(const char *package_path) {
         return 1;
     }
     error[0] = '\0';
+    if (!zsharp_registry_forget_package(info.project_id, error,
+                                        sizeof(error)))
+        fprintf(stderr, "Hub warning: %s\n", error);
+    error[0] = '\0';
     if (!zsharp_desktop_remove_shortcut(info.project_name, error,
                                         sizeof(error)))
         fprintf(stderr, "shortcut warning: %s\n", error);
@@ -894,12 +930,20 @@ static int uninstall_package_command(const char *package_path) {
 
 int main(int argc, char **argv) {
 #ifdef _WIN32
-    if (argc > 1 && strcmp(argv[1], "update-agent") == 0) {
+    if (argc == 1) {
+        DWORD console_processes[2];
+        DWORD count = GetConsoleProcessList(console_processes, 2);
+        if (count <= 1) {
+            HWND console = GetConsoleWindow();
+            if (console != NULL) ShowWindow(console, SW_HIDE);
+            FreeConsole();
+        }
+    } else if (argc > 1 && strcmp(argv[1], "update-agent") == 0) {
         HWND console = GetConsoleWindow();
         if (console != NULL) ShowWindow(console, SW_HIDE);
         FreeConsole();
     } else if (argc > 1 && (strcmp(argv[1], "open-desktop") == 0 ||
-        strcmp(argv[1], "open") == 0)) {
+        strcmp(argv[1], "open") == 0 || strcmp(argv[1], "hub") == 0)) {
         DWORD console_processes[2];
         DWORD count = GetConsoleProcessList(console_processes, 2);
         if (strcmp(argv[1], "open-desktop") == 0 || count <= 1) {
@@ -910,6 +954,7 @@ int main(int argc, char **argv) {
     }
 #endif
     if (!(argc > 1 && (strcmp(argv[1], "associate") == 0 ||
+                       strcmp(argv[1], "update") == 0 ||
                        strcmp(argv[1], "update-agent") == 0)))
         zsharp_update_check_start();
     if (argc > 1 && strcmp(argv[1], "update-agent") == 0)
@@ -919,10 +964,10 @@ int main(int argc, char **argv) {
         if (!zsharp_desktop_install_associations(association_error,
                                                   sizeof(association_error)))
             fprintf(stderr, "association warning: %s\n", association_error);
-        show_hub_message("Welcome to the Z# Hub",
-                         "Installed applications and games will appear here "
-                         "in a future Hub library update.");
-        return 0;
+        char hub_error[512] = {0};
+        if (zsharp_hub_show(hub_error, sizeof(hub_error))) return 0;
+        fprintf(stderr, "Hub error: %s\n", hub_error);
+        return 1;
     }
     if (strcmp(argv[1], "--version") == 0) {
         printf("Z# %d.%d.%d.%d\n", ZSHARP_VERSION_MAJOR,
@@ -942,9 +987,51 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (strcmp(argv[1], "hub") == 0) {
-        show_hub_message("Welcome to the Z# Hub",
-                         "Installed applications and games will appear here "
-                         "in a future Hub library update.");
+        char error[512] = {0};
+        int ok;
+        if (argc == 2) ok = zsharp_hub_show(error, sizeof(error));
+        else if (argc == 3 && strcmp(argv[2], "list") == 0)
+            ok = zsharp_hub_list(error, sizeof(error));
+        else if (argc == 4 && strcmp(argv[2], "add") == 0)
+            ok = zsharp_hub_add(argv[3], error, sizeof(error));
+        else if (argc == 4 && strcmp(argv[2], "remove") == 0)
+            ok = zsharp_hub_remove(argv[3], error, sizeof(error));
+        else if (argc == 3 && strcmp(argv[2], "shortcut") == 0) {
+            ok = zsharp_desktop_create_hub_shortcut(error, sizeof(error));
+            if (ok) puts("Z# Hub desktop shortcut is ready.");
+        }
+        else {
+            fputs("error: use 'zsharp hub [list|add <file.zapp|file.zgame>|remove <PID>|shortcut]'\n",
+                  stderr);
+            return 2;
+        }
+        if (!ok) fprintf(stderr, "Hub error: %s\n", error);
+        return ok ? 0 : 1;
+    }
+    if (strcmp(argv[1], "update") == 0) {
+        char error[512] = {0};
+        if (argc != 2) {
+            fputs("error: use 'zsharp update'\n", stderr);
+            return 2;
+        }
+        if (!zsharp_update_now(error, sizeof(error))) {
+            fprintf(stderr, "update error: %s\n", error);
+            return 1;
+        }
+        puts("The Z# updater started. This runtime will now close so it can be updated.");
+        return 0;
+    }
+    if (strcmp(argv[1], "publish") == 0) {
+        char error[512] = {0};
+        if (argc != 2 && argc != 3) {
+            fputs("error: use 'zsharp publish [repository]'\n", stderr);
+            return 2;
+        }
+        if (!zsharp_publisher_run(argc == 3 ? argv[2] : NULL,
+                                  error, sizeof(error))) {
+            fprintf(stderr, "publish error: %s\n", error);
+            return 1;
+        }
         return 0;
     }
     if (strcmp(argv[1], "associate") == 0) {

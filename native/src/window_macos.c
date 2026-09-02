@@ -43,6 +43,7 @@ struct MacWindowState;
 typedef struct MacControl {
     MacId widget;
     MacId input_view;
+    MacId left_gesture;
     MacId right_gesture;
     ZSharpUIElement *element;
     int is_image_input;
@@ -283,6 +284,7 @@ static int status_property(ZSharpUIElement *element, const char *name,
 
 static char *path_join(const char *root, const char *relative) {
     size_t a = strlen(root), b = strlen(relative);
+    if (relative[0] == '/') return zsharp_copy_text(relative, b);
     int slash = a != 0 && root[a - 1] != '/';
     char *result = (char *)malloc(a + (size_t)slash + b + 1);
     if (result == NULL) return NULL;
@@ -380,7 +382,8 @@ static MacControl *find_control(MacWindowState *state, MacId sender,
                                 int gesture) {
     size_t index;
     for (index = 0; index < state->control_count; index++) {
-        if ((!gesture && state->controls[index].widget == sender) ||
+        if ((!gesture && (state->controls[index].widget == sender ||
+                          state->controls[index].left_gesture == sender)) ||
             (gesture && state->controls[index].right_gesture == sender))
             return &state->controls[index];
     }
@@ -1245,7 +1248,19 @@ static int create_controls(MacWindowState *state, MacId content,
         send_void_rect(api, widget, "setFrame:", frame);
         send_void_integer(api, widget, "setAutoresizingMask:", 45);
         send_void_id(api, content, "addSubview:", widget);
-        if (element->type == ZUI_BUTTON) {
+        if (element->type == ZUI_IMAGE && property(element, "left") != NULL) {
+            MacId gesture = send_id(api,
+                (MacId)api->get_class("NSClickGestureRecognizer"), "alloc");
+            gesture = ((MacId (*)(MacId, MacSelector, MacId, MacSelector))
+                api->message)(gesture, selector(api, "initWithTarget:action:"),
+                              state->target, selector(api, "zsharpAction:"));
+            if (gesture != NULL) {
+                send_void_id(api, widget, "addGestureRecognizer:", gesture);
+                control->left_gesture = gesture;
+            }
+        }
+        if ((element->type == ZUI_BUTTON || element->type == ZUI_IMAGE) &&
+            property(element, "right") != NULL) {
             MacId gesture = send_id(api,
                 (MacId)api->get_class("NSClickGestureRecognizer"), "alloc");
             gesture = ((MacId (*)(MacId, MacSelector, MacId, MacSelector))

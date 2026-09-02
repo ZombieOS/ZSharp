@@ -16,6 +16,7 @@ add_executable(zsharp
     native/src/decimal.c
     native/src/desktop.c
     native/src/hash.c
+    native/src/hub.c
     native/src/game_runtime.c
     native/src/game_model.c
     native/src/game_vulkan.c
@@ -26,6 +27,7 @@ add_executable(zsharp
     native/src/parser.c
     native/src/project.c
     native/src/provider_loader.c
+    native/src/publisher.c
     native/src/registry.c
     native/src/settings.c
     native/src/updater.c
