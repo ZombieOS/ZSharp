@@ -1,0 +1,5 @@
+zsharp = type.object:2D
+
+noticed object Broken[] (
+ madeUpPhysics: alive:
+)

@@ -1,0 +1,18 @@
+zsharp = type.script:window
+
+noticed Window Main[] (
+ import ZSharp.Window.*():
+
+ noticed design Design[] (
+  title: "Invalid ZSS":
+ )
+
+ noticed textInput Editor[] (
+  display: "Editor":
+  type: text:
+  width: 200px:
+  height: 80px:
+  locationX: 0px:
+  locationY: 0px:
+ )
+)

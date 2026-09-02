@@ -52,6 +52,7 @@ final class EmbeddedRuntime {
                     .resolve(executableName);
             if (Files.isRegularFile(destination)
                     && expectedHash.equals(sha256(destination))) {
+                prepareMacSupport(platform, destination.getParent());
                 return Optional.of(destination);
             }
 
@@ -76,6 +77,7 @@ final class EmbeddedRuntime {
                 }
 
                 moveIntoPlace(temporary, destination);
+                prepareMacSupport(platform, destination.getParent());
                 return Optional.of(destination);
             } finally {
                 Files.deleteIfExists(temporary);
@@ -89,6 +91,48 @@ final class EmbeddedRuntime {
 
     private static InputStream open(String resource) {
         return EmbeddedRuntime.class.getResourceAsStream(resource);
+    }
+
+    private static void prepareMacSupport(String platform, Path directory)
+            throws IOException {
+        if (!platform.startsWith("macos-")) {
+            return;
+        }
+        String name = "libMoltenVK.dylib";
+        String resource = RESOURCE_ROOT + platform + "/" + name;
+        String checksumResource = resource + ".sha256";
+        String expectedHash;
+        try (InputStream checksumInput = open(checksumResource)) {
+            if (checksumInput == null) {
+                throw new IOException("embedded MoltenVK checksum is missing");
+            }
+            expectedHash = new String(checksumInput.readAllBytes(),
+                    StandardCharsets.UTF_8).trim().toLowerCase(Locale.ROOT);
+        }
+        if (!expectedHash.matches("[0-9a-f]{64}")) {
+            throw new IOException("invalid embedded MoltenVK checksum");
+        }
+        Path destination = directory.resolve(name);
+        if (Files.isRegularFile(destination)
+                && expectedHash.equals(sha256(destination))) {
+            return;
+        }
+        Path temporary = Files.createTempFile(directory, name + ".", ".tmp");
+        try {
+            try (InputStream supportInput = open(resource)) {
+                if (supportInput == null) {
+                    throw new IOException("embedded MoltenVK runtime is missing");
+                }
+                Files.copy(supportInput, temporary,
+                        StandardCopyOption.REPLACE_EXISTING);
+            }
+            if (!expectedHash.equals(sha256(temporary))) {
+                throw new IOException("embedded MoltenVK checksum mismatch");
+            }
+            moveIntoPlace(temporary, destination);
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
     }
 
     private static Path cacheRoot(String platform) {

@@ -1,0 +1,12 @@
+zsharp = type.settings
+
+Project: "Packaged Game Test":
+PID: "package_game_test":
+Version: [1.0.2.0]:
+Authors: ["Z# Tests"]:
+Description: "A Vulkan game package/open regression fixture.":
+ZSharp: [1.0.2.0]:
+
+Dependencies (
+ zsharpgame:1.0.0.0
+):

@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.2.0 - Playable Vulkan game runtime - 2026-09-02
+
+- Added the official `zsharpgame:1.0.0.0` dependency gate for
+  `type.script:2D` and `type.script:3D` files.
+- Added an SDL3 game runtime with keyboard, mouse, gamepad, audio, high-DPI
+  sizing, timing, cancellation, and concurrent automatic `Start[]` tasks.
+- Added Vulkan rendering for resizable 2D scenes, colored rectangles, circles,
+  triangles, text, BMP sprites, and the first perspective 3D cube primitive.
+- Added `.zobject` files with scene backgrounds, cameras, transforms, layers,
+  visibility, static/dynamic/kinematic bodies, gravity, velocity, box/circle
+  collision state, triggers, friction, restitution, controls, and jumping.
+- Added WAV playback, looping/autoplay/collision triggers, runtime audio play,
+  volume, and asset-free generated tones for small effects.
+- Added runtime paths for `Input.*`, `Game.*`, and object property reads and
+  `.set:` updates, including live scene switching while scripts and rendering
+  run concurrently.
+- Added native `.zss` style sheets with `.Object` and `.File Object` selectors,
+  CSS declarations, comments, cascading file order, and kebab-case aliases for
+  game-object fields.
+- Added native window ZSS loading with `.Element` and `.Window Element`
+  selectors, button `:hover`, text-input `:focus`, colors, backgrounds, fonts,
+  borders, radius, padding, caret/selection declarations, and compile-time
+  validation. Window styles work for source and bytecoded `.zapp` launches.
+- Kept the integrity-pinned MoltenVK candidate in macOS builds, while marking
+  macOS games experimental and advertising Windows/Linux game support until
+  real Mac hardware testing is completed.
+- Changed `.zgame` packaging from a placeholder into an executable game
+  package. Games select a 3D startup script when present, otherwise a 2D
+  startup script, and bytecoded and unbytecoded packages use the game runtime.
+- Added `.zobject` validation to both bytecoded and unbytecoded game packaging.
+- Added a playable `examples/test-game` project and dependency, packaging,
+  source/bytecode launch, automatic `Start[]`, object parsing, and live Vulkan
+  smoke coverage.
+
 ## 1.0.1.2 - Windows update tray patch - 2026-08-29
 
 - Added a single-instance Windows ZVM update agent that starts for the current

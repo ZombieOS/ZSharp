@@ -4,6 +4,7 @@
 
 #include "bytecode.h"
 #include "desktop.h"
+#include "game_runtime.h"
 #include "package.h"
 #include "project.h"
 #include "provider_loader.h"
@@ -35,6 +36,7 @@ static void print_help(void) {
     puts("");
     puts("Usage:");
     puts("  zsharp --version");
+    puts("  zsharp game-info");
     puts("  zsharp check <file.zsharp|project.zsettings>");
     puts("  zsharp check-bytecode <file.zbc>");
     puts("  zsharp compile <file.zsharp> -o <output.zbc>");
@@ -686,6 +688,64 @@ static void refresh_desktop_shortcut(const char *app_name,
     free(icon);
 }
 
+static char *find_game_startup_path(const char *project_root, char *error,
+                                    size_t error_size) {
+    ZSharpSourceList sources;
+    char *first_2d = NULL;
+    char *first_3d = NULL;
+    size_t index;
+    if (!zsharp_project_list_sources(project_root, &sources, error,
+                                     error_size))
+        return NULL;
+    for (index = 0; index < sources.count; index++) {
+        ZSharpProgram program;
+        ZSharpDiagnostic diagnostic;
+        char parse_error[512] = {0};
+        char **candidate;
+        if (!zsharp_project_parse_file(sources.items[index], &program,
+                                       &diagnostic, parse_error,
+                                       sizeof(parse_error))) {
+            snprintf(error, error_size, "%s",
+                     diagnostic.message[0] != '\0'
+                         ? diagnostic.message
+                         : parse_error);
+            free(first_2d);
+            free(first_3d);
+            zsharp_project_source_list_free(&sources);
+            return NULL;
+        }
+        candidate = program.script_type == ZSCRIPT_3D
+                        ? &first_3d
+                        : program.script_type == ZSCRIPT_2D ? &first_2d
+                                                            : NULL;
+        if (candidate != NULL &&
+            (*candidate == NULL || strcmp(sources.items[index], *candidate) < 0)) {
+            char *replacement = zsharp_copy_text(
+                sources.items[index], strlen(sources.items[index]));
+            if (replacement == NULL) {
+                snprintf(error, error_size, "out of memory");
+                zsharp_program_free(&program);
+                free(first_2d);
+                free(first_3d);
+                zsharp_project_source_list_free(&sources);
+                return NULL;
+            }
+            free(*candidate);
+            *candidate = replacement;
+        }
+        zsharp_program_free(&program);
+    }
+    zsharp_project_source_list_free(&sources);
+    if (first_3d != NULL) {
+        free(first_2d);
+        return first_3d;
+    }
+    if (first_2d != NULL) return first_2d;
+    snprintf(error, error_size,
+             "the game package has no 2D or 3D Z# startup script");
+    return NULL;
+}
+
 static int open_package_command(const char *package_path, int argc,
                                 char **argv, int first_option) {
     ZSharpPackageInfo info;
@@ -693,9 +753,10 @@ static int open_package_command(const char *package_path, int argc,
     ZSharpSettings settings;
     char error[512] = {0};
     char *root = NULL;
-    char *startup;
+    char *startup = NULL;
     char *startup_bytecode;
     char *app_name;
+    ZSharpPackageKind package_kind;
     int new_install = 0;
     int result;
     if (!zsharp_package_read_info(package_path, &preview, error,
@@ -704,15 +765,7 @@ static int open_package_command(const char *package_path, int argc,
         show_app_failure("Z# application", error);
         return 1;
     }
-    if (preview.kind == ZSHARP_PACKAGE_GAME) {
-        char reason[512];
-        snprintf(reason, sizeof(reason),
-                 "'%s' cannot run yet. Game support is planned for the "
-                 "Z# game-engine update.", preview.project_name);
-        zsharp_package_info_free(&preview);
-        show_hub_message("Z# games are currently unavailable", reason);
-        return 0;
-    }
+    package_kind = preview.kind;
     app_name = zsharp_copy_text(preview.project_name,
                                 strlen(preview.project_name));
     zsharp_package_info_free(&preview);
@@ -735,7 +788,8 @@ static int open_package_command(const char *package_path, int argc,
         free(app_name);
         return 1;
     }
-    if (!settings.has_window || settings.window_startup == NULL) {
+    if (package_kind == ZSHARP_PACKAGE_APP &&
+        (!settings.has_window || settings.window_startup == NULL)) {
         fprintf(stderr, "package error: package has no Window Startup entry\n");
         show_app_failure(app_name, "The package has no Window Startup entry.");
         zsharp_settings_free(&settings);
@@ -744,7 +798,10 @@ static int open_package_command(const char *package_path, int argc,
         free(app_name);
         return 1;
     }
-    startup = join_project_path(root, settings.window_startup);
+    if (package_kind == ZSHARP_PACKAGE_GAME)
+        startup = find_game_startup_path(root, error, sizeof(error));
+    else
+        startup = join_project_path(root, settings.window_startup);
     startup_bytecode = join_project_path(
         root, ZSHARP_PACKAGE_STARTUP_BYTECODE);
     printf("opening %s '%s' (%s %u.%u.%u.%u)\n",
@@ -752,8 +809,10 @@ static int open_package_command(const char *package_path, int argc,
            info.project_name, info.project_id, info.version[0], info.version[1],
            info.version[2], info.version[3]);
     if (startup == NULL || startup_bytecode == NULL) {
-        fputs("package error: out of memory\n", stderr);
-        show_app_failure(app_name, "Out of memory.");
+        fprintf(stderr, "package error: %s\n",
+                error[0] == '\0' ? "out of memory" : error);
+        show_app_failure(app_name,
+                         error[0] == '\0' ? "Out of memory." : error);
         zsharp_settings_free(&settings);
         zsharp_package_info_free(&info);
         free(root);
@@ -870,6 +929,13 @@ int main(int argc, char **argv) {
                ZSHARP_VERSION_MINOR, ZSHARP_VERSION_PATCH,
                ZSHARP_VERSION_REVISION);
         return 0;
+    }
+    if (strcmp(argv[1], "game-info") == 0) {
+        printf("Z# game runtime: %s\n",
+               zsharp_game_runtime_available() ? "available" : "unavailable");
+        printf("Renderer: %s\n", zsharp_game_runtime_backend());
+        printf("Dependency: zsharpgame:1.0.0.0\n");
+        return zsharp_game_runtime_available() ? 0 : 1;
     }
     if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
         print_help();

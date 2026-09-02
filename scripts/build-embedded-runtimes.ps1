@@ -1,10 +1,16 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string] $Zig
+    [string] $Zig,
+
+    [switch] $AllowRuntimeWithoutGameSupport
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $AllowRuntimeWithoutGameSupport) {
+    throw "The portable Zig path does not include SDL3/Vulkan game support. Run the 'Build native game runtimes' GitHub workflow for release binaries, or pass -AllowRuntimeWithoutGameSupport only for compiler/server-only development builds."
+}
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $zigPath = (Resolve-Path -LiteralPath $Zig).Path

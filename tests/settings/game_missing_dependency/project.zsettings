@@ -1,0 +1,11 @@
+zsharp = type.settings
+
+Project: "Missing Game Dependency":
+PID: "missing_game_dependency":
+Version: [1.0.2.0]:
+Authors: ["Z# Tests"]:
+Description: "A game dependency validation fixture.":
+ZSharp: [1.0.2.0]:
+
+Dependencies (
+):

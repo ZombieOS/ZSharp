@@ -7,6 +7,7 @@
 
 #include <dlfcn.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,6 +121,7 @@ typedef struct LinuxControl {
     int image_width;
     int image_height;
     void *css_provider;
+    void *zss_provider;
     struct LinuxWindowState *state;
 } LinuxControl;
 
@@ -453,6 +455,210 @@ static int pixels(const ZSharpUIProperty *value, double scale, int fallback) {
     parsed = strtod(value->text_value, NULL);
     if (value->unit == ZUI_UNIT_ZU) parsed *= 4.0 * scale;
     return (int)(parsed < 0.0 ? parsed - 0.5 : parsed + 0.5);
+}
+
+static int append_css(char **cursor, size_t *remaining,
+                      const char *format, ...) {
+    va_list arguments;
+    int written;
+    va_start(arguments, format);
+    written = vsnprintf(*cursor, *remaining, format, arguments);
+    va_end(arguments);
+    if (written < 0 || (size_t)written >= *remaining) return 0;
+    *cursor += written;
+    *remaining -= (size_t)written;
+    return 1;
+}
+
+static int append_measurement_css(char **cursor, size_t *remaining,
+                                  const char *css_name,
+                                  const ZSharpUIProperty *value,
+                                  double scale) {
+    if (value == NULL) return 1;
+    return append_css(cursor, remaining, "%s:%dpx;", css_name,
+                      pixels(value, scale, 0));
+}
+
+static int apply_element_zss(LinuxWindowState *state, LinuxControl *control,
+                             char *error, size_t error_size) {
+    ZSharpUIElement *element = control->element;
+    GtkWidget *target = control->is_multiline && control->input_widget != NULL
+        ? control->input_widget : control->widget;
+    const char *selector = element->type == ZUI_TEXT ? "label" :
+        element->type == ZUI_BUTTON ? "button" :
+        element->type == ZUI_TEXT_INPUT
+            ? (control->is_multiline ? "textview" : "entry") : "*";
+    ZSharpUIProperty *background = property(
+        element, element->type == ZUI_BUTTON ? "buttonColor" :
+                                               "backgroundColor");
+    ZSharpUIProperty *color = property(
+        element, element->type == ZUI_TEXT ? "color" : "textColor");
+    ZSharpUIProperty *border_width = property(element, "borderWidth");
+    ZSharpUIProperty *border_color = property(element, "borderColor");
+    ZSharpUIProperty *border_radius = property(element, "borderRadius");
+    ZSharpUIProperty *family = property(element, "fontFamily");
+    ZSharpUIProperty *font_size = property(element, "fontSize");
+    ZSharpUIProperty *weight = property(element, "fontWeight");
+    ZSharpUIProperty *padding = property(element, "padding");
+    ZSharpUIProperty *padding_left = property(element, "paddingLeft");
+    ZSharpUIProperty *padding_right = property(element, "paddingRight");
+    ZSharpUIProperty *padding_top = property(element, "paddingTop");
+    ZSharpUIProperty *padding_bottom = property(element, "paddingBottom");
+    ZSharpUIProperty *caret = property(element, "caretColor");
+    ZSharpUIProperty *selection_background = property(
+        element, "selectionBackground");
+    ZSharpUIProperty *selection_color = property(element, "selectionColor");
+    ZSharpUIProperty *hover_background = property(
+        element, element->type == ZUI_BUTTON ? "hoverButtonColor" :
+                                               "hoverBackgroundColor");
+    ZSharpUIProperty *hover_color = property(
+        element, element->type == ZUI_TEXT ? "hoverColor" :
+                                             "hoverTextColor");
+    ZSharpUIProperty *hover_border = property(element, "hoverBorderColor");
+    ZSharpUIProperty *focus_border = property(element, "focusBorderColor");
+    size_t capacity = 8192;
+    size_t index;
+    char *css;
+    char *write;
+    size_t remaining;
+    int has_style = 0;
+    for (index = 0; index < element->property_count; index++)
+        if (element->properties[index].text_value != NULL)
+            capacity += strlen(element->properties[index].text_value) * 4;
+    css = (char *)malloc(capacity);
+    if (css == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    write = css;
+    remaining = capacity;
+    if (!append_css(&write, &remaining, "%s{", selector)) goto too_large;
+    if (background != NULL && background->text_value[0] == '#') {
+        if (!append_css(&write, &remaining, "background-color:%s;",
+                        background->text_value)) goto too_large;
+        has_style = 1;
+    }
+    if (color != NULL) {
+        if (!append_css(&write, &remaining, "color:%s;", color->text_value))
+            goto too_large;
+        has_style = 1;
+    }
+    if (border_width != NULL) {
+        if (!append_measurement_css(&write, &remaining, "border-width",
+                                    border_width, state->scale) ||
+            !append_css(&write, &remaining, "border-style:solid;"))
+            goto too_large;
+        has_style = 1;
+    }
+    if (border_color != NULL) {
+        if (!append_css(&write, &remaining, "border-color:%s;",
+                        border_color->text_value)) goto too_large;
+        has_style = 1;
+    }
+    if (border_radius != NULL) {
+        if (!append_measurement_css(&write, &remaining, "border-radius",
+                                    border_radius, state->scale))
+            goto too_large;
+        has_style = 1;
+    }
+    if (family != NULL) {
+        if (!append_css(&write, &remaining, "font-family:%s;",
+                        family->text_value)) goto too_large;
+        has_style = 1;
+    }
+    if (font_size != NULL) {
+        if (!append_measurement_css(&write, &remaining, "font-size",
+                                    font_size, state->scale)) goto too_large;
+        has_style = 1;
+    }
+    if (weight != NULL) {
+        if (!append_css(&write, &remaining, "font-weight:%s;",
+                        weight->text_value)) goto too_large;
+        has_style = 1;
+    }
+    if (padding != NULL) {
+        if (!append_measurement_css(&write, &remaining, "padding", padding,
+                                    state->scale)) goto too_large;
+        has_style = 1;
+    }
+    if (padding_left != NULL || padding_right != NULL ||
+        padding_top != NULL || padding_bottom != NULL) {
+        if (!append_measurement_css(&write, &remaining, "padding-left",
+                                    padding_left, state->scale) ||
+            !append_measurement_css(&write, &remaining, "padding-right",
+                                    padding_right, state->scale) ||
+            !append_measurement_css(&write, &remaining, "padding-top",
+                                    padding_top, state->scale) ||
+            !append_measurement_css(&write, &remaining, "padding-bottom",
+                                    padding_bottom, state->scale))
+            goto too_large;
+        has_style = 1;
+    }
+    if (caret != NULL) {
+        if (!append_css(&write, &remaining, "caret-color:%s;",
+                        caret->text_value)) goto too_large;
+        has_style = 1;
+    }
+    if (property(element, "outline") != NULL) {
+        if (!append_css(&write, &remaining, "outline-style:none;"))
+            goto too_large;
+        has_style = 1;
+    }
+    if (!append_css(&write, &remaining, "}")) goto too_large;
+    if (hover_background != NULL || hover_color != NULL ||
+        hover_border != NULL) {
+        if (!append_css(&write, &remaining, "%s:hover{", selector))
+            goto too_large;
+        if (hover_background != NULL && hover_background->text_value[0] == '#' &&
+            !append_css(&write, &remaining, "background-color:%s;",
+                        hover_background->text_value)) goto too_large;
+        if (hover_color != NULL &&
+            !append_css(&write, &remaining, "color:%s;",
+                        hover_color->text_value)) goto too_large;
+        if (hover_border != NULL &&
+            !append_css(&write, &remaining, "border-color:%s;",
+                        hover_border->text_value)) goto too_large;
+        if (!append_css(&write, &remaining, "}")) goto too_large;
+        has_style = 1;
+    }
+    if (focus_border != NULL) {
+        if (!append_css(&write, &remaining,
+                        "%s:focus{border-color:%s;}", selector,
+                        focus_border->text_value)) goto too_large;
+        has_style = 1;
+    }
+    if (selection_background != NULL || selection_color != NULL) {
+        if (!append_css(&write, &remaining, "%s selection{", selector))
+            goto too_large;
+        if (selection_background != NULL &&
+            !append_css(&write, &remaining, "background-color:%s;",
+                        selection_background->text_value)) goto too_large;
+        if (selection_color != NULL &&
+            !append_css(&write, &remaining, "color:%s;",
+                        selection_color->text_value)) goto too_large;
+        if (!append_css(&write, &remaining, "}")) goto too_large;
+        has_style = 1;
+    }
+    if (has_style) {
+        control->zss_provider = state->api.css_provider_new();
+        if (control->zss_provider == NULL ||
+            !state->api.css_provider_load_from_data(control->zss_provider,
+                                                     css, -1, NULL)) {
+            free(css);
+            snprintf(error, error_size,
+                     "GTK could not apply ZSS to '%s'", element->name);
+            return 0;
+        }
+        state->api.style_context_add_provider(
+            state->api.widget_get_style_context(target),
+            control->zss_provider, 850u);
+    }
+    free(css);
+    return 1;
+too_large:
+    free(css);
+    snprintf(error, error_size, "ZSS for '%s' is too large", element->name);
+    return 0;
 }
 
 static void default_size(const ZSharpUIElement *element, int *width,
@@ -1298,6 +1504,7 @@ static int create_controls(LinuxWindowState *state, int width, int height,
         control->widget = widget;
         state->api.widget_set_size_request(widget, w, h);
         state->api.fixed_put(state->fixed, widget, 0, 0);
+        if (!apply_element_zss(state, control, error, error_size)) return 0;
         if (element->type == ZUI_BUTTON) {
             state->api.signal_connect_data(widget, "clicked",
                 (void *)button_clicked, control, NULL, 0);
@@ -1486,6 +1693,9 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
             if (state.controls[index].css_provider != NULL &&
                 state.api.object_unref != NULL)
                 state.api.object_unref(state.controls[index].css_provider);
+            if (state.controls[index].zss_provider != NULL &&
+                state.api.object_unref != NULL)
+                state.api.object_unref(state.controls[index].zss_provider);
     }
     free(state.controls);
     gtk_api_close(&state.api);

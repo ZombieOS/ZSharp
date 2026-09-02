@@ -75,5 +75,11 @@ class EmbeddedRuntimeTest {
         assertEquals(0, result.exitCode(), result.standardError());
         assertEquals("Z# " + ZSharp.VERSION, result.standardOutput().trim());
         assertFalse(result.standardError().contains("error"));
+
+        ZSharpResult gameInfo = new ZSharpToolchain(executable).gameInfo();
+        assertEquals(0, gameInfo.exitCode(), gameInfo.standardError());
+        assertTrue(gameInfo.standardOutput().contains(
+                "Z# game runtime: available"));
+        assertTrue(gameInfo.standardOutput().contains("SDL3 + Vulkan"));
     }
 }

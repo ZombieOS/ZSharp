@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.0.1.2",
+    [string] $Version = "1.0.2.0",
 
     [string] $BaseUrl = "https://www.zsharp.zombieos.com",
 
@@ -85,6 +85,7 @@ $targets = @(
         Id = "macos-x86_64"
         Triple = "x86_64-macos.10.15.0"
         Runtime = "zsharp"
+        Support = "libMoltenVK.dylib"
         Installer = "zsharp-installer"
         Libraries = @()
     },
@@ -92,6 +93,7 @@ $targets = @(
         Id = "macos-aarch64"
         Triple = "aarch64-macos.11.0.0"
         Runtime = "zsharp"
+        Support = "libMoltenVK.dylib"
         Installer = "zsharp-installer"
         Libraries = @()
     }
@@ -127,6 +129,12 @@ foreach ($target in $targets) {
 
     $runtimeSource = Join-Path (Join-Path $resourceRoot $target.Id) `
         $target.Runtime
+    $runtimeVersionFile = Join-Path `
+        (Join-Path $resourceRoot $target.Id) "zsharp.version"
+    if (-not (Test-Path -LiteralPath $runtimeVersionFile -PathType Leaf) -or
+        (Get-Content -LiteralPath $runtimeVersionFile -Raw).Trim() -ne $Version) {
+        throw "The embedded $($target.Id) runtime is not staged for Z# $Version"
+    }
     $runtimeChecksumFile = $runtimeSource + ".sha256"
     $runtimeChecksum = (Get-Content -LiteralPath $runtimeChecksumFile -Raw).Trim()
     $actualRuntimeChecksum =
@@ -144,11 +152,35 @@ foreach ($target in $targets) {
     Copy-Item -LiteralPath $runtimeSource -Destination $archiveRuntimeDirectory
     Copy-Item -LiteralPath $installerPath -Destination $siteInstallerDirectory
 
-    $platforms[$target.Id] = [ordered]@{
+    $platformMetadata = [ordered]@{
         path = "runtimes/$($target.Id)/$($target.Runtime)"
         sha256 = $runtimeChecksum
         size = (Get-Item -LiteralPath $runtimeSource).Length
     }
+    if ($target.ContainsKey("Support")) {
+        $supportSource = Join-Path (Join-Path $resourceRoot $target.Id) `
+            $target.Support
+        $supportChecksumFile = $supportSource + ".sha256"
+        if (-not (Test-Path -LiteralPath $supportSource -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $supportChecksumFile -PathType Leaf)) {
+            throw "The embedded $($target.Id) game support files are missing"
+        }
+        $supportChecksum =
+            (Get-Content -LiteralPath $supportChecksumFile -Raw).Trim()
+        $actualSupportChecksum =
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $supportSource).Hash.ToLowerInvariant()
+        if ($supportChecksum -ne $actualSupportChecksum) {
+            throw "The embedded $($target.Id) game support checksum does not match"
+        }
+        Copy-Item -LiteralPath $supportSource `
+            -Destination $archiveRuntimeDirectory
+        $platformMetadata.supportPath =
+            "runtimes/$($target.Id)/$($target.Support)"
+        $platformMetadata.supportSha256 = $supportChecksum
+        $platformMetadata.supportSize =
+            (Get-Item -LiteralPath $supportSource).Length
+    }
+    $platforms[$target.Id] = $platformMetadata
 
     $publicInstallerName = "zsharp-installer-$Version-$($target.Id)"
     if ($target.Installer.EndsWith(".exe")) {

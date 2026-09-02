@@ -1,0 +1,18 @@
+zsharp = type.object:2D
+
+noticed scene Main[] (
+ background: #08080B:
+ gravityY: -900:
+)
+
+noticed object TestBlock[] (
+ scene: Main:
+ shape: rectangle:
+ positionX: 0:
+ positionY: 0:
+ width: 40:
+ height: 40:
+ color: #FF2A72:
+ body: dynamic:
+ collider: box:
+)

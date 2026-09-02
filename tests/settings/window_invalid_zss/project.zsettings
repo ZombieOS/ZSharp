@@ -1,0 +1,17 @@
+zsharp = type.settings
+
+Project: "Invalid Window ZSS":
+PID: "invalid_window_zss":
+Version: [1.0.2.0]:
+Authors: ["Z# Tests"]:
+Description: "Rejects an unsupported matched window style.":
+ZSharp: [1.0.2.0]:
+
+Dependencies (
+ zsharpwindow:1.0.0.0
+):
+
+Window (
+ Startup: "Main.zsharp":
+ Uninstall: "Main.zsharp":
+):

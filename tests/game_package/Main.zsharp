@@ -1,0 +1,13 @@
+zsharp = type.script:2D
+
+noticed room Game[] (
+ noticed brain Start[] (
+  Print("game start ran"):
+  if[Input.left == alive] (
+   TestBlock.color.set: #00E5FF:
+  ) else (
+   TestBlock.color.set: #FF2A72:
+  )
+  number.set:TestBlock.positionX = TestBlock.positionX + 1:
+ )
+)

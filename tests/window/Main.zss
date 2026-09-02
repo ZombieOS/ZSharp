@@ -1,0 +1,20 @@
+/* Window ZSS is loaded recursively from the project. */
+.Main NameInput {
+ background: #101016;
+ color: #DADAE4;
+ border: 1px solid #343443;
+ border-radius: 5px;
+ font-family: Consolas;
+ font-size: 14px;
+ font-weight: normal;
+ padding-left: 8px;
+ caret-color: #FF2A42;
+ outline: none;
+ selection-background: #3A153D;
+ selection-color: #FFFFFF;
+}
+
+.Main PlayButton:hover {
+ background: #242431;
+ border-color: #505064;
+}

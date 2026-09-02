@@ -1,7 +1,8 @@
 if(NOT DEFINED ZSHARP_BIN OR NOT DEFINED PROJECT_ROOT OR
    NOT DEFINED TEST_OUTPUT OR NOT DEFINED TEST_PACKAGE OR
    NOT DEFINED TEST_SOURCE_PACKAGE OR NOT DEFINED TEST_GAME_PACKAGE OR
-   NOT DEFINED TEST_PACKAGE_PROJECT OR
+   NOT DEFINED TEST_GAME_SOURCE_PACKAGE OR
+   NOT DEFINED TEST_PACKAGE_PROJECT OR NOT DEFINED TEST_GAME_PROJECT OR
    NOT DEFINED TEST_PACKAGE_CACHE OR NOT DEFINED TEST_PROJECT_REGISTRY OR
    NOT DEFINED TEST_SHORTCUT_CACHE OR NOT DEFINED TEST_DESKTOP)
     message(FATAL_ERROR "The Z# test paths were not supplied")
@@ -11,13 +12,17 @@ set(WINDOW_DIR "${PROJECT_ROOT}/tests/window")
 set(ENV{ZSHARP_SKIP_UPDATE_CHECK} "1")
 file(REMOVE "${TEST_OUTPUT}" "${TEST_OUTPUT}.mutation"
             "${TEST_PACKAGE}" "${TEST_SOURCE_PACKAGE}"
-            "${TEST_GAME_PACKAGE}")
+            "${TEST_GAME_PACKAGE}" "${TEST_GAME_SOURCE_PACKAGE}")
 file(REMOVE_RECURSE "${TEST_PACKAGE_CACHE}" "${TEST_SHORTCUT_CACHE}"
-                    "${TEST_DESKTOP}" "${TEST_PACKAGE_PROJECT}")
+                    "${TEST_DESKTOP}" "${TEST_PACKAGE_PROJECT}"
+                    "${TEST_GAME_PROJECT}")
 file(REMOVE "${TEST_PROJECT_REGISTRY}")
 file(MAKE_DIRECTORY "${TEST_PACKAGE_PROJECT}")
+file(MAKE_DIRECTORY "${TEST_GAME_PROJECT}")
 file(COPY "${PROJECT_ROOT}/tests/package/"
      DESTINATION "${TEST_PACKAGE_PROJECT}")
+file(COPY "${PROJECT_ROOT}/tests/game_package/"
+     DESTINATION "${TEST_GAME_PROJECT}")
 
 function(expect_success label working_dir)
     execute_process(
@@ -162,6 +167,8 @@ expect_success("2D script header" "${PROJECT_ROOT}"
                check tests/Game2DHeader.zsharp)
 expect_success("3D script header" "${PROJECT_ROOT}"
                check tests/Game3DHeader.zsharp)
+expect_success("SDL/Vulkan game runtime build" "${PROJECT_ROOT}"
+               game-info)
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             ZSHARP_WINDOW_FORCE_FAILURE=1
@@ -202,11 +209,16 @@ endif()
 expect_success("application packaging" "${PROJECT_ROOT}"
                package app "${TEST_PACKAGE_PROJECT}" PackageTest
                --unbytecode)
-expect_success("game package foundation" "${PROJECT_ROOT}"
-               package game "${TEST_PACKAGE_PROJECT}" PackageTest)
+expect_success("game packaging" "${PROJECT_ROOT}"
+               package game "${TEST_GAME_PROJECT}" PackageTest --unbytecode)
 if(NOT EXISTS "${TEST_PACKAGE}" OR NOT EXISTS "${TEST_SOURCE_PACKAGE}")
     message(FATAL_ERROR
         "--unbytecode did not create both application packages")
+endif()
+if(NOT EXISTS "${TEST_GAME_PACKAGE}" OR
+   NOT EXISTS "${TEST_GAME_SOURCE_PACKAGE}")
+    message(FATAL_ERROR
+        "game --unbytecode did not create both game packages")
 endif()
 set(source_zip "${CMAKE_CURRENT_BINARY_DIR}/PackageTest-unbytecoded.zip")
 file(REMOVE "${source_zip}")
@@ -233,6 +245,11 @@ expect_failure("package filename path guard"
                "contains an invalid character"
                "${PROJECT_ROOT}"
                package app "${TEST_PACKAGE_PROJECT}" ../Invalid)
+expect_failure("invalid game object field"
+               "unknown game object field"
+               "${PROJECT_ROOT}/tests/settings/game_invalid_object"
+               package game
+               "${PROJECT_ROOT}/tests/settings/game_invalid_object" Invalid)
 if(WIN32)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env
@@ -353,21 +370,44 @@ if(WIN32)
             "stdout: ${uninstall_output}\nstderr: ${uninstall_error}")
     endif()
 endif()
-execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E env
-            ZSHARP_HUB_CONSOLE_ONLY=1
-            ZSHARP_SKIP_DESKTOP_INTEGRATION=1
-            "${ZSHARP_BIN}" open "${TEST_GAME_PACKAGE}"
-    WORKING_DIRECTORY "${PROJECT_ROOT}"
-    RESULT_VARIABLE game_result
-    OUTPUT_VARIABLE game_output
-    ERROR_VARIABLE game_error
-)
-if(NOT game_result EQUAL 0 OR
-   NOT game_output MATCHES "Z# games are currently unavailable")
-    message(FATAL_ERROR
-        "unavailable game Hub routing failed (${game_result})\n"
-        "stdout: ${game_output}\nstderr: ${game_error}")
+if(WIN32)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+                ZSHARP_GAME_AUTOCLOSE_MS=250
+                ZSHARP_SKIP_DESKTOP_INTEGRATION=1
+                "ZSHARP_PACKAGE_CACHE=${TEST_PACKAGE_CACHE}"
+                "${ZSHARP_BIN}" open "${TEST_GAME_PACKAGE}"
+        WORKING_DIRECTORY "${PROJECT_ROOT}"
+        RESULT_VARIABLE game_result
+        OUTPUT_VARIABLE game_output
+        ERROR_VARIABLE game_error
+    )
+    if(NOT game_result EQUAL 0 OR
+       NOT game_output MATCHES "running bytecoded startup" OR
+       NOT game_output MATCHES "game start ran")
+        message(FATAL_ERROR
+            "Vulkan game package smoke test failed (${game_result})\n"
+            "stdout: ${game_output}\nstderr: ${game_error}")
+    endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+                ZSHARP_GAME_AUTOCLOSE_MS=250
+                ZSHARP_SKIP_DESKTOP_INTEGRATION=1
+                "ZSHARP_PACKAGE_CACHE=${TEST_PACKAGE_CACHE}"
+                "${ZSHARP_BIN}" open "${TEST_GAME_SOURCE_PACKAGE}"
+        WORKING_DIRECTORY "${PROJECT_ROOT}"
+        RESULT_VARIABLE game_source_result
+        OUTPUT_VARIABLE game_source_output
+        ERROR_VARIABLE game_source_error
+    )
+    if(NOT game_source_result EQUAL 0 OR
+       NOT game_source_output MATCHES "running unbytecoded source startup" OR
+       NOT game_source_output MATCHES "game start ran")
+        message(FATAL_ERROR
+            "source game package smoke test failed (${game_source_result})\n"
+            "stdout: ${game_source_output}\n"
+            "stderr: ${game_source_error}")
+    endif()
 endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
@@ -397,13 +437,22 @@ expect_failure("Window settings script-type guard"
                "must use zsharp = type.script:window"
                "${PROJECT_ROOT}/tests/settings/window_wrong_type"
                check project.zsettings)
+expect_failure("window ZSS declaration guard"
+               "unsupported or invalid ZSS declaration"
+               "${PROJECT_ROOT}/tests/settings/window_invalid_zss"
+               check project.zsettings)
+expect_failure("game dependency guard"
+               "require zsharpgame:1.0.0.0"
+               "${PROJECT_ROOT}/tests/settings/game_missing_dependency"
+               check Game.zsharp)
 
 file(REMOVE "${TEST_OUTPUT}")
 file(REMOVE "${TEST_PACKAGE}" "${TEST_SOURCE_PACKAGE}"
-            "${TEST_GAME_PACKAGE}")
+            "${TEST_GAME_PACKAGE}" "${TEST_GAME_SOURCE_PACKAGE}")
 file(REMOVE_RECURSE "${TEST_PACKAGE_CACHE}")
 file(REMOVE_RECURSE "${TEST_SHORTCUT_CACHE}" "${TEST_DESKTOP}")
 file(REMOVE_RECURSE "${TEST_PACKAGE_PROJECT}")
+file(REMOVE_RECURSE "${TEST_GAME_PROJECT}")
 file(REMOVE "${TEST_PROJECT_REGISTRY}")
 if(DEFINED shortcut_answer)
     file(REMOVE "${shortcut_answer}")

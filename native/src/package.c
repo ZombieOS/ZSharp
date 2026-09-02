@@ -2,6 +2,8 @@
 
 #include "package.h"
 
+#include "game_model.h"
+
 #include "hash.h"
 #include "project.h"
 #include "settings.h"
@@ -447,9 +449,97 @@ static int validate_sources(const PackageFileList *files,
     return 1;
 }
 
+static char *find_game_startup(const PackageFileList *files, char *error,
+                               size_t error_size) {
+    char *first_2d = NULL;
+    char *first_3d = NULL;
+    size_t index;
+    for (index = 0; index < files->count; index++) {
+        ZSharpProgram program;
+        ZSharpDiagnostic diagnostic;
+        char parse_error[512] = {0};
+        char **candidate;
+        if (!ends_with(files->items[index].relative,
+                       ZSHARP_SOURCE_EXTENSION))
+            continue;
+        if (!zsharp_project_parse_file(files->items[index].absolute, &program,
+                                       &diagnostic, parse_error,
+                                       sizeof(parse_error))) {
+            free(first_2d);
+            free(first_3d);
+            package_error(error, error_size, "%s",
+                          diagnostic.message[0] != '\0'
+                              ? diagnostic.message
+                              : parse_error);
+            return NULL;
+        }
+        candidate = program.script_type == ZSCRIPT_3D
+                        ? &first_3d
+                        : program.script_type == ZSCRIPT_2D ? &first_2d
+                                                            : NULL;
+        if (candidate != NULL &&
+            (*candidate == NULL ||
+             strcmp(files->items[index].relative, *candidate) < 0)) {
+            char *replacement = copy_text(files->items[index].relative);
+            if (replacement == NULL) {
+                zsharp_program_free(&program);
+                free(first_2d);
+                free(first_3d);
+                package_error(error, error_size, "out of memory");
+                return NULL;
+            }
+            free(*candidate);
+            *candidate = replacement;
+        }
+        zsharp_program_free(&program);
+    }
+    if (first_3d != NULL) {
+        free(first_2d);
+        return first_3d;
+    }
+    if (first_2d != NULL) return first_2d;
+    package_error(error, error_size,
+                  "game packages require at least one "
+                  "zsharp = type.script:2D or type.script:3D file");
+    return NULL;
+}
+
+static int validate_game_objects(const PackageFileList *files,
+                                 const char *root,
+                                 const char *startup_relative,
+                                 char *error, size_t error_size) {
+    size_t index;
+    for (index = 0; index < files->count; index++) {
+        if (strcmp(files->items[index].relative, startup_relative) == 0) {
+            ZSharpProgram program;
+            ZSharpDiagnostic diagnostic;
+            char parse_error[512] = {0};
+            int is_3d;
+            int ok;
+            if (!zsharp_project_parse_file(files->items[index].absolute,
+                                           &program, &diagnostic,
+                                           parse_error,
+                                           sizeof(parse_error))) {
+                package_error(error, error_size, "%s",
+                              diagnostic.message[0] != '\0'
+                                  ? diagnostic.message : parse_error);
+                return 0;
+            }
+            is_3d = program.script_type == ZSCRIPT_3D;
+            zsharp_program_free(&program);
+            ok = zsharp_game_model_validate(root, is_3d, error, error_size);
+            return ok;
+        }
+    }
+    package_error(error, error_size,
+                  "could not find the game startup while validating objects");
+    return 0;
+}
+
 static int append_startup_bytecode(PackageFileList *files,
                                    const ZSharpSettings *settings,
                                    const char *root,
+                                   const char *startup_relative,
                                    const char *output_path,
                                    char **temporary_path, char *error,
                                    size_t error_size) {
@@ -464,13 +554,13 @@ static int append_startup_bytecode(PackageFileList *files,
     size_t temporary_length;
     int ok = 0;
     if (temporary_path != NULL) *temporary_path = NULL;
-    startup = join_path(root, settings->window_startup);
+    startup = join_path(root, startup_relative);
     if (startup == NULL) goto memory_error;
     if (!zsharp_project_parse_file(startup, &program, &diagnostic, error,
                                    error_size)) {
         if (diagnostic.message[0] != '\0')
             package_error(error, error_size, "%s:%u:%u: %s",
-                          settings->window_startup, diagnostic.line,
+                          startup_relative, diagnostic.line,
                           diagnostic.column, diagnostic.message);
         goto done;
     }
@@ -480,7 +570,7 @@ static int append_startup_bytecode(PackageFileList *files,
         goto done;
     }
     free(program.source_name);
-    program.source_name = copy_text(settings->window_startup);
+    program.source_name = copy_text(startup_relative);
     if (program.source_name == NULL) {
         zsharp_program_free(&program);
         goto memory_error;
@@ -807,6 +897,8 @@ int zsharp_package_create(const char *project_path, const char *output_path,
     char *root = NULL;
     char *temporary = NULL;
     char *bytecode_temporary = NULL;
+    char *game_startup = NULL;
+    const char *startup_relative = NULL;
     PackageFileList files = {0};
     ZSharpSettings settings;
     ZSharpDiagnostic diagnostic;
@@ -829,18 +921,34 @@ int zsharp_package_create(const char *project_path, const char *output_path,
         free(root);
         return 0;
     }
-    if (!zsharp_project_validate_settings(&settings, root, error, error_size) ||
-        !settings.has_window || settings.window_startup == NULL) {
-        if (error[0] == '\0')
-            package_error(error, error_size,
-                          "packages currently require a Window Startup entry");
+    if (!zsharp_project_validate_settings(&settings, root, error,
+                                          error_size)) {
+        zsharp_settings_free(&settings);
+        free(root);
+        return 0;
+    }
+    if (kind == ZSHARP_PACKAGE_APP &&
+        (!settings.has_window || settings.window_startup == NULL)) {
+        package_error(error, error_size,
+                      "app packages require a Window Startup entry");
         zsharp_settings_free(&settings);
         free(root);
         return 0;
     }
     if (!collect_files(root, "", &files, error, error_size) ||
-        !validate_sources(&files, &settings, root, error, error_size) ||
-        !append_startup_bytecode(&files, &settings, root, output_path,
+        !validate_sources(&files, &settings, root, error, error_size))
+        goto done;
+    if (kind == ZSHARP_PACKAGE_GAME) {
+        game_startup = find_game_startup(&files, error, error_size);
+        if (game_startup == NULL) goto done;
+        if (!validate_game_objects(&files, root, game_startup, error,
+                                   error_size)) goto done;
+        startup_relative = game_startup;
+    } else {
+        startup_relative = settings.window_startup;
+    }
+    if (!append_startup_bytecode(&files, &settings, root, startup_relative,
+                                 output_path,
                                  &bytecode_temporary, error, error_size))
         goto done;
     qsort(files.items, files.count, sizeof(*files.items), compare_files);
@@ -906,6 +1014,7 @@ done:
     if (bytecode_temporary != NULL) remove(bytecode_temporary);
     free(temporary);
     free(bytecode_temporary);
+    free(game_startup);
     file_list_free(&files);
     zsharp_settings_free(&settings);
     free(root);
@@ -945,8 +1054,10 @@ static int write_zip_central_header(FILE *output, const PackageFile *item) {
 static int create_source_zip(const char *project_path,
                              const char *output_path, char *error,
                              size_t error_size) {
+    ZSharpPackageKind kind = package_kind(output_path);
     char *root = NULL;
     char *temporary = NULL;
+    char *game_startup = NULL;
     PackageFileList files = {0};
     ZSharpSettings settings;
     ZSharpDiagnostic diagnostic;
@@ -967,16 +1078,25 @@ static int create_source_zip(const char *project_path,
         free(root);
         return 0;
     }
-    if (!zsharp_project_validate_settings(&settings, root, error, error_size) ||
-        !settings.has_window || settings.window_startup == NULL) {
-        if (error[0] == '\0')
-            package_error(error, error_size,
-                          "packages currently require a Window Startup entry");
+    if (!zsharp_project_validate_settings(&settings, root, error,
+                                          error_size)) {
+        goto done;
+    }
+    if (kind == ZSHARP_PACKAGE_APP &&
+        (!settings.has_window || settings.window_startup == NULL)) {
+        package_error(error, error_size,
+                      "app packages require a Window Startup entry");
         goto done;
     }
     if (!collect_files(root, "", &files, error, error_size) ||
         !validate_sources(&files, &settings, root, error, error_size))
         goto done;
+    if (kind == ZSHARP_PACKAGE_GAME) {
+        game_startup = find_game_startup(&files, error, error_size);
+        if (game_startup == NULL) goto done;
+        if (!validate_game_objects(&files, root, game_startup, error,
+                                   error_size)) goto done;
+    }
     if (files.count == 0 || files.count > UINT16_MAX) {
         package_error(error, error_size,
                       "unbytecoded packages support at most %u files",
@@ -1063,6 +1183,7 @@ done:
     if (output != NULL) fclose(output);
     if (!ok && temporary != NULL) remove(temporary);
     free(temporary);
+    free(game_startup);
     file_list_free(&files);
     zsharp_settings_free(&settings);
     free(root);

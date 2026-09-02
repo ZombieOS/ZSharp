@@ -1,5 +1,8 @@
 #include "project.h"
 
+#include "window_style.h"
+
+#include "game_model.h"
 #include "zsharp.h"
 
 #include <stdio.h>
@@ -32,12 +35,12 @@ static int ignored_project_directory(const char *name) {
            strcmp(name, "Packages") == 0 || strcmp(name, "node_modules") == 0;
 }
 
-static int has_source_extension(const char *name) {
+static int has_extension(const char *name, const char *extension) {
     size_t name_length = strlen(name);
-    size_t extension_length = strlen(ZSHARP_SOURCE_EXTENSION);
+    size_t extension_length = strlen(extension);
     return name_length > extension_length &&
            memcmp(name + name_length - extension_length,
-                  ZSHARP_SOURCE_EXTENSION, extension_length) == 0;
+                  extension, extension_length) == 0;
 }
 
 static int append_source_path(ZSharpSourceList *sources, char *path,
@@ -410,6 +413,7 @@ int zsharp_project_find_source(const char *project_root, const char *file_name,
 #ifdef _WIN32
 static int list_source_directory(const char *directory,
                                  ZSharpSourceList *sources,
+                                 const char *extension,
                                  char *error, size_t error_size) {
     WIN32_FIND_DATAA entry;
     char *pattern = join_path(directory, "*");
@@ -442,10 +446,11 @@ static int list_source_directory(const char *directory,
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
                 !ignored_project_directory(entry.cFileName)) {
-                ok = list_source_directory(path, sources, error, error_size);
+                ok = list_source_directory(path, sources, extension, error,
+                                           error_size);
             }
             free(path);
-        } else if (has_source_extension(entry.cFileName)) {
+        } else if (has_extension(entry.cFileName, extension)) {
             ok = append_source_path(sources, path, error, error_size);
         } else {
             free(path);
@@ -457,6 +462,7 @@ static int list_source_directory(const char *directory,
 #else
 static int list_source_directory(const char *directory,
                                  ZSharpSourceList *sources,
+                                 const char *extension,
                                  char *error, size_t error_size) {
     DIR *stream = opendir(directory);
     struct dirent *entry;
@@ -484,10 +490,11 @@ static int list_source_directory(const char *directory,
         }
         if (S_ISDIR(status.st_mode)) {
             if (!ignored_project_directory(entry->d_name))
-                ok = list_source_directory(path, sources, error, error_size);
+                ok = list_source_directory(path, sources, extension, error,
+                                           error_size);
             free(path);
         } else if (S_ISREG(status.st_mode) &&
-                   has_source_extension(entry->d_name)) {
+                   has_extension(entry->d_name, extension)) {
             ok = append_source_path(sources, path, error, error_size);
         } else {
             free(path);
@@ -501,8 +508,20 @@ static int list_source_directory(const char *directory,
 int zsharp_project_list_sources(const char *project_root,
                                 ZSharpSourceList *sources,
                                 char *error, size_t error_size) {
+    return zsharp_project_list_files(project_root, ZSHARP_SOURCE_EXTENSION,
+                                     sources, error, error_size);
+}
+
+int zsharp_project_list_files(const char *project_root, const char *extension,
+                              ZSharpSourceList *sources,
+                              char *error, size_t error_size) {
     memset(sources, 0, sizeof(*sources));
-    if (!list_source_directory(project_root, sources, error, error_size)) {
+    if (extension == NULL || extension[0] != '.') {
+        set_error(error, error_size, "project file extension must start with '.'");
+        return 0;
+    }
+    if (!list_source_directory(project_root, sources, extension, error,
+                               error_size)) {
         zsharp_project_source_list_free(sources);
         return 0;
     }
@@ -1084,6 +1103,28 @@ static int validate_instruction(const ZSharpProgram *program,
     char *parts[5] = {0};
     size_t count = 0;
     int ok = 1;
+    if ((program->script_type == ZSCRIPT_2D ||
+         program->script_type == ZSCRIPT_3D) &&
+        (instruction->op == ZOP_UI_SET ||
+         instruction->op == ZOP_LOAD_PATH ||
+         instruction->op == ZOP_STORE_PATH)) {
+        ZSharpGameModel game;
+        const char *path = instruction->operand;
+        if (!zsharp_game_model_load(project_root,
+                                    program->script_type == ZSCRIPT_3D,
+                                    &game, error, error_size)) return 0;
+        if (path != NULL && zsharp_game_model_owns_property(&game, path)) {
+            zsharp_game_model_free(&game);
+            return 1;
+        }
+        zsharp_game_model_free(&game);
+        if (instruction->op == ZOP_UI_SET ||
+            instruction->op == ZOP_STORE_PATH) {
+            snprintf(error, error_size, "unknown game property '%s'",
+                     path == NULL ? "" : path);
+            return 0;
+        }
+    }
     if (instruction->op == ZOP_CALL_QUALIFIED ||
         instruction->op == ZOP_CALL_QUALIFIED_VALUE) {
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
@@ -1394,7 +1435,17 @@ int zsharp_project_validate(const ZSharpProgram *program,
     size_t room_index;
     if (program->script_type == ZSCRIPT_WINDOW) {
         return validate_window_program(program, settings, project_root, error,
-                                       error_size);
+                                       error_size) &&
+               zsharp_window_styles_validate(program, project_root, error,
+                                              error_size);
+    }
+    if ((program->script_type == ZSCRIPT_2D ||
+         program->script_type == ZSCRIPT_3D) &&
+        zsharp_settings_find_dependency(settings, "zsharpgame") == NULL) {
+        snprintf(error, error_size,
+                 "2D and 3D scripts require zsharpgame:1.0.0.0 in "
+                 "Dependencies");
+        return 0;
     }
     for (room_index = 0; room_index < program->room_count; room_index++) {
         const ZSharpRoom *room = &program->rooms[room_index];

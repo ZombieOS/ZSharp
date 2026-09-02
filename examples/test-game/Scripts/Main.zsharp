@@ -1,0 +1,25 @@
+zsharp = type.script:2D
+
+noticed room GameLogic[] (
+ noticed brain Start[] (
+  Print("Z# game test started - A/D or arrows move, Space jumps, E changes scene"):
+  loop (
+   if[Input.left == alive] (
+    Player.color.set: #00E5FF:
+   ) else (
+    Player.color.set: #FF2A72:
+   )
+   number.set:Player.rotation = Player.rotation + 1:
+   if[Input.action == alive] (
+    if[Game.scene == "Main"] (
+     Game.scene.set: Gallery:
+    ) else (
+     Game.scene.set: Main:
+    )
+    wait(250ms):
+   ) else (
+   )
+   wait(16ms):
+  )
+ )
+)

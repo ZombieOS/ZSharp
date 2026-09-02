@@ -15,7 +15,8 @@ typedef enum ZSharpWindowValueType {
 
 typedef enum ZSharpWindowReadType {
     ZWINDOW_READ_TEXT = 1,
-    ZWINDOW_READ_NUMBER = 2
+    ZWINDOW_READ_NUMBER = 2,
+    ZWINDOW_READ_STATUS = 3
 } ZSharpWindowReadType;
 
 typedef struct ZSharpWindowRuntime {
@@ -27,6 +28,7 @@ typedef struct ZSharpWindowRuntime {
     int (*get_property)(void *state, const char *path,
                         ZSharpWindowReadType *value_type,
                         char **text_value, char *error, size_t error_size);
+    int (*owns_property)(void *state, const char *path);
     int (*wait)(void *state, const char *milliseconds,
                 char *error, size_t error_size);
     int (*is_cancelled)(void *state);

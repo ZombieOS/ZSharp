@@ -1,0 +1,111 @@
+name: Build native game runtimes
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            runner: windows-latest
+            runtime: stage/bin/zsharp.exe
+          - platform: windows-aarch64
+            runner: windows-11-arm
+            runtime: stage/bin/zsharp.exe
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            runtime: stage/bin/zsharp
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            runtime: stage/bin/zsharp
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            runtime: stage/bin/zsharp
+          - platform: macos-aarch64
+            runner: macos-15
+            runtime: stage/bin/zsharp
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install SDL Linux build dependencies
+        if: startsWith(matrix.platform, 'linux-')
+        shell: bash
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          build-essential pkg-config ninja-build
+          libasound2-dev libpulse-dev libaudio-dev libfribidi-dev
+          libjack-dev libsndio-dev libx11-dev libxext-dev libxrandr-dev
+          libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev
+          libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev
+          libgles2-mesa-dev libegl1-mesa-dev libdbus-1-dev
+          libibus-1.0-dev libudev-dev libthai-dev libusb-1.0-0-dev
+          libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
+
+      - name: Configure native runtime
+        shell: pwsh
+        run: |
+          $arguments = @(
+            "-S", ".",
+            "-B", "build-native",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DBUILD_TESTING=OFF",
+            "-DZSHARP_BUILD_GAME_RUNTIME=ON"
+          )
+          if ("${{ matrix.platform }}".StartsWith("macos-")) {
+            $arguments += "-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0"
+          }
+          cmake @arguments
+
+      - name: Build and install native runtime
+        shell: pwsh
+        run: |
+          cmake --build build-native --config Release --parallel
+          cmake --install build-native --config Release --prefix stage
+
+      - name: Verify the game runtime
+        shell: pwsh
+        run: |
+          & "${{ matrix.runtime }}" --version
+          if ($LASTEXITCODE -ne 0) { throw "ZVM version check failed" }
+          & "${{ matrix.runtime }}" game-info
+          if ($LASTEXITCODE -ne 0) { throw "game runtime is unavailable" }
+
+      - name: Stage checksummed runtime files
+        shell: pwsh
+        run: |
+          $support = @()
+          $moltenVk = "stage/bin/libMoltenVK.dylib"
+          if (Test-Path -LiteralPath $moltenVk -PathType Leaf) {
+            $support += $moltenVk
+          }
+          & ./scripts/stage-native-runtime.ps1 `
+            -Platform "${{ matrix.platform }}" `
+            -Runtime "${{ matrix.runtime }}" `
+            -Support $support
+          $artifactRoot = "build/runtime-artifact"
+          New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+          Copy-Item -Recurse -Force `
+            "java/src/main/resources/META-INF/zsharp/runtime/${{ matrix.platform }}" `
+            $artifactRoot
+
+      - name: Upload native runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: zsharp-runtime-${{ matrix.platform }}
+          path: build/runtime-artifact
+          if-no-files-found: error

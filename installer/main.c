@@ -46,6 +46,9 @@ typedef struct ReleaseInfo {
     char *runtime_path;
     char *runtime_sha256;
     uint64_t runtime_size;
+    char *support_path;
+    char *support_sha256;
+    uint64_t support_size;
 } ReleaseInfo;
 
 static void report_error(char *error, size_t error_size,
@@ -732,6 +735,8 @@ static int parse_release(const char *manifest, const char *platform,
                                            "sha256");
     release->runtime_path = json_string(begin, end, "path");
     release->runtime_sha256 = json_string(begin, end, "sha256");
+    release->support_path = json_string(begin, end, "supportPath");
+    release->support_sha256 = json_string(begin, end, "supportSha256");
     if (release->archive_url == NULL || release->archive_sha256 == NULL ||
         release->runtime_path == NULL || release->runtime_sha256 == NULL ||
         !json_u64(download_begin, download_end, "size",
@@ -749,6 +754,19 @@ static int parse_release(const char *manifest, const char *platform,
                      "the update site returned invalid release metadata");
         return 0;
     }
+    if (release->support_path != NULL || release->support_sha256 != NULL) {
+        if (release->support_path == NULL || release->support_sha256 == NULL ||
+            strncmp(platform, "macos-", 6) != 0 ||
+            !json_u64(begin, end, "supportSize", &release->support_size) ||
+            !valid_sha256(release->support_sha256) ||
+            !safe_zip_member(release->support_path, platform) ||
+            release->support_size == 0 ||
+            release->support_size > INSTALLER_RUNTIME_LIMIT) {
+            report_error(error, error_size,
+                         "the update site returned invalid support metadata");
+            return 0;
+        }
+    }
     return 1;
 }
 
@@ -758,6 +776,8 @@ static void release_free(ReleaseInfo *release) {
     free(release->archive_sha256);
     free(release->runtime_path);
     free(release->runtime_sha256);
+    free(release->support_path);
+    free(release->support_sha256);
     memset(release, 0, sizeof(*release));
 }
 
@@ -1124,8 +1144,11 @@ int main(int argc, char **argv) {
     char *install_directory = NULL;
     char *runtime = NULL;
     char *runtime_backup = NULL;
+    char *support = NULL;
+    char *support_backup = NULL;
     char *archive = NULL;
     char *runtime_temporary = NULL;
+    char *support_temporary = NULL;
     char *installed_installer = NULL;
     char *installer_backup = NULL;
     char *installer_temporary = NULL;
@@ -1311,9 +1334,25 @@ int main(int argc, char **argv) {
         installer_temporary = join_path(install_directory, name);
     }
 #endif
+    if (release.support_path != NULL) {
+        char name[96];
+#ifdef _WIN32
+        unsigned long pid = (unsigned long)GetCurrentProcessId();
+#else
+        unsigned long pid = (unsigned long)getpid();
+#endif
+        support = join_path(install_directory, "libMoltenVK.dylib");
+        support_backup = join_path(install_directory,
+                                   "libMoltenVK.previous.dylib");
+        snprintf(name, sizeof(name), ".zsharp-support-%lu.tmp", pid);
+        support_temporary = join_path(install_directory, name);
+    }
     if (runtime == NULL || runtime_backup == NULL || archive == NULL ||
         runtime_temporary == NULL || installed_installer == NULL ||
-        installer_backup == NULL || installer_temporary == NULL) {
+        installer_backup == NULL || installer_temporary == NULL ||
+        (release.support_path != NULL &&
+         (support == NULL || support_backup == NULL ||
+          support_temporary == NULL))) {
         strcpy(error, "out of memory");
         goto done;
     }
@@ -1348,6 +1387,23 @@ int main(int argc, char **argv) {
         strcpy(error, "the extracted runtime failed SHA-256 verification");
         goto done;
     }
+    if (release.support_path != NULL) {
+        if (!extract_stored_zip_member(
+                archive, release.support_path, support_temporary,
+                release.support_size, error, sizeof(error)) ||
+            !zsharp_sha256_file(support_temporary, digest)) {
+            if (error[0] == '\0')
+                strcpy(error,
+                       "the extracted runtime support checksum could not be read");
+            goto done;
+        }
+        zsharp_hash_hex(digest, digest_hex);
+        if (strcmp(digest_hex, release.support_sha256) != 0) {
+            strcpy(error,
+                   "the extracted runtime support failed SHA-256 verification");
+            goto done;
+        }
+    }
 #ifndef _WIN32
     if (chmod(runtime_temporary, 0755) != 0) {
         strcpy(error, "could not make the downloaded ZVM executable");
@@ -1371,6 +1427,10 @@ int main(int argc, char **argv) {
         !replace_file(installer_temporary, installed_installer,
                       installer_backup, "Z# updater", error,
                       sizeof(error))) goto done;
+    if (support_temporary != NULL &&
+        !replace_file(support_temporary, support, support_backup,
+                      "Z# runtime support", error, sizeof(error)))
+        goto done;
     if (!replace_file(runtime_temporary, runtime, runtime_backup,
                       "Z# runtime", error, sizeof(error)))
         goto done;
@@ -1421,6 +1481,7 @@ done:
         fprintf(stderr, "installer error: %s\n", error);
     if (archive != NULL) remove(archive);
     if (runtime_temporary != NULL) remove(runtime_temporary);
+    if (support_temporary != NULL) remove(support_temporary);
     if (installer_temporary != NULL) remove(installer_temporary);
     if (manifest_temp[0] != '\0') remove(manifest_temp);
 #ifdef _WIN32
@@ -1435,6 +1496,9 @@ done:
     free(installer_backup);
     free(installed_installer);
     free(runtime_temporary);
+    free(support_temporary);
+    free(support_backup);
+    free(support);
     free(archive);
     free(runtime_backup);
     free(runtime);

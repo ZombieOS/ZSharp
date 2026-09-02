@@ -26,6 +26,7 @@ typedef struct WindowControl {
     ZSharpUIElement *element;
     HBRUSH background;
     HFONT font;
+    int owns_font;
     HBITMAP bitmap;
     int bitmap_width;
     int bitmap_height;
@@ -37,6 +38,7 @@ typedef struct WindowControl {
     int is_image_input;
     int is_multiline;
     int placeholder_active;
+    int hovered;
 } WindowControl;
 
 typedef struct WindowState {
@@ -405,6 +407,25 @@ static WindowControl *find_control(WindowState *state, HWND handle) {
     return NULL;
 }
 
+static void refresh_hover_controls(WindowState *state) {
+    POINT cursor;
+    HWND hovered;
+    size_t index;
+    if (!GetCursorPos(&cursor)) return;
+    hovered = WindowFromPoint(cursor);
+    for (index = 0; index < state->control_count; index++) {
+        WindowControl *control = &state->controls[index];
+        int is_hovered;
+        if (control->element->type != ZUI_BUTTON) continue;
+        is_hovered = hovered == control->handle ||
+                     (hovered != NULL && IsChild(control->handle, hovered));
+        if (is_hovered != control->hovered) {
+            control->hovered = is_hovered;
+            InvalidateRect(control->handle, NULL, FALSE);
+        }
+    }
+}
+
 static void show_callback_error(WindowState *state, const char *message) {
     MessageBoxA(state->window, message, "Z# callback error",
                 MB_OK | MB_ICONERROR);
@@ -599,6 +620,15 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
             } else if (control != NULL && control->has_text_color) {
                 SetTextColor(context, control->text_color);
             }
+            if (control != NULL && control->background != NULL) {
+                ZSharpUIProperty *background = find_property(
+                    control->element, "backgroundColor");
+                SetBkMode(context, OPAQUE);
+                SetBkColor(context, parse_color(
+                    background == NULL ? NULL : background->text_value,
+                    RGB(255, 255, 255)));
+                return (LRESULT)control->background;
+            }
             SetBkMode(context, TRANSPARENT);
             if (control != NULL && control->element->type == ZUI_TEXT)
                 return (LRESULT)GetStockObject(HOLLOW_BRUSH);
@@ -607,39 +637,113 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
         case WM_CTLCOLOREDIT: {
             WindowControl *control = find_control(state, (HWND)lparam);
             HDC context = (HDC)wparam;
-            if (control != NULL && control->has_text_color) {
+            if (control != NULL && control->placeholder_active) {
+                SetTextColor(context, RGB(128, 128, 128));
+            } else if (control != NULL && control->has_text_color) {
                 SetTextColor(context, control->text_color);
             }
-            return (LRESULT)GetStockObject(WHITE_BRUSH);
+            if (control != NULL && control->background != NULL) {
+                ZSharpUIProperty *background = find_property(
+                    control->element, "backgroundColor");
+                SetBkColor(context, parse_color(
+                    background == NULL ? NULL : background->text_value,
+                    RGB(255, 255, 255)));
+                return (LRESULT)control->background;
+            }
+            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
         }
         case WM_DRAWITEM: {
             DRAWITEMSTRUCT *draw = (DRAWITEMSTRUCT *)lparam;
             WindowControl *control = find_control(state, draw->hwndItem);
             if (control != NULL && control->element->type == ZUI_BUTTON) {
                 char text[512];
+                char paint_error[128] = {0};
                 HGDIOBJ previous_font;
+                ZSharpUIProperty *hover_background = control->hovered
+                    ? find_property(control->element, "hoverButtonColor")
+                    : NULL;
+                ZSharpUIProperty *hover_text = control->hovered
+                    ? find_property(control->element, "hoverTextColor")
+                    : NULL;
+                ZSharpUIProperty *border_width = find_property(
+                    control->element, "borderWidth");
+                ZSharpUIProperty *border_color = control->hovered &&
+                    find_property(control->element, "hoverBorderColor") != NULL
+                        ? find_property(control->element, "hoverBorderColor")
+                        : find_property(control->element, "borderColor");
+                ZSharpUIProperty *border_radius = find_property(
+                    control->element, "borderRadius");
+                ZSharpPaint hover_paint;
+                const ZSharpPaint *active_paint = &control->button_paint;
+                int has_hover_paint = 0;
+                int radius = measurement_pixels(border_radius,
+                                                state->scale, 0);
+                int stroke = measurement_pixels(border_width,
+                                                state->scale, 0);
                 COLORREF color = control->has_button_color
                     ? control->button_color : RGB(240, 240, 240);
-                if (control->button_paint.color_count != 0) {
-                    paint_rectangle(draw->hDC, &draw->rcItem,
-                                    &control->button_paint);
+                memset(&hover_paint, 0, sizeof(hover_paint));
+                if (hover_background != NULL &&
+                    zsharp_paint_parse(hover_background->text_value,
+                                       &hover_paint, paint_error,
+                                       sizeof(paint_error))) {
+                    active_paint = &hover_paint;
+                    has_hover_paint = 1;
+                    color = paint_first_color(active_paint, color);
+                }
+                if (active_paint->color_count != 0 && radius > 0 &&
+                    active_paint->kind == ZSHARP_PAINT_SOLID) {
+                    HBRUSH brush = CreateSolidBrush(color);
+                    HGDIOBJ old_brush = SelectObject(draw->hDC, brush);
+                    HGDIOBJ old_pen = SelectObject(
+                        draw->hDC, GetStockObject(NULL_PEN));
+                    RoundRect(draw->hDC, draw->rcItem.left, draw->rcItem.top,
+                              draw->rcItem.right, draw->rcItem.bottom,
+                              radius * 2, radius * 2);
+                    SelectObject(draw->hDC, old_pen);
+                    SelectObject(draw->hDC, old_brush);
+                    DeleteObject(brush);
+                } else if (active_paint->color_count != 0) {
+                    paint_rectangle(draw->hDC, &draw->rcItem, active_paint);
                 } else {
                     HBRUSH brush = CreateSolidBrush(color);
                     FillRect(draw->hDC, &draw->rcItem, brush);
                     DeleteObject(brush);
                 }
-                DrawEdge(draw->hDC, &draw->rcItem,
-                         (draw->itemState & ODS_SELECTED) ? EDGE_SUNKEN
-                                                          : EDGE_RAISED,
-                         BF_RECT);
+                if (stroke > 0 && border_color != NULL) {
+                    COLORREF line = parse_color(border_color->text_value,
+                                                RGB(128, 128, 128));
+                    HPEN pen = CreatePen(PS_SOLID, stroke, line);
+                    HGDIOBJ old_pen = SelectObject(draw->hDC, pen);
+                    HGDIOBJ old_brush = SelectObject(
+                        draw->hDC, GetStockObject(NULL_BRUSH));
+                    RoundRect(draw->hDC, draw->rcItem.left,
+                              draw->rcItem.top, draw->rcItem.right,
+                              draw->rcItem.bottom,
+                              radius > 0 ? radius * 2 : 1,
+                              radius > 0 ? radius * 2 : 1);
+                    SelectObject(draw->hDC, old_brush);
+                    SelectObject(draw->hDC, old_pen);
+                    DeleteObject(pen);
+                } else if (border_width == NULL) {
+                    DrawEdge(draw->hDC, &draw->rcItem,
+                             (draw->itemState & ODS_SELECTED) ? EDGE_SUNKEN
+                                                              : EDGE_RAISED,
+                             BF_RECT);
+                }
                 GetWindowTextA(draw->hwndItem, text, sizeof(text));
                 previous_font = SelectObject(draw->hDC, control->font);
                 SetBkMode(draw->hDC, TRANSPARENT);
-                SetTextColor(draw->hDC, control->has_text_color
-                    ? control->text_color : RGB(0, 0, 0));
+                SetTextColor(draw->hDC,
+                    hover_text != NULL
+                        ? parse_color(hover_text->text_value,
+                                      control->text_color)
+                        : control->has_text_color
+                            ? control->text_color : RGB(0, 0, 0));
                 DrawTextA(draw->hDC, text, -1, &draw->rcItem,
                           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(draw->hDC, previous_font);
+                if (has_hover_paint) zsharp_paint_free(&hover_paint);
                 return TRUE;
             }
             break;
@@ -750,16 +854,39 @@ static int text_height(const char *variant) {
     return 52;
 }
 
-static HFONT create_text_font(const char *variant, double scale) {
-    int height = -(int)((double)text_height(variant) * scale + 0.5);
-    int weight = variant != NULL &&
-                 (strcmp(variant, "title") == 0 ||
-                  strcmp(variant, "header") == 0)
-        ? FW_BOLD : FW_NORMAL;
-    return CreateFontA(height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+static HFONT create_element_font(const ZSharpUIElement *element,
+                                 double scale, int *owned) {
+    ZSharpUIProperty *size = find_property((ZSharpUIElement *)element,
+                                           "fontSize");
+    ZSharpUIProperty *family = find_property((ZSharpUIElement *)element,
+                                             "fontFamily");
+    ZSharpUIProperty *weight = find_property((ZSharpUIElement *)element,
+                                             "fontWeight");
+    int fallback = element->type == ZUI_TEXT
+        ? text_height(element->variant) : 14;
+    int height;
+    int font_weight;
+    const char *face;
+    if (element->type != ZUI_TEXT && size == NULL && family == NULL &&
+        weight == NULL) {
+        *owned = 0;
+        return (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    }
+    height = -measurement_pixels(size, scale, fallback);
+    if (height == 0) height = -fallback;
+    font_weight = weight != NULL && weight->text_value != NULL
+        ? (strcmp(weight->text_value, "bold") == 0 ? FW_BOLD : FW_NORMAL)
+        : element->type == ZUI_TEXT && element->variant != NULL &&
+          (strcmp(element->variant, "title") == 0 ||
+           strcmp(element->variant, "header") == 0)
+              ? FW_BOLD : FW_NORMAL;
+    face = family != NULL && family->text_value != NULL
+        ? family->text_value : "Segoe UI";
+    *owned = 1;
+    return CreateFontA(height, 0, 0, 0, font_weight, FALSE, FALSE, FALSE,
                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                       DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+                       DEFAULT_PITCH | FF_DONTCARE, face);
 }
 
 static void element_default_size(const ZSharpUIElement *element,
@@ -1005,6 +1132,7 @@ static int create_controls(WindowState *state, int client_width,
             int is_multiline = !is_image &&
                 status_property(element, "multiline", 0);
             int wraps = status_property(element, "wrap", 1);
+            color_property = find_property(element, "textColor");
             class_name = is_image ? "BUTTON" : "EDIT";
             display_text = (is_image || is_multiline) && display != NULL
                 ? display->text_value : "";
@@ -1046,6 +1174,15 @@ static int create_controls(WindowState *state, int client_width,
                 parse_color(color_property->text_value, RGB(0, 0, 0));
             control->has_text_color = 1;
         }
+        {
+            ZSharpUIProperty *control_background =
+                find_property(element, "backgroundColor");
+            if (control_background != NULL &&
+                control_background->text_value != NULL) {
+                control->background = CreateSolidBrush(parse_color(
+                    control_background->text_value, RGB(255, 255, 255)));
+            }
+        }
         if (element->type == ZUI_BUTTON) {
             ZSharpUIProperty *button_color =
                 find_property(element, "buttonColor");
@@ -1058,11 +1195,8 @@ static int create_controls(WindowState *state, int client_width,
                                         error, error_size)) return 0;
             }
         }
-        if (element->type == ZUI_TEXT) {
-            control->font = create_text_font(element->variant, scale);
-        } else {
-            control->font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        }
+        control->font = create_element_font(element, scale,
+                                             &control->owns_font);
         SendMessageA(control->handle, WM_SETFONT,
                      (WPARAM)control->font, TRUE);
         if (element->type == ZUI_TEXT_INPUT) {
@@ -1075,6 +1209,22 @@ static int create_controls(WindowState *state, int client_width,
             control->placeholder_active = control->is_multiline &&
                 display != NULL && display->text_value != NULL &&
                 display->text_value[0] != '\0';
+            if (!control->is_image_input) {
+                ZSharpUIProperty *padding = find_property(element, "padding");
+                ZSharpUIProperty *padding_left = find_property(
+                    element, "paddingLeft");
+                ZSharpUIProperty *padding_right = find_property(
+                    element, "paddingRight");
+                int left = measurement_pixels(
+                    padding_left == NULL ? padding : padding_left,
+                    scale, 0);
+                int right = measurement_pixels(
+                    padding_right == NULL ? padding : padding_right,
+                    scale, 0);
+                SendMessageA(control->handle, EM_SETMARGINS,
+                             EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                             MAKELPARAM(left, right));
+            }
             if (!control->is_image_input && !control->is_multiline &&
                 display != NULL &&
                 display->text_value != NULL) {
@@ -1112,8 +1262,7 @@ static void cleanup_window_state(WindowState *state) {
     size_t index;
     for (index = 0; index < state->control_count; index++) {
         WindowControl *control = &state->controls[index];
-        if (control->font != NULL &&
-            control->element->type == ZUI_TEXT) {
+        if (control->font != NULL && control->owns_font) {
             DeleteObject(control->font);
         }
         if (control->background != NULL) DeleteObject(control->background);
@@ -1677,6 +1826,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     while ((result = GetMessageA(&message, NULL, 0, 0)) > 0) {
         TranslateMessage(&message);
         DispatchMessageA(&message);
+        refresh_hover_controls(&state);
     }
     if (result < 0) {
         snprintf(error, error_size, "the Windows event loop failed");

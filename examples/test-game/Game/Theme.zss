@@ -1,0 +1,16 @@
+/* ZSS uses CSS-style selectors and declarations for game visuals. */
+.World GalleryCircle {
+ color: #00E500;
+ scale-x: 1.1;
+ scale-y: 1.1;
+}
+
+.World GalleryTriangle {
+ color: #FF2A72;
+ rotation: -8;
+}
+
+.World GalleryBox {
+ color: #FFE66D;
+ rotation: 18;
+}

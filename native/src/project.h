@@ -26,6 +26,9 @@ typedef struct ZSharpSourceList {
 int zsharp_project_list_sources(const char *project_root,
                                 ZSharpSourceList *sources,
                                 char *error, size_t error_size);
+int zsharp_project_list_files(const char *project_root, const char *extension,
+                              ZSharpSourceList *files,
+                              char *error, size_t error_size);
 void zsharp_project_source_list_free(ZSharpSourceList *sources);
 
 int zsharp_project_parse_file(const char *path, ZSharpProgram *program,

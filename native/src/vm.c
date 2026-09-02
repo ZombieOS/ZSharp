@@ -1,8 +1,10 @@
 #include "vm.h"
 
 #include "decimal.h"
+#include "game_runtime.h"
 #include "project.h"
 #include "window.h"
+#include "window_style.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -361,15 +363,18 @@ static int is_window_input_read(const char *path) {
            strcmp(field, "currentline") == 0;
 }
 
-static int read_window_input_value(RuntimeModuleCache *module_cache,
-                                   RuntimeHeap *heap, const char *path,
-                                   RuntimeValue *value, char *error,
-                                   size_t error_size) {
+static int read_runtime_property(RuntimeModuleCache *module_cache,
+                                 RuntimeHeap *heap, const char *path,
+                                 RuntimeValue *value, char *error,
+                                 size_t error_size) {
     ZSharpWindowReadType read_type;
     char *text = NULL;
     if (module_cache->window_runtime == NULL ||
-        module_cache->window_runtime->get_property == NULL ||
-        !is_window_input_read(path)) return 0;
+        module_cache->window_runtime->get_property == NULL) return 0;
+    if (module_cache->window_runtime->owns_property != NULL) {
+        if (!module_cache->window_runtime->owns_property(
+                module_cache->window_runtime->state, path)) return 0;
+    } else if (!is_window_input_read(path)) return 0;
     if (!module_cache->window_runtime->get_property(
             module_cache->window_runtime->state, path, &read_type, &text,
             error, error_size)) return -1;
@@ -393,6 +398,16 @@ static int read_window_input_value(RuntimeModuleCache *module_cache,
             snprintf(error, error_size, "out of memory");
             return -1;
         }
+    } else if (read_type == ZWINDOW_READ_STATUS) {
+        if (strcmp(text, "alive") != 0 && strcmp(text, "dead") != 0) {
+            free(text);
+            snprintf(error, error_size,
+                     "the runtime returned an invalid status for '%s'", path);
+            return -1;
+        }
+        value->type = ZVALUE_STATUS;
+        value->number = strcmp(text, "alive") == 0;
+        free(text);
     } else {
         free(text);
         snprintf(error, error_size,
@@ -615,7 +630,7 @@ static int resolve_value_path(
          !lookup_name(room, current_object, locals, local_count, parts[0],
                       value)) ||
         (part_count == 3 && find_room(program, parts[0]) == NULL)) {
-        int window_read = read_window_input_value(
+        int window_read = read_runtime_property(
             module_cache, heap, instruction->operand, value, error,
             error_size);
         if (window_read != 0) {
@@ -871,6 +886,31 @@ static int store_value_path(
     size_t part_count = 0;
     ZSharpVariable *variable = NULL;
     int ok = 0;
+    if (module_cache->window_runtime != NULL &&
+        module_cache->window_runtime->owns_property != NULL &&
+        module_cache->window_runtime->set_property != NULL &&
+        module_cache->window_runtime->owns_property(
+            module_cache->window_runtime->state, instruction->operand)) {
+        const char *text_value;
+        ZSharpWindowValueType value_type;
+        if (value->type == ZVALUE_NUMBER) {
+            text_value = value->number_text;
+            value_type = ZWINDOW_VALUE_MEASUREMENT;
+        } else if (value->type == ZVALUE_TEXT) {
+            text_value = value->text;
+            value_type = ZWINDOW_VALUE_TEXT;
+        } else if (value->type == ZVALUE_STATUS) {
+            text_value = value->number ? "alive" : "dead";
+            value_type = ZWINDOW_VALUE_STATUS;
+        } else {
+            snprintf(error, error_size,
+                     "runtime properties accept number, text, or status values");
+            return 0;
+        }
+        return module_cache->window_runtime->set_property(
+            module_cache->window_runtime->state, instruction->operand,
+            value_type, text_value, ZUI_UNIT_NONE, error, error_size);
+    }
     if (!split_value_path(instruction->operand, instruction->argument_count,
                           &storage, parts, &part_count, error, error_size)) {
         return 0;
@@ -3399,7 +3439,9 @@ int zsharp_vm_run_with_providers(
         heap_free(&heap);
         return 0;
     }
-    if (program->script_type == ZSCRIPT_WINDOW) {
+    if (program->script_type == ZSCRIPT_WINDOW ||
+        program->script_type == ZSCRIPT_2D ||
+        program->script_type == ZSCRIPT_3D) {
         WindowExecutionContext context;
         context.program = program;
         context.heap = &heap;
@@ -3412,9 +3454,19 @@ int zsharp_vm_run_with_providers(
         context.room_states = NULL;
         context.room_state_count = 0;
         context.stopping = 0;
-        ok = zsharp_window_run(program, project_root,
-                               execute_window_callback, &context,
-                               error, error_size);
+        if (program->script_type == ZSCRIPT_WINDOW) {
+            ok = zsharp_window_styles_apply(program, project_root, error,
+                                            error_size) &&
+                 zsharp_window_run(program, project_root,
+                                   execute_window_callback, &context,
+                                   error, error_size);
+        } else {
+            ok = zsharp_game_run(
+                program->project_id == NULL ? "Z#" : program->project_id,
+                project_root,
+                program->script_type == ZSCRIPT_3D,
+                execute_window_callback, &context, error, error_size);
+        }
         goto done;
     }
     for (room_index = 0; room_index < program->room_count; room_index++) {

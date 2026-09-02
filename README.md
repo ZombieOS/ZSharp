@@ -5,13 +5,12 @@ Official website and downloads: <https://www.zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
-Version 1.0.1.2 adds a Windows startup tray updater and prevents an older
-update manifest from downgrading a newer ZVM. It includes the multiline window
-inputs, live text/caret information, and overflow-only scrollbars introduced
-in 1.0.1.1, plus project launching and cross-platform `.zapp`/`.zgame`
-containers. It retains the Z1 language and toolchain and is ready for
-experiments and local projects; the public dependency registry, hardware APIs,
-and game engine are follow-up work.
+Version 1.0.2.0 is the first playable game-engine update. It adds executable
+`.zgame` packages, declarative `.zobject` scenes and objects, the
+`zsharpgame:1.0.0.0` dependency, Vulkan drawing, input, cameras, frame timing,
+2D/3D transforms, physics, collisions, and audio. Windows and Linux are the
+advertised game targets. A MoltenVK path is built for macOS, but game support
+there remains experimental until it is tested on Mac hardware.
 
 The evolving official syntax decisions are recorded in
 [LANGUAGE.md](LANGUAGE.md). The user-facing language guide and comparisons are
@@ -40,10 +39,16 @@ gradients. Imported callbacks can update live titles, backgrounds, colors,
 content, icons, placeholders, size, and position with
 `File.Element.property.set: value:`. Text variables can also hold reusable
 property paths and use `PathAlias.set: value:`; `wait(...)` and `delay(...)` provide
-millisecond/second timing while preserving window redraws. It also accepts the
-`type.script:2D` and `type.script:3D`
-headers for ordinary room-based code while their game-object syntax is still
-being designed. The bundled native `zsharpwindow` backends render designs,
+millisecond/second timing while preserving window redraws. It runs
+`type.script:2D` and `type.script:3D` projects through SDL3 and Vulkan when
+`zsharpgame:1.0.0.0` is declared. `.zobject` files provide scenes, primitive
+and text objects, transforms, cameras, input-driven movement,
+static/dynamic/kinematic bodies, gravity, collisions, generated tones, and WAV
+playback. Native `.zss` files apply CSS-style rules to game objects and window
+elements without a browser. Game properties use normal Z# reads and `.set:` writes. The runtime
+owns the window, event/input/audio loop, frame timing, concurrent `Start[]`
+tasks, Vulkan presentation, and resize recovery. The bundled
+native `zsharpwindow` backends render designs,
 text, buttons, images, and text/image inputs; execute left/right callbacks;
 automatically run every normal script's non-`DR` `Start[]`; support display
 scaling; wrap text and scale controls when the window narrows; and provide
@@ -57,11 +62,14 @@ The command-line interface includes:
 
 ```text
 zsharp compile hello.zsharp -o hello.zbc
+zsharp game-info
 zsharp project path/to/project.zsettings
 zsharp run hello.zsharp
 zsharp run-bytecode hello.zbc
 zsharp package app path/to/project MyApp --unbytecode
+zsharp package game path/to/project MyGame --unbytecode
 zsharp run path/to/project/Packages/MyApp.zapp
+zsharp run path/to/project/Packages/MyGame.zgame
 zsharp uninstall path/to/project/Packages/MyApp.zapp
 zsharp associate
 zsharp hub
@@ -71,7 +79,7 @@ The `.zbc` bytecode extension shown here is provisional. `.zsharp`, `.zapp`,
 and `.zgame` are official extensions.
 
 End users can install the standalone ZVM with the small platform bootstrap in
-`%USERPROFILE%\Downloads\ZSharp Publishing\1.0.1.2`. It downloads the current runtime from
+`%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.0`. It downloads the current runtime from
 `https://www.zsharp.zombieos.com/update.js?v=CURRENTVERSION-OS`, compares the
 installed version with the static GitHub Pages manifest, verifies
 `assets/download/ZVM-LATEST.zip` and the selected runtime, preserves the
@@ -158,26 +166,29 @@ changed bytecode. See [BYTECODE.md](BYTECODE.md).
 `.zapp` and `.zgame` are Z#'s cross-platform package containers.
 `zsharp package app <project> <filename>` creates the normal bytecoded package
 at `<project>/Packages/<filename>.zapp`; use `game` to create `.zgame` instead.
-Add `--unbytecode` to also create
-`<project>/Packages/<filename>-unbytecoded.zapp`. The companion is a standard
+Add `--unbytecode` to also create either
+`<filename>-unbytecoded.zapp` or `<filename>-unbytecoded.zgame`. The companion is a standard
 ZIP-compatible source archive: renaming it from `.zapp` to `.zip` exposes a
 copy of the original project files. The command adds extensions automatically,
 validates the settings and every included `.zsharp` file, and rejects unsafe
 paths when opened. `zsharp run App.zapp` verifies and extracts an application
 into a private content-addressed cache before its configured `Window Startup`
-script runs. Normal packages launch their embedded startup bytecode; source
-companions launch the validated `.zsharp` startup.
+script runs. For `.zgame`, Z# selects a 3D startup script when one exists,
+otherwise a 2D startup script. Normal packages launch their embedded startup
+bytecode; source companions launch the validated `.zsharp` startup.
 On first installation, Z# offers to create a Desktop shortcut using the app's
 design icon. `zsharp associate` registers `.zapp` and `.zgame` for the current
 user so opening either launches the package without opening a terminal. Running
 `zsharp open`, `zsharp run`, or another command in a terminal keeps using that
 terminal normally.
 
-The `.zgame` container uses the same validated metadata and packaging
-foundation, but 1.0.1.2 does not install or run games. Opening one displays the
-Z# Hub message that games are currently unavailable. If an application cannot
-launch, the Hub displays `APPNAME failed to launch!` followed by the preserved
-compiler, settings, package, or runtime reason.
+The `.zgame` container uses the same integrity, cache, association, shortcut,
+and uninstall foundation as `.zapp`. Its startup creates an SDL3 high-DPI game
+window and forces the Vulkan renderer. Windows and Linux are supported game
+targets. macOS builds retain the MoltenVK translation path, but it is currently
+experimental and is not advertised as supported. If a package cannot launch,
+the Hub displays `APPNAME failed to launch!`
+followed by the preserved compiler, settings, package, or runtime reason.
 
 ## Native build
 
@@ -188,12 +199,16 @@ cmake -S . -B build
 cmake --build build
 ```
 
-Release maintainers can rebuild every native runtime embedded by the Java
-library with a portable Zig compiler:
-
-```text
-powershell -File scripts/build-embedded-runtimes.ps1 -Zig path/to/zig.exe
-```
+Release game runtimes must be built natively so SDL3 can select each operating
+system's video, input, gamepad, and audio backends. Run the repository's
+**Build native game runtimes** GitHub workflow; it builds and checksums Windows
+and Linux release candidates plus experimental macOS candidates on x64 and
+ARM64. Its artifacts are already shaped for
+`java/src/main/resources/META-INF/zsharp/runtime/<platform>`. The
+`scripts/stage-native-runtime.ps1` helper stages a locally built runtime and,
+on macOS, its `libMoltenVK.dylib` companion. The older portable Zig script now
+requires an explicit opt-in because its output is compiler/server-only and does
+not contain the SDL/Vulkan runtime.
 
 ## Java integration
 
@@ -201,7 +216,8 @@ The Java library requires Java 17 or newer. It provides the same API to Gradle
 and Maven projects and communicates with the native toolchain as a child
 process. Native runtimes are bundled for Windows x64/ARM64, Linux x64/ARM64,
 and macOS Intel/Apple Silicon, so a separate Z# installation is not required
-on those platforms.
+on those platforms. The macOS game path is still experimental; the macOS
+runtime remains available for the compiler, VM, and app/window features.
 
 Build and publish it to your local dependency cache with either:
 
@@ -225,7 +241,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.zombieos:zsharp:1.0.1.2")
+    implementation("com.zombieos:zsharp:1.0.2.0")
 }
 ```
 
@@ -235,7 +251,7 @@ or Maven:
 <dependency>
     <groupId>com.zombieos</groupId>
     <artifactId>zsharp</artifactId>
-    <version>1.0.1.2</version>
+    <version>1.0.2.0</version>
 </dependency>
 ```
 

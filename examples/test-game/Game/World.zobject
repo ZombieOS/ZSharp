@@ -1,0 +1,148 @@
+zsharp = type.object:2D
+
+noticed scene Main[] (
+ background: #08080B:
+ gravityY: -900:
+ cameraX: 0:
+ cameraY: 0:
+)
+
+noticed scene Gallery[] (
+ background: #11152E:
+ gravityY: 0:
+)
+
+noticed object Title[] (
+ scene: Main:
+ shape: text:
+ text: "Z# VULKAN PLAYGROUND":
+ positionX: -260:
+ positionY: 310:
+ scaleX: 2.5:
+ color: #FFFFFF:
+ layer: 20:
+)
+
+noticed object Instructions[] (
+ scene: Main:
+ shape: text:
+ text: "A/D MOVE   SPACE JUMP   E CHANGE SCENE   ESC QUIT":
+ positionX: -310:
+ positionY: 270:
+ scaleX: 1.5:
+ color: #8DF7FF:
+ layer: 20:
+)
+
+noticed object Player[] (
+ scene: Main:
+ shape: rectangle:
+ positionX: -320:
+ positionY: -224:
+ width: 48:
+ height: 72:
+ color: #FF2A72:
+ body: dynamic:
+ collider: box:
+ controlX: 390:
+ jumpSpeed: 680:
+ gravityScale: 1:
+ friction: 0.15:
+ layer: 10:
+)
+
+noticed object Floor[] (
+ scene: Main:
+ shape: rectangle:
+ positionX: 0:
+ positionY: -280:
+ width: 1120:
+ height: 40:
+ color: #282A42:
+ body: static:
+ collider: box:
+)
+
+noticed object PlatformLeft[] (
+ scene: Main:
+ shape: rectangle:
+ positionX: -210:
+ positionY: -90:
+ width: 260:
+ height: 28:
+ color: #34385E:
+ body: static:
+ collider: box:
+)
+
+noticed object PlatformRight[] (
+ scene: Main:
+ shape: rectangle:
+ positionX: 250:
+ positionY: 50:
+ width: 300:
+ height: 28:
+ color: #34385E:
+ body: static:
+ collider: box:
+)
+
+noticed object Bouncer[] (
+ scene: Main:
+ shape: circle:
+ positionX: 170:
+ positionY: 230:
+ width: 54:
+ height: 54:
+ color: #FFE66D:
+ body: dynamic:
+ collider: circle:
+ restitution: 0.82:
+ friction: 0:
+ tone: 523.25:
+ toneDuration: 0.07:
+ audioVolume: 0.35:
+ audioOnCollision: alive:
+ layer: 12:
+)
+
+noticed object GalleryTitle[] (
+ scene: Gallery:
+ shape: text:
+ text: "SCENES WORK - PRESS E TO RETURN":
+ positionX: -250:
+ positionY: 275:
+ scaleX: 2:
+ color: #FFFFFF:
+)
+
+noticed object GalleryCircle[] (
+ scene: Gallery:
+ shape: circle:
+ positionX: -250:
+ positionY: 0:
+ width: 180:
+ height: 180:
+ color: #00E5FF:
+)
+
+noticed object GalleryTriangle[] (
+ scene: Gallery:
+ shape: triangle:
+ positionX: 0:
+ positionY: 0:
+ width: 200:
+ height: 190:
+ color: #FF2A72:
+)
+
+noticed object GalleryBox[] (
+ scene: Gallery:
+ shape: rectangle:
+ positionX: 260:
+ positionY: 0:
+ width: 180:
+ height: 180:
+ rotation: 18:
+ color: #FFE66D:
+)

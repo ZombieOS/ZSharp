@@ -75,6 +75,18 @@ public final class ZSharpToolchain {
     }
 
     /**
+     * Reports whether this ZVM contains the native game runtime and names its
+     * rendering backend.
+     *
+     * @return the native game-runtime information
+     * @throws IOException when the process cannot be started or read
+     * @throws InterruptedException when the calling thread is interrupted
+     */
+    public ZSharpResult gameInfo() throws IOException, InterruptedException {
+        return execute(List.of("game-info"));
+    }
+
+    /**
      * Compiles a Z# source file to bytecode.
      *
      * @param source Z# source file
@@ -165,7 +177,7 @@ public final class ZSharpToolchain {
     }
 
     /**
-     * Opens a {@code .zapp}, or routes an unavailable {@code .zgame} to the Hub.
+     * Opens a {@code .zapp} or {@code .zgame} package.
      *
      * @param packageFile package to open
      * @return the native command result
