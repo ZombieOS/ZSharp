@@ -1,0 +1,152 @@
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\44BED52DA3806A8450BBA479267AA9A0\SDL3-POPULATE-MKDIR.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -Dcfgdir=/Debug -P "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/tmp/sdl3-populate-mkdirs.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/Debug/sdl3-populate-mkdir"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\44BED52DA3806A8450BBA479267AA9A0\SDL3-POPULATE-DOWNLOAD.RULE
+setlocal
+cd "D:\VS Code\Projects\Z#\build-molten-check\_deps"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/download-sdl3-populate.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/verify-sdl3-populate.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/extract-sdl3-populate.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/Debug/sdl3-populate-download"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\44BED52DA3806A8450BBA479267AA9A0\SDL3-POPULATE-UPDATE.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/Debug/sdl3-populate-update"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\44BED52DA3806A8450BBA479267AA9A0\SDL3-POPULATE-PATCH.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/Debug/sdl3-populate-patch"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\44BED52DA3806A8450BBA479267AA9A0\SDL3-POPULATE-CONFIGURE.RULE
+setlocal
+cd "D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-build"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/Debug/sdl3-populate-configure"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\44BED52DA3806A8450BBA479267AA9A0\SDL3-POPULATE-BUILD.RULE
+setlocal
+cd "D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-build"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/Debug/sdl3-populate-build"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\44BED52DA3806A8450BBA479267AA9A0\SDL3-POPULATE-INSTALL.RULE
+setlocal
+cd "D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-build"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/Debug/sdl3-populate-install"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\44BED52DA3806A8450BBA479267AA9A0\SDL3-POPULATE-TEST.RULE
+setlocal
+cd "D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-build"
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/Debug/sdl3-populate-test"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\0FFE5F65DF0999E08D236AA359665452\SDL3-POPULATE-COMPLETE.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E make_directory "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/CMakeFiles/Debug"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/CMakeFiles/Debug/sdl3-populate-complete"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/Debug/sdl3-populate-done"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKEFILES\80EDBB667B100A7CD135859F0667FB3D\SDL3-POPULATE.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\VS CODE\PROJECTS\Z#\BUILD-MOLTEN-CHECK\_DEPS\SDL3-SUBBUILD\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" "-SD:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild" "-BD:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild" --check-stamp-file "D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate.rule"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate-complete.rule"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-build.rule"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-configure.rule"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-download.rule"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-install.rule"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-mkdir.rule"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-patch.rule"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-test.rule"
+		},
+		{
+			"file" : "D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"sdl3-populate"
+		],
+		"name" : "sdl3-populate"
+	}
+}

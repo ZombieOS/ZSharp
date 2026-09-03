@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\44bed52da3806a8450bba479267aa9a0\sdl3-populate-mkdir.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\44bed52da3806a8450bba479267aa9a0\sdl3-populate-download.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\44bed52da3806a8450bba479267aa9a0\sdl3-populate-update.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\44bed52da3806a8450bba479267aa9a0\sdl3-populate-patch.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\44bed52da3806a8450bba479267aa9a0\sdl3-populate-configure.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\44bed52da3806a8450bba479267aa9a0\sdl3-populate-build.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\44bed52da3806a8450bba479267aa9a0\sdl3-populate-install.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\44bed52da3806a8450bba479267aa9a0\sdl3-populate-test.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\0ffe5f65df0999e08d236aa359665452\sdl3-populate-complete.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\80edbb667b100a7cd135859f0667fb3d\sdl3-populate.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="D:\VS Code\Projects\Z#\build-molten-check\_deps\sdl3-subbuild\CMakeFiles\sdl3-populate" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{510F5DCD-2D5A-3674-A991-67FB588CED93}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

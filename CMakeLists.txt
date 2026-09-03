@@ -87,10 +87,11 @@ if(ZSHARP_BUILD_GAME_RUNTIME)
         )
         FetchContent_MakeAvailable(MoltenVKPackage)
         set(ZSHARP_MOLTENVK_DYLIB
-            "${moltenvkpackage_SOURCE_DIR}/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib")
+            "${moltenvkpackage_SOURCE_DIR}/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib")
         if(NOT EXISTS "${ZSHARP_MOLTENVK_DYLIB}")
             message(FATAL_ERROR
-                "The pinned MoltenVK package did not contain libMoltenVK.dylib")
+                "The pinned MoltenVK package did not contain the expected runtime: "
+                "${ZSHARP_MOLTENVK_DYLIB}")
         endif()
         target_compile_definitions(
             zsharp PRIVATE

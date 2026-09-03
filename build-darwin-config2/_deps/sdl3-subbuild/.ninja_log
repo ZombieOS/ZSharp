@@ -1,0 +1,21 @@
+# ninja log v6
+4	79	8100742649200000	sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-mkdir	b9bcc8946d4d328
+4	79	8100742649200000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-mkdir	b9bcc8946d4d328
+80	17585	8100742824300000	sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-download	e52f6122ed7ac520
+80	17585	8100742824300000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-download	e52f6122ed7ac520
+17585	17651	8100742840000000	sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-update	d48ed96c94a0ff41
+17585	17651	8100742840000000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-update	d48ed96c94a0ff41
+17651	17719	8100742840000000	sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-patch	450cfb80d716bf4b
+17651	17719	8100742840000000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-patch	450cfb80d716bf4b
+17719	17782	8100742840000000	sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-configure	92798633016279b2
+17719	17782	8100742840000000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-configure	92798633016279b2
+17782	17844	8100742840000000	sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-build	706b0e2a97b2a9d0
+17782	17844	8100742840000000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-build	706b0e2a97b2a9d0
+17845	17907	8100742840000000	sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-install	30cdef28324ba6fe
+17845	17907	8100742840000000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-install	30cdef28324ba6fe
+17908	17971	8100742840000000	sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-test	a4a0406721216005
+17908	17971	8100742840000000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-test	a4a0406721216005
+17971	18060	8100742840000000	CMakeFiles/sdl3-populate-complete	c9e33fccfe80d31f
+17971	18060	8100742840000000	sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-done	c9e33fccfe80d31f
+17971	18060	8100742840000000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate-complete	c9e33fccfe80d31f
+17971	18060	8100742840000000	D:/VS Code/Projects/Z#/build-darwin-config2/_deps/sdl3-subbuild/sdl3-populate-prefix/src/sdl3-populate-stamp/sdl3-populate-done	c9e33fccfe80d31f

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.2.0 - Playable Vulkan game runtime - 2026-09-02
+## 1.0.2.0 - Playable Vulkan game runtime - 2026-09-03
 
 - Added the official `zsharpgame:1.0.0.0` dependency gate for
   `type.script:2D` and `type.script:3D` files.

@@ -1,0 +1,3 @@
+D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/CMakeFiles/sdl3-populate.dir
+D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/CMakeFiles/ALL_BUILD.dir
+D:/VS Code/Projects/Z#/build-molten-check/_deps/sdl3-subbuild/CMakeFiles/ZERO_CHECK.dir
