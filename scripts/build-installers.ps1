@@ -3,13 +3,17 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.0.2.0",
+    [string] $Version = "1.0.2.1",
 
     [string] $BaseUrl = "https://www.zsharp.zombieos.com",
 
     [string] $PublishingRoot = "",
 
-    [string] $TestAppPackage = ""
+    [string] $TestAppPackage = "",
+
+    [string] $TestGamePackage = "",
+
+    [switch] $Beta
 )
 
 $ErrorActionPreference = "Stop"
@@ -122,6 +126,11 @@ foreach ($target in $targets) {
         $source,
         $hashSource
     ) + $target.Libraries
+    if ($Beta) {
+        $arguments = @($arguments[0],
+            "-DINSTALLER_UPDATE_ENDPOINT=`"https://www.zsharp.zombieos.com/beta.js?v=`"") +
+            $arguments[1..($arguments.Count - 1)]
+    }
     & $zigPath @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "Zig failed to build the $($target.Id) installer"
@@ -215,7 +224,28 @@ if ($null -ne $resolvedTestApp) {
 } else {
     Write-Warning "No test app package was supplied; the download-site bundle will not include it"
 }
-$latestArchive = Join-Path $archiveDirectory "ZVM-LATEST.zip"
+$resolvedTestGame = $null
+if (-not [string]::IsNullOrWhiteSpace($TestGamePackage)) {
+    $resolvedTestGame = (Resolve-Path -LiteralPath $TestGamePackage).Path
+} else {
+    $localTestGame = Join-Path $projectRoot `
+        "examples\test-game\Packages\ZSharpGameTest.zgame"
+    if (Test-Path -LiteralPath $localTestGame -PathType Leaf) {
+        $resolvedTestGame = (Resolve-Path -LiteralPath $localTestGame).Path
+    }
+}
+if ($null -ne $resolvedTestGame) {
+    if (-not $resolvedTestGame.EndsWith(".zgame", `
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The test game package must use the .zgame extension"
+    }
+    Copy-Item -LiteralPath $resolvedTestGame -Destination `
+        (Join-Path $archiveDirectory "ZSharpGameTest.zgame") -Force
+} else {
+    Write-Warning "No test game package was supplied; the download-site bundle will not include it"
+}
+$latestArchiveName = if ($Beta) { "ZVM-BETA.zip" } else { "ZVM-LATEST.zip" }
+$latestArchive = Join-Path $archiveDirectory $latestArchiveName
 Push-Location $latestRoot
 Compress-Archive -Path "runtimes" -DestinationPath $latestArchive `
     -CompressionLevel NoCompression
@@ -224,10 +254,11 @@ Pop-Location
 $archiveChecksum =
     (Get-FileHash -Algorithm SHA256 -LiteralPath $latestArchive).Hash.ToLowerInvariant()
 $archiveSize = (Get-Item -LiteralPath $latestArchive).Length
-$archiveUrl = "$BaseUrl/assets/download/ZVM-LATEST.zip"
+$archiveUrl = "$BaseUrl/assets/download/$latestArchiveName"
 $manifest = [ordered]@{
     schema = 1
     latestVersion = $Version
+    channel = $(if ($Beta) { "beta" } else { "stable" })
     download = [ordered]@{
         url = $archiveUrl
         sha256 = $archiveChecksum
@@ -243,7 +274,7 @@ $updateManifest = ($manifest | ConvertTo-Json -Depth 5) +
     $utf8NoBom
 )
 [System.IO.File]::WriteAllText(
-    (Join-Path $siteRoot "update.js"),
+    (Join-Path $siteRoot $(if ($Beta) { "beta.js" } else { "update.js" })),
     $updateManifest,
     $utf8NoBom
 )

@@ -1,0 +1,11 @@
+zsharp = type.script:achievement
+
+achievement TEST_GAME[JSON] (
+ [
+  {
+   "display": "Game Test",
+   "description": "Validate game achievements",
+   "rarity": "EASY"
+  }
+ ]
+)

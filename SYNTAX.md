@@ -3,8 +3,8 @@
 This guide explains how to write Z# and compares its concepts with C#, Java,
 and C. The official source extension is `.zsharp`.
 
-Z# 1.0.2.0 implements the Z1 compiler and virtual machine plus the specialized
-window, 2D, and 3D script headers in this guide. Window syntax is accepted,
+Z# 1.0.2.1 implements the Z1 compiler and virtual machine plus the specialized
+window, scene, and object files in this guide. Window syntax is accepted,
 validated, stored in bytecode, and rendered by native Windows, Linux, and macOS
 `zsharpwindow` backends. `.zapp` and `.zgame` packaging is implemented.
 
@@ -47,7 +47,7 @@ Version: [1.0.0.0]:
 Authors: ["Author"]:
 Description: "A Z# app":
 Icon: "assets/icon.png":
-ZSharp: [1.0.2.0]:
+ZSharp: [1.0.2.1]:
 ```
 
 `Icon` accepts a project-relative PNG. Paths use `/`
@@ -56,26 +56,57 @@ caches the official Z# logo from `https://www.zsharp.zombieos.com/zsharp.png`.
 The same project icon is used for Desktop shortcuts created by Z#; a window's
 design icon remains the fallback for older projects without `Icon`.
 
-The specialized script headers are:
+The supported file headers are:
 
 ```zsharp
 zsharp = type.script:window
-zsharp = type.script:2D
-zsharp = type.script:3D
+zsharp = type.scene
+zsharp = type.object
+zsharp = type.settings
 ```
 
-These identify window, 2D game, and 3D game scripts respectively.
+Normal game logic remains `type.script`. Each `.zscene` file uses `type.scene`,
+and each `.zobject` file uses `type.object`. The old `type.script:2D`,
+`type.script:3D`, `type.object:2D`, and `type.object:3D` headers are no longer
+valid source syntax.
 
 ### Game projects
 
-Every project containing a 2D or 3D script must enable the official game
+Every game project must enable the official game
 runtime in `project.zsettings`:
 
 ```zsharp
 Dependencies (
- zsharpgame:1.0.0.0
+ zsharpgame:1.0.0.1
 ):
+
+Window (
+ StartScene: "Game/Scenes/Main.zscene":
+)
+
+Splash[JSON] (
+ [
+  {
+   "path": "assets/images/Studio.png",
+   "duration": 2
+  },
+  {
+   "path": "assets/images/Game.png",
+   "duration": 2
+  }
+ ]
+)
 ```
+
+`Window.StartScene` selects the scene shown when the game starts; it replaces
+the old file-order behavior. It requires `zsharpgame:1.0.0.1` but does not
+require `zsharpwindow`. If a game also depends on `zsharpwindow`, its existing
+`Startup` and `Uninstall` entries may share the same `Window` block, and
+`Startup` remains optional whenever `StartScene` is present.
+
+`Splash[JSON]` is optional. Each project-relative image is displayed in array
+order for its positive `duration` in seconds before game scripts start. PNG and
+BMP images are supported. Closing the game during a splash cancels launch.
 
 The room and function syntax inside a game script is the normal Z# syntax. A
 non-`DR` `Start[]` runs automatically after the SDL3 window and Vulkan renderer
@@ -83,48 +114,98 @@ are ready. Eligible starts across the project run as independent tasks, so an
 endless game loop does not block window events or rendering. Closing the window
 or pressing Escape cancels and joins those tasks.
 
-The 1.0.2.0 runtime initializes SDL video, audio, keyboard, mouse, and gamepad
+Input paths such as `input.key.a` are global Z# runtime values and do not need
+an import. A script must import another script-owned API before using it. For
+example, a project with PID `zsharp_adhd_game` imports scene control with:
+
+```zsharp
+import zsharp_adhd_game.game.scene():
+```
+
+After that import, the room may read or write `Game.scene`. The wildcard form
+`import zsharp_adhd_game.game.*():` is also accepted.
+
+The 1.0.2.1 runtime initializes SDL video, audio, keyboard, mouse, and gamepad
 support, creates a high-DPI resizable game window, and forces Vulkan for game
 drawing. Windows and Linux are the advertised game targets. A bundled MoltenVK
 path exists for macOS, but it is experimental until tested on Mac hardware.
 
-Game scenes and objects live in `.zobject` files. A 2D object file starts with:
+Every scene lives in a separate `.zscene` file:
 
 ```zsharp
-zsharp = type.object:2D
-```
+zsharp = type.scene
 
-Use `type.object:3D` with a 3D startup script. Mixing 2D and 3D object files in
-one running game is a compile error. Coordinates start at the center of the
-game view: positive X moves right, negative X moves left, positive Y moves up,
-and negative Y moves down.
-
-Define one or more scenes:
-
-```zsharp
 noticed scene Main[] (
- background: #08080B:
- gravityX: 0:
- gravityY: -900:
- gravityZ: 0:
- cameraX: 0:
- cameraY: 0:
- cameraZ: 8:
- cameraFov: 70:
+ scene Main (
+  title: "Main Scene":
+  icon: "assets/icon.png":
+  background: #08080B:
+  gravityX: 0:
+  gravityY: -900:
+ )
+
+ objects[JSON] (
+  [
+   {
+    "id": "Player",
+    "name": "Player One",
+    "location": {
+     "x": "-250",
+     "y": "-200"
+    }
+   }
+  ]
+ )
 )
 ```
 
-The first scene is active at launch. `cameraZ` and `cameraFov` mainly affect
-3D games. A project with no explicit scene receives a default `Main` scene.
+Scene `icon` paths are project-relative PNG files. The active scene's icon is
+used for the native game window. If a scene omits it, ZVM uses the project
+`Icon`; if neither is supplied, it keeps the default Z# application icon.
 
-Define a 2D object like this:
+Every object lives in a separate `.zobject` file and starts with
+`zsharp = type.object`. ZVM treats the model as 3D when it uses a 3D-only
+field such as a scene placement's `z`, `length`, `scaleZ`, `velocityZ`,
+`gravityZ`, or
+`cameraZ`, or the `cube` shape. Otherwise it renders as 2D. Coordinates start
+at the center of the game view: positive X moves right, negative X moves left,
+positive Y moves up, and negative Y moves down.
+
+For example, a complete 3D scene file can contain:
 
 ```zsharp
+noticed scene Main[] (
+ scene Main (
+  title: "3D Scene":
+  background: #08080B:
+  gravityX: 0:
+  gravityY: -900:
+  gravityZ: 0:
+  cameraX: 0:
+  cameraY: 0:
+  cameraZ: 8:
+  cameraFov: 70:
+ )
+ objects[JSON] (
+  [
+   { "id": "Cube", "name": "Main Cube", "location": { "x": "0", "y": "0", "z": "0" } }
+  ]
+ )
+)
+```
+
+The configured `Window.StartScene` is active at launch. Without that setting,
+the first discovered scene is used for compatibility. `cameraZ` and
+`cameraFov` mainly affect 3D games. A game project must contain at least one
+`.zscene` file.
+
+Define a 2D object in its own `.zobject` file like this:
+
+```zsharp
+zsharp = type.object
+
 noticed object Player[] (
- scene: Main:
  shape: rectangle:
- positionX: -250:
- positionY: -200:
  width: 48:
  height: 72:
  rotation: 0:
@@ -143,10 +224,24 @@ noticed object Player[] (
  velocityX: 0:
  velocityY: 0:
 
- controlX: 390:
- jumpSpeed: 560:
+ attributes[JSON] (
+  [
+   {
+    "id": "COLLIDER2D",
+    "active": true
+   }
+  ]
+ )
 )
 ```
+
+The object declaration's ID is referenced by `id` in a scene's `objects[JSON]`
+array. `name` is that placed instance's display name, while `location` owns its
+X/Y position and optional 3D Z position. This lets an object definition remain
+independent from the scene that places it. `attributes[JSON]` accepts official
+IDs such as `COLLIDER2D` and `COLLIDER3D`, plus project-defined IDs prefixed
+with `CUSTOM:`. Each attribute has an `active` boolean. Object textures use
+`texture: "path/to/texture.png":`; a 3D object's third size is `length:`.
 
 Supported shapes are `rectangle`, `circle`, `triangle`, `sprite`, `cube`,
 and `text`. `text` objects use a quoted `text:` field. The first sprite loader
@@ -161,24 +256,24 @@ collision solver uses their world bounds, exposes grounded/colliding state,
 and supports `trigger: alive:` for overlap-only objects. `restitution` controls
 bounce and `friction` slows horizontal movement on a surface.
 
-`controlX` maps A/D, Left/Right, and gamepad horizontal input to velocity.
-`controlY` does the same for vertical input. `jumpSpeed` maps W, Up, Space, and
-the primary gamepad button to jumping while grounded. These automatic controls
-are optional; scripts can read input and change properties directly.
+Z# does not provide a pre-made player movement controller. Game scripts read
+input and change object position or velocity explicitly. A reusable movement
+system can instead be distributed as a project dependency.
 
-Game runtime reads include:
+Game key reads use `input.key.KEY`. Supported names include `a` through `z`,
+`0` through `9`, `larrow`, `rarrow`, `uarrow`, `darrow`, `fn1` through
+`fn24`, `space`, `enter`, `escape`, `tab`, `backspace`, modifier keys, and
+mouse properties:
 
 ```zsharp
-Input.left
-Input.right
-Input.up
-Input.down
-Input.space
-Input.action
-Input.mouseLeft
-Input.mouseRight
-Input.mouseX
-Input.mouseY
+input.key.a
+input.key.rarrow
+input.key.space
+input.key.fn1
+input.mouse.left
+input.mouse.right
+input.mouse.x
+input.mouse.y
 
 Game.scene
 Game.delta
@@ -190,6 +285,10 @@ Player.velocityY
 Player.grounded
 Player.colliding
 ```
+
+Escape is only an input value (`input.key.escape`); it does not close a game
+automatically. A game may assign it to pause, a side menu, or its own quit
+logic.
 
 Input and collision values are statuses (`alive` or `dead`). Positions,
 velocities, dimensions, timing, and FPS are numbers. `Game.scene` and object
@@ -218,6 +317,37 @@ An object can be qualified with its scene as
 `Main.Player.positionX`. Input and timing properties are read-only, as are
 `grounded` and `colliding`. Scene changes, rendering, physics, and script loops
 run concurrently, so `wait(...)` does not freeze the game window.
+
+### Achievements
+
+Game achievements use ZSON in a `type.script:achievement` file:
+
+```zsharp
+zsharp = type.script:achievement
+
+achievement CLIMBER[JSON] (
+ [
+  {
+   "display": "Climber",
+   "description": "Reach level 5!",
+   "rarity": "HARD"
+  }
+ ]
+)
+```
+
+Rarity must be `EASY`, `MEDIUM`, `HARD`, or `IMPOSSIBLE`. A normal game script
+imports the official achievement API and awards the ID once its condition is
+met:
+
+```zsharp
+import ZSharp.Achievements():
+ZSharp.Achievement.Award.CLIMBER:
+```
+
+Awards are idempotent: awarding an earned ID again does nothing. New awards
+are saved locally by project PID, retained across reinstall, counted in the
+Z# Hub, and displayed in-game for five seconds with a short sound.
 
 WAV audio uses a safe project-relative path:
 
@@ -270,7 +400,7 @@ object name is enough, or `.File Object` to name the `.zobject` file too:
 Kebab-case ZSS names such as `position-x`, `gravity-scale`, and
 `audio-volume` map to the matching Z# fields (`positionX`, `gravityScale`, and
 `audioVolume`). Rules are applied in sorted file order after `.zobject` files
-load, so a later ZSS rule overrides an earlier object value. In 1.0.2.0 ZSS
+load, so a later ZSS rule overrides an earlier object value. In 1.0.2.1 ZSS
 styles the game fields supported by `.zobject`; web-only layout and browser DOM
 properties do not apply to native game objects.
 
@@ -286,7 +416,7 @@ PID: "project_id":
 Version: [1.0.0.0]:
 Authors: ["Author1", "Author2"]:
 Description: "This is a Z# Project!":
-ZSharp: [1.0.2.0]:
+ZSharp: [1.0.2.1]:
 
 Dependencies (
  playfab:1.0.0.0
@@ -1130,7 +1260,7 @@ Z# bytecode      -> ZVM (`zsharp`)
 ```
 
 A Java application starts on the JVM. When it uses
-`com.zombieos:zsharp:1.0.2.0`, the library locates or extracts the bundled
+`com.zombieos:zsharp:1.0.2.1`, the library locates or extracts the bundled
 native Z# runtime and starts it as a child process. The ZVM then compiles or
 runs the requested Z# file.
 
@@ -1423,7 +1553,7 @@ short form when the element name is enough:
 }
 ```
 
-The 1.0.2.0 native window style pass supports `background`, `color`, solid
+The 1.0.2.1 native window style pass supports `background`, `color`, solid
 `border`, `border-color`, `border-radius`, `font-family`, `font-size`,
 `font-weight`, `padding` and its four directional forms, `caret-color`,
 `outline: none`, `selection-background`, and `selection-color`. `:hover`
@@ -1470,7 +1600,7 @@ noticed brain Animate[] (
 The alias must contain `Element.property` or `File.Element.property`. It must
 refer to the active window when the callback runs.
 
-The setter supports these live fields in 1.0.2.0:
+The setter supports these live fields in 1.0.2.1:
 
 - design: `title`, `icon`, `scalable`, `background`, `width`, `height`,
   `locationX`, and `locationY`;
@@ -1495,7 +1625,7 @@ PID: "my_application":
 Version: [1.0.0.0]:
 Authors: ["Author"]:
 Description: "A Z# application":
-ZSharp: [1.0.2.0]:
+ZSharp: [1.0.2.1]:
 
 Dependencies (
  zsharpwindow:1.0.0.0
@@ -1542,7 +1672,7 @@ macOS:   ~/Library/Application Support/ZSharp/projects.registry
 
 Z# applications use `.zapp` and games use `.zgame`.
 
-These are cross-platform Z# container formats. The normal 1.0.2.0 container
+These are cross-platform Z# container formats. The normal 1.0.2.1 container
 stores the validated project plus its compiled startup, with a SHA-256 hash for
 each entry. The unbytecoded companion uses the standard ZIP container and ZIP
 CRC checks. The runtime rejects corrupt data, absolute paths, `..` traversal,
@@ -1582,10 +1712,11 @@ archive. Rename `Application-unbytecoded.zapp` to
 `Application-unbytecoded.zip` to browse the original project files. Renaming
 does not change their contents.
 
-The packager checks `project.zsettings` and validates every included `.zsharp`
-and `.zobject` file. An app requires a configured `Window Startup`; a game requires
-`zsharpgame:1.0.0.0` and at least one `type.script:2D` or `type.script:3D`
-file. A game prefers a 3D startup when both types exist. Renaming an
+The packager checks `project.zsettings` and validates every included `.zsharp`,
+`.zscene`, and `.zobject` file. An app requires a configured `Window Startup`;
+a game requires `zsharpgame:1.0.0.1`, at least one normal `type.script` file,
+and at least one `type.scene` `.zscene` file. The first source and scene in
+sorted path order are used as the startup script and initial scene. Renaming an
 ordinary ZIP file is not enough; Z# source packages carry a format marker and
 must be produced by `zsharp package --unbytecode`.
 
@@ -1642,15 +1773,16 @@ EXACT FAILURE REASON
 Uninstall asks the user to type `yes`, then permanently removes that verified
 package cache, the selected package file, and any Z#-created Desktop shortcut
 without using Recycle Bin or Trash.
-The future hub, app-data ledger, and optional ZOS Cloud backup are not part of
-1.0.2.0. See [UNINSTALL.md](UNINSTALL.md) for current behavior and the planned
+The future app-data ledger and optional ZOS Cloud backup are not part of
+1.0.2.1. See [UNINSTALL.md](UNINSTALL.md) for current behavior and the planned
 full safety model.
 
 `.zgame` uses the same secure package, cache, association, shortcut, and
-uninstall foundation as `.zapp`. Opening one launches its selected 2D or 3D
-startup, loads and validates the project's `.zobject` scenes, starts every
+uninstall foundation as `.zapp`. Opening one launches its normal game startup
+script, loads and validates the project's separate `.zscene` and `.zobject`
+files, starts every
 eligible non-`DR` `Start[]` task, and enters the SDL3/Vulkan game loop. Windows
-and Linux are the supported game targets for 1.0.2.0. The macOS/MoltenVK game
+and Linux are the supported game targets for 1.0.2.1. The macOS/MoltenVK game
 path is experimental and is not advertised as supported until hardware tests
 are completed.
 
@@ -1734,7 +1866,7 @@ The first part selects the language generation:
 ```
 
 The installed ZVM supplies runtime and client behavior. A 1.0.1.0 application
-therefore continues to run on ZVM 1.0.2.0 and automatically receives runtime
+therefore continues to run on ZVM 1.0.2.1 and automatically receives runtime
 fixes such as smoother window painting and silent Desktop launches; its package
 does not need to be rebuilt. The `ZSharp` version in `project.zsettings`
 describes the source version the project targets. New source fields and syntax

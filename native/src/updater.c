@@ -126,6 +126,147 @@ static void current_version(char *version, size_t capacity) {
              ZSHARP_VERSION_PATCH, ZSHARP_VERSION_REVISION);
 }
 
+void zsharp_update_preferences_default(ZSharpUpdatePreferences *preferences) {
+    if (preferences == NULL) return;
+    preferences->automatic_updates = 1;
+    preferences->beta_updates = 0;
+    preferences->automatic_beta_updates = 0;
+}
+
+#ifdef _WIN32
+static int preference_dword(HKEY key, const WCHAR *name, int fallback) {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    DWORD type = 0;
+    return RegQueryValueExW(key, name, NULL, &type, (BYTE *)&value, &size) ==
+               ERROR_SUCCESS && type == REG_DWORD
+        ? value != 0 : fallback;
+}
+
+int zsharp_update_preferences_load(ZSharpUpdatePreferences *preferences,
+                                   char *error, size_t error_size) {
+    HKEY key = NULL;
+    (void)error;
+    (void)error_size;
+    zsharp_update_preferences_default(preferences);
+    if (preferences == NULL) return 0;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\ZombieOS\\ZSharp\\Updates", 0,
+                      KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return 1;
+    preferences->automatic_updates = preference_dword(
+        key, L"AutomaticUpdates", preferences->automatic_updates);
+    preferences->beta_updates = preference_dword(
+        key, L"BetaUpdates", preferences->beta_updates);
+    preferences->automatic_beta_updates = preference_dword(
+        key, L"AutomaticBetaUpdates", preferences->automatic_beta_updates);
+    RegCloseKey(key);
+    if (!preferences->beta_updates)
+        preferences->automatic_beta_updates = 0;
+    return 1;
+}
+
+int zsharp_update_preferences_save(
+    const ZSharpUpdatePreferences *preferences,
+    char *error, size_t error_size) {
+    HKEY key = NULL;
+    DWORD automatic;
+    DWORD beta;
+    DWORD automatic_beta;
+    LONG result;
+    if (preferences == NULL) return 0;
+    automatic = preferences->automatic_updates != 0;
+    beta = preferences->beta_updates != 0;
+    automatic_beta = beta && preferences->automatic_beta_updates != 0;
+    result = RegCreateKeyExW(HKEY_CURRENT_USER,
+        L"Software\\ZombieOS\\ZSharp\\Updates", 0, NULL, 0,
+        KEY_SET_VALUE, NULL, &key, NULL);
+    if (result == ERROR_SUCCESS)
+        result = RegSetValueExW(key, L"AutomaticUpdates", 0, REG_DWORD,
+                               (const BYTE *)&automatic, sizeof(automatic));
+    if (result == ERROR_SUCCESS)
+        result = RegSetValueExW(key, L"BetaUpdates", 0, REG_DWORD,
+                               (const BYTE *)&beta, sizeof(beta));
+    if (result == ERROR_SUCCESS)
+        result = RegSetValueExW(key, L"AutomaticBetaUpdates", 0, REG_DWORD,
+                               (const BYTE *)&automatic_beta,
+                               sizeof(automatic_beta));
+    if (key != NULL) RegCloseKey(key);
+    if (result == ERROR_SUCCESS) return 1;
+    if (error != NULL && error_size != 0)
+        snprintf(error, error_size, "could not save update preferences");
+    return 0;
+}
+#else
+static char *preferences_path(void) {
+    const char *base = getenv("XDG_CONFIG_HOME");
+    char *directory;
+    char *path;
+    if (base != NULL && base[0] != '\0')
+        directory = join_path(base, "zsharp");
+    else {
+        base = getenv("HOME");
+        if (base == NULL || base[0] == '\0') return NULL;
+        directory = join_path(base, ".config/zsharp");
+    }
+    if (directory == NULL) return NULL;
+    mkdir(directory, 0700);
+    path = join_path(directory, "updates.conf");
+    free(directory);
+    return path;
+}
+
+int zsharp_update_preferences_load(ZSharpUpdatePreferences *preferences,
+                                   char *error, size_t error_size) {
+    char *path;
+    FILE *file;
+    char line[128];
+    (void)error;
+    (void)error_size;
+    zsharp_update_preferences_default(preferences);
+    if (preferences == NULL) return 0;
+    path = preferences_path();
+    file = path == NULL ? NULL : fopen(path, "rb");
+    free(path);
+    if (file == NULL) return 1;
+    while (fgets(line, sizeof(line), file) != NULL) {
+        int value;
+        if (sscanf(line, "automatic_updates=%d", &value) == 1)
+            preferences->automatic_updates = value != 0;
+        else if (sscanf(line, "beta_updates=%d", &value) == 1)
+            preferences->beta_updates = value != 0;
+        else if (sscanf(line, "automatic_beta_updates=%d", &value) == 1)
+            preferences->automatic_beta_updates = value != 0;
+    }
+    fclose(file);
+    if (!preferences->beta_updates)
+        preferences->automatic_beta_updates = 0;
+    return 1;
+}
+
+int zsharp_update_preferences_save(
+    const ZSharpUpdatePreferences *preferences,
+    char *error, size_t error_size) {
+    char *path = preferences_path();
+    FILE *file = path == NULL ? NULL : fopen(path, "wb");
+    free(path);
+    if (file == NULL) {
+        if (error != NULL && error_size != 0)
+            snprintf(error, error_size, "could not save update preferences");
+        return 0;
+    }
+    fprintf(file, "automatic_updates=%d\nbeta_updates=%d\n"
+                  "automatic_beta_updates=%d\n",
+            preferences->automatic_updates != 0,
+            preferences->beta_updates != 0,
+            preferences->beta_updates &&
+                preferences->automatic_beta_updates != 0);
+    if (fclose(file) == 0) return 1;
+    if (error != NULL && error_size != 0)
+        snprintf(error, error_size, "could not save update preferences");
+    return 0;
+}
+#endif
+
 #ifdef _WIN32
 
 static int version_parts(const char *version, unsigned long parts[4]) {
@@ -175,11 +316,13 @@ static int compare_versions(const char *left, const char *right) {
 typedef struct AgentCheck {
     HWND window;
     int manual;
+    int beta;
 } AgentCheck;
 
 static NOTIFYICONDATAW agent_icon;
 static volatile LONG agent_checking;
 static int agent_update_pending;
+static int agent_pending_beta;
 static UINT agent_taskbar_created;
 
 static WCHAR *wide_text(const char *text) {
@@ -214,7 +357,7 @@ static int parse_latest_version(const char *manifest, char *version,
     return version_parts(version, (unsigned long[4]){0, 0, 0, 0});
 }
 
-static int fetch_latest_version(char *version, size_t capacity) {
+static int fetch_latest_version(char *version, size_t capacity, int beta) {
     HINTERNET session = NULL;
     HINTERNET connection = NULL;
     HINTERNET request = NULL;
@@ -227,7 +370,8 @@ static int fetch_latest_version(char *version, size_t capacity) {
     int ok = 0;
     current_version(installed, sizeof(installed));
     if (swprintf(path, sizeof(path) / sizeof(path[0]),
-                 L"/update.js?v=%hs-windows", installed) < 0) return 0;
+                 beta ? L"/beta.js?v=%hs-windows"
+                      : L"/update.js?v=%hs-windows", installed) < 0) return 0;
     session = WinHttpOpen(L"ZSharp Update Agent/1.0",
                           WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                           WINHTTP_NO_PROXY_NAME,
@@ -297,12 +441,13 @@ static DWORD WINAPI agent_check_thread(LPVOID parameter) {
     AgentCheck *check = (AgentCheck *)parameter;
     char latest[64];
     char installed[64];
-    int fetched = fetch_latest_version(latest, sizeof(latest));
+    int fetched = fetch_latest_version(latest, sizeof(latest), check->beta);
     current_version(installed, sizeof(installed));
     if (fetched && compare_versions(latest, installed) > 0) {
         char *message = _strdup(latest);
         if (message != NULL)
-            PostMessageW(check->window, ZSHARP_AGENT_UPDATE_MESSAGE, 0,
+            PostMessageW(check->window, ZSHARP_AGENT_UPDATE_MESSAGE,
+                         (WPARAM)check->beta,
                          (LPARAM)message);
     } else if (check->manual) {
         PostMessageW(check->window,
@@ -318,6 +463,9 @@ static DWORD WINAPI agent_check_thread(LPVOID parameter) {
 static void agent_begin_check(HWND window, int manual) {
     AgentCheck *check;
     HANDLE thread;
+    ZSharpUpdatePreferences preferences;
+    zsharp_update_preferences_load(&preferences, NULL, 0);
+    if (!manual && !preferences.automatic_updates) return;
     if (InterlockedCompareExchange(&agent_checking, 1, 0) != 0) return;
     check = (AgentCheck *)malloc(sizeof(*check));
     if (check == NULL) {
@@ -326,6 +474,8 @@ static void agent_begin_check(HWND window, int manual) {
     }
     check->window = window;
     check->manual = manual;
+    check->beta = manual ? preferences.beta_updates
+                         : preferences.automatic_beta_updates;
     thread = CreateThread(NULL, 0, agent_check_thread, check, 0, NULL);
     if (thread == NULL) {
         free(check);
@@ -335,7 +485,7 @@ static void agent_begin_check(HWND window, int manual) {
     CloseHandle(thread);
 }
 
-static int launch_installer_check(void) {
+static int launch_installer_check(int beta) {
     char version[64];
     char process_id[32];
     char *runtime = executable_path();
@@ -354,10 +504,17 @@ static int launch_installer_check(void) {
     current_version(version, sizeof(version));
     snprintf(process_id, sizeof(process_id), "%lu",
              (unsigned long)GetCurrentProcessId());
-    swprintf(command, sizeof(command) / sizeof(command[0]),
-             L"\"%ls\" --check --quiet --current-version %hs "
-             L"--notify-result --wait-pid %hs", wide_installer, version,
-             process_id);
+    if (beta)
+        swprintf(command, sizeof(command) / sizeof(command[0]),
+                 L"\"%ls\" --check --quiet --current-version %hs "
+                 L"--notify-result --wait-pid %hs --manifest "
+                 L"\"https://www.zsharp.zombieos.com/beta.js?v=%hs-windows\"",
+                 wide_installer, version, process_id, version);
+    else
+        swprintf(command, sizeof(command) / sizeof(command[0]),
+                 L"\"%ls\" --check --quiet --current-version %hs "
+                 L"--notify-result --wait-pid %hs", wide_installer, version,
+                 process_id);
     memset(&startup, 0, sizeof(startup));
     memset(&process, 0, sizeof(process));
     startup.cb = sizeof(startup);
@@ -414,6 +571,7 @@ static LRESULT CALLBACK agent_window_proc(HWND window, UINT message,
             agent_notify(L"Z# update is installing", notice, NIIF_INFO);
             if (!agent_update_pending) {
                 agent_update_pending = 1;
+                agent_pending_beta = wparam != 0;
                 SetTimer(window, ZSHARP_AGENT_INSTALL_TIMER, 2500, NULL);
             }
             return 0;
@@ -431,7 +589,7 @@ static LRESULT CALLBACK agent_window_proc(HWND window, UINT message,
                 agent_begin_check(window, 0);
             } else if (wparam == ZSHARP_AGENT_INSTALL_TIMER) {
                 KillTimer(window, ZSHARP_AGENT_INSTALL_TIMER);
-                if (!launch_installer_check()) {
+                if (!launch_installer_check(agent_pending_beta)) {
                     agent_update_pending = 0;
                     agent_notify(L"Z# update could not start",
                                  L"The tray agent will try again automatically.",
@@ -590,12 +748,15 @@ void zsharp_update_check_start(void) {
 #ifdef _WIN32
     return;
 #else
+    ZSharpUpdatePreferences preferences;
     char version[64];
     char process_id[32];
     char *runtime;
     char *directory;
     char *installer;
-    if (getenv("ZSHARP_SKIP_UPDATE_CHECK") != NULL) return;
+    zsharp_update_preferences_load(&preferences, NULL, 0);
+    if (getenv("ZSHARP_SKIP_UPDATE_CHECK") != NULL ||
+        !preferences.automatic_updates) return;
     runtime = executable_path();
     directory = runtime == NULL ? NULL : parent_directory(runtime);
     installer = directory == NULL ? NULL
@@ -625,9 +786,15 @@ void zsharp_update_check_start(void) {
                     if (null_file > STDERR_FILENO) close(null_file);
                 }
             }
-            execl(installer, installer, "--check", "--quiet",
-                  "--current-version", version, "--wait-pid", process_id,
-                  (char *)NULL);
+            if (preferences.automatic_beta_updates)
+                execl(installer, installer, "--check", "--quiet",
+                      "--current-version", version, "--wait-pid", process_id,
+                      "--manifest", "https://www.zsharp.zombieos.com/beta.js",
+                      (char *)NULL);
+            else
+                execl(installer, installer, "--check", "--quiet",
+                      "--current-version", version, "--wait-pid", process_id,
+                      (char *)NULL);
             _exit(127);
         }
         if (child > 0) waitpid(child, NULL, 0);
@@ -639,6 +806,7 @@ void zsharp_update_check_start(void) {
 int zsharp_update_now(char *error, size_t error_size) {
     char version[64];
     char process_id[32];
+    ZSharpUpdatePreferences preferences;
     char *runtime = executable_path();
     char *directory = runtime == NULL ? NULL : parent_directory(runtime);
 #ifdef _WIN32
@@ -652,6 +820,7 @@ int zsharp_update_now(char *error, size_t error_size) {
     STARTUPINFOW startup;
     PROCESS_INFORMATION process;
     int started = 0;
+    zsharp_update_preferences_load(&preferences, NULL, 0);
     current_version(version, sizeof(version));
     snprintf(process_id, sizeof(process_id), "%lu",
              (unsigned long)GetCurrentProcessId());
@@ -661,10 +830,17 @@ int zsharp_update_now(char *error, size_t error_size) {
                  "zsharp-installer.exe was not found beside the ZVM");
         goto windows_done;
     }
-    swprintf(command, sizeof(command) / sizeof(command[0]),
-             L"\"%ls\" --check --quiet --notify-result "
-             L"--current-version %hs --wait-pid %hs",
-             wide_installer, version, process_id);
+    if (preferences.beta_updates)
+        swprintf(command, sizeof(command) / sizeof(command[0]),
+                 L"\"%ls\" --check --quiet --notify-result "
+                 L"--current-version %hs --wait-pid %hs --manifest "
+                 L"\"https://www.zsharp.zombieos.com/beta.js?v=%hs-windows\"",
+                 wide_installer, version, process_id, version);
+    else
+        swprintf(command, sizeof(command) / sizeof(command[0]),
+                 L"\"%ls\" --check --quiet --notify-result "
+                 L"--current-version %hs --wait-pid %hs",
+                 wide_installer, version, process_id);
     memset(&startup, 0, sizeof(startup));
     memset(&process, 0, sizeof(process));
     startup.cb = sizeof(startup);
@@ -690,6 +866,7 @@ windows_done:
         : (directory == NULL ? NULL : join_path(directory,
                                                  "zsharp-installer"));
     pid_t child;
+    zsharp_update_preferences_load(&preferences, NULL, 0);
     current_version(version, sizeof(version));
     snprintf(process_id, sizeof(process_id), "%lu", (unsigned long)getpid());
     if (installer == NULL || access(installer, X_OK) != 0) {
@@ -722,9 +899,16 @@ windows_done:
                 if (null_file > STDERR_FILENO) close(null_file);
             }
         }
-        execl(installer, installer, "--check", "--quiet",
-              "--notify-result", "--current-version", version,
-              "--wait-pid", process_id, (char *)NULL);
+        if (preferences.beta_updates)
+            execl(installer, installer, "--check", "--quiet",
+                  "--notify-result", "--current-version", version,
+                  "--wait-pid", process_id, "--manifest",
+                  "https://www.zsharp.zombieos.com/beta.js",
+                  (char *)NULL);
+        else
+            execl(installer, installer, "--check", "--quiet",
+                  "--notify-result", "--current-version", version,
+                  "--wait-pid", process_id, (char *)NULL);
         _exit(127);
     }
     waitpid(child, NULL, 0);

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.0.2.0 LANGUAGES C)
+project(zsharp VERSION 1.0.2.1 LANGUAGES C)
 
 option(ZSHARP_BUILD_EXAMPLES "Build Z# integration examples" OFF)
 option(ZSHARP_BUILD_GAME_RUNTIME
@@ -12,6 +12,7 @@ include(CTest)
 find_package(Threads REQUIRED)
 
 add_executable(zsharp
+    native/src/achievement.c
     native/src/bytecode.c
     native/src/decimal.c
     native/src/desktop.c

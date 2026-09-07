@@ -1,4 +1,5 @@
 #include "project.h"
+#include "achievement.h"
 
 #include "window_style.h"
 
@@ -730,6 +731,24 @@ static int require_project_import(const ZSharpRoom *room,
     return 0;
 }
 
+static int require_game_scene_import(const ZSharpRoom *room,
+                                     const ZSharpSettings *settings,
+                                     char *error, size_t error_size) {
+    size_t index;
+    char exact[512];
+    char wildcard[512];
+    snprintf(exact, sizeof(exact), "%s.game.scene", settings->project_id);
+    snprintf(wildcard, sizeof(wildcard), "%s.game.*", settings->project_id);
+    for (index = 0; index < room->import_count; index++) {
+        if (strcmp(room->imports[index].path, exact) == 0 ||
+            strcmp(room->imports[index].path, wildcard) == 0) return 1;
+    }
+    snprintf(error, error_size,
+             "room '%s' uses Game.scene without importing %s.game.scene()",
+             room->qualified_name, settings->project_id);
+    return 0;
+}
+
 static int validate_variable_access(const ZSharpProgram *target_program,
                                     const ZSharpRoom *caller,
                                     const char *room_name,
@@ -1103,17 +1122,43 @@ static int validate_instruction(const ZSharpProgram *program,
     char *parts[5] = {0};
     size_t count = 0;
     int ok = 1;
-    if ((program->script_type == ZSCRIPT_2D ||
-         program->script_type == ZSCRIPT_3D) &&
+    if ((program->script_type == ZSCRIPT_GAME ||
+         program->script_type == ZSCRIPT_LEGACY_GAME) &&
+        instruction->op == ZOP_UI_SET && instruction->operand != NULL &&
+        strncmp(instruction->operand, "ZSharp.Achievement.Award.", 25) == 0) {
+        ZSharpAchievement achievement;
+        size_t import_index;
+        int imported = 0;
+        for (import_index = 0; import_index < room->import_count; import_index++)
+            if (strcmp(room->imports[import_index].path,
+                       "ZSharp.Achievements") == 0) imported = 1;
+        if (!imported) {
+            snprintf(error, error_size,
+                     "room '%s' awards an achievement without importing ZSharp.Achievements()",
+                     room->qualified_name);
+            return 0;
+        }
+        ok = zsharp_achievement_find(project_root, instruction->operand + 25,
+                                     &achievement, error, error_size);
+        if (ok) zsharp_achievement_free(&achievement);
+        return ok;
+    }
+    if ((program->script_type == ZSCRIPT_GAME ||
+         program->script_type == ZSCRIPT_LEGACY_GAME) &&
         (instruction->op == ZOP_UI_SET ||
          instruction->op == ZOP_LOAD_PATH ||
          instruction->op == ZOP_STORE_PATH)) {
         ZSharpGameModel game;
         const char *path = instruction->operand;
-        if (!zsharp_game_model_load(project_root,
-                                    program->script_type == ZSCRIPT_3D,
-                                    &game, error, error_size)) return 0;
+        if (!zsharp_game_model_load(project_root, &game, error,
+                                    error_size)) return 0;
         if (path != NULL && zsharp_game_model_owns_property(&game, path)) {
+            if (strcmp(path, "Game.scene") == 0 &&
+                !require_game_scene_import(room, settings, error,
+                                           error_size)) {
+                zsharp_game_model_free(&game);
+                return 0;
+            }
             zsharp_game_model_free(&game);
             return 1;
         }
@@ -1439,13 +1484,30 @@ int zsharp_project_validate(const ZSharpProgram *program,
                zsharp_window_styles_validate(program, project_root, error,
                                               error_size);
     }
-    if ((program->script_type == ZSCRIPT_2D ||
-         program->script_type == ZSCRIPT_3D) &&
-        zsharp_settings_find_dependency(settings, "zsharpgame") == NULL) {
-        snprintf(error, error_size,
-                 "2D and 3D scripts require zsharpgame:1.0.0.0 in "
-                 "Dependencies");
-        return 0;
+    if (program->script_type == ZSCRIPT_GAME ||
+        program->script_type == ZSCRIPT_LEGACY_GAME) {
+        const ZSharpDependency *game_dependency =
+            zsharp_settings_find_dependency(settings, "zsharpgame");
+        static const uint32_t required[ZSHARP_VERSION_PART_COUNT] =
+            {1u, 0u, 0u, 1u};
+        size_t version_index;
+        int comparison = 0;
+        if (game_dependency != NULL) {
+            for (version_index = 0;
+                 version_index < ZSHARP_VERSION_PART_COUNT; version_index++) {
+                if (game_dependency->version[version_index] ==
+                    required[version_index]) continue;
+                comparison = game_dependency->version[version_index] >
+                             required[version_index] ? 1 : -1;
+                break;
+            }
+        }
+        if (game_dependency == NULL || comparison < 0) {
+            snprintf(error, error_size,
+                     "game scripts require zsharpgame:1.0.0.1 or newer in "
+                     "Dependencies");
+            return 0;
+        }
     }
     for (room_index = 0; room_index < program->room_count; room_index++) {
         const ZSharpRoom *room = &program->rooms[room_index];
@@ -1496,6 +1558,10 @@ int zsharp_project_validate_settings(const ZSharpSettings *settings,
     const char *names[2] = {"Startup", "Uninstall"};
     const char *paths[2];
     size_t index;
+    const ZSharpDependency *game_dependency =
+        zsharp_settings_find_dependency(settings, "zsharpgame");
+    const ZSharpDependency *window_dependency =
+        zsharp_settings_find_dependency(settings, "zsharpwindow");
     if (settings->icon != NULL) {
         char *icon_path = join_path(project_root, settings->icon);
         int valid = icon_path != NULL && path_is_file(icon_path);
@@ -1507,10 +1573,46 @@ int zsharp_project_validate_settings(const ZSharpSettings *settings,
             return 0;
         }
     }
+    if (settings->game_start_scene != NULL) {
+        char *scene_path = join_path(project_root, settings->game_start_scene);
+        size_t length = strlen(settings->game_start_scene);
+        int valid = game_dependency != NULL && scene_path != NULL &&
+                    path_is_file(scene_path) &&
+                    length > strlen(ZSHARP_SCENE_EXTENSION) &&
+                    strcmp(settings->game_start_scene + length -
+                               strlen(ZSHARP_SCENE_EXTENSION),
+                           ZSHARP_SCENE_EXTENSION) == 0;
+        free(scene_path);
+        if (!valid) {
+            snprintf(error, error_size,
+                     "Window StartScene '%s' requires zsharpgame and an existing .zscene file",
+                     settings->game_start_scene);
+            return 0;
+        }
+    }
+    for (index = 0; index < settings->splash_count; index++) {
+        char *splash_path = join_path(project_root, settings->splashes[index].path);
+        int valid = game_dependency != NULL && splash_path != NULL &&
+                    path_is_file(splash_path);
+        free(splash_path);
+        if (!valid) {
+            snprintf(error, error_size,
+                     "Splash image '%s' requires zsharpgame and an existing project file",
+                     settings->splashes[index].path);
+            return 0;
+        }
+    }
     if (!settings->has_window) return 1;
     paths[0] = settings->window_startup;
     paths[1] = settings->window_uninstall;
     for (index = 0; index < 2; index++) {
+        if (paths[index] == NULL) continue;
+        if (window_dependency == NULL) {
+            snprintf(error, error_size,
+                     "Window %s requires zsharpwindow in Dependencies",
+                     names[index]);
+            return 0;
+        }
         char *full_path = join_path(project_root, paths[index]);
         ZSharpProgram program;
         ZSharpDiagnostic diagnostic;

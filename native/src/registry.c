@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -494,12 +495,15 @@ int zsharp_registry_list_packages(ZSharpInstalledPackageList *packages,
     char *path;
     FILE *input;
     int read_result = 0;
+    int found_missing = 0;
     memset(packages, 0, sizeof(*packages));
     path = package_registry_path(error, error_size);
     if (path == NULL) return 0;
     input = fopen(path, "rb");
-    free(path);
-    if (input == NULL) return 1;
+    if (input == NULL) {
+        free(path);
+        return 1;
+    }
     for (;;) {
         char *line = NULL;
         char *fields[5];
@@ -532,6 +536,10 @@ int zsharp_registry_list_packages(ZSharpInstalledPackageList *packages,
             sscanf(fields[3], "%u.%u.%u.%u", &version[0], &version[1],
                    &version[2], &version[3]) != 4 ||
             !package_file_exists(fields[4])) {
+            if (index == 5 && (strcmp(fields[1], "app") == 0 ||
+                               strcmp(fields[1], "game") == 0) &&
+                !package_file_exists(fields[4]))
+                found_missing = 1;
             free(line);
             continue;
         }
@@ -558,11 +566,66 @@ int zsharp_registry_list_packages(ZSharpInstalledPackageList *packages,
     if (read_result < 0 || ferror(input)) {
         fclose(input);
         zsharp_registry_package_list_free(packages);
+        free(path);
         registry_error(error, error_size,
                        "could not read installed package registry", NULL);
         return 0;
     }
     fclose(input);
+    /* A missing package is no longer installed. Remove only its Hub entry;
+     * playtime and other PID-keyed data intentionally remain available if the
+     * same project is installed again later. */
+    if (found_missing) {
+        char cleanup_error[256] = {0};
+        FILE *source = fopen(path, "rb");
+        size_t path_length = strlen(path);
+        char *temporary = (char *)malloc(path_length + 5);
+        FILE *destination = NULL;
+        if (source != NULL && temporary != NULL) {
+            memcpy(temporary, path, path_length);
+            memcpy(temporary + path_length, ".tmp", 5);
+            destination = fopen(temporary, "wb");
+        }
+        if (source != NULL && destination != NULL) {
+            int status;
+            char *line = NULL;
+            while ((status = read_line(source, &line)) == 1) {
+                char *check = copy_text(line);
+                char *fields[5];
+                char *cursor = check;
+                size_t field;
+                int keep = 1;
+                if (check != NULL && check[0] != '#') {
+                    for (field = 0; field < 5; field++) {
+                        fields[field] = cursor;
+                        if (field < 4) {
+                            cursor = strchr(cursor, '\t');
+                            if (cursor == NULL) break;
+                            *cursor++ = '\0';
+                        }
+                    }
+                    if (field == 5) {
+                        fields[4][strcspn(fields[4], "\r\n")] = '\0';
+                        keep = package_file_exists(fields[4]);
+                    }
+                }
+                if (keep) fputs(line, destination);
+                free(check);
+                free(line);
+                line = NULL;
+            }
+            fclose(source);
+            source = NULL;
+            if (fclose(destination) == 0)
+                replace_file(temporary, path, cleanup_error,
+                             sizeof(cleanup_error));
+            destination = NULL;
+        }
+        if (source != NULL) fclose(source);
+        if (destination != NULL) fclose(destination);
+        free(temporary);
+    }
+    free(path);
     {
         char stats_error[256] = {0};
         char *stats_path = play_stats_registry_path(stats_error,
@@ -611,6 +674,32 @@ int zsharp_registry_list_packages(ZSharpInstalledPackageList *packages,
                 free(line);
             }
             fclose(stats);
+        }
+    }
+    {
+        char achievement_error[256] = {0};
+        char *achievement_path = registry_file_path(
+            "achievements.registry", achievement_error,
+            sizeof(achievement_error));
+        FILE *achievements = achievement_path == NULL
+            ? NULL : fopen(achievement_path, "rb");
+        free(achievement_path);
+        if (achievements != NULL) {
+            for (;;) {
+                char *line = NULL;
+                char *tab;
+                size_t item_index;
+                int status = read_line(achievements, &line);
+                if (status <= 0) break;
+                tab = strchr(line, '\t');
+                if (tab != NULL) *tab = '\0';
+                for (item_index = 0; tab != NULL && item_index < packages->count;
+                     item_index++)
+                    if (strcmp(packages->items[item_index].project_id, line) == 0)
+                        packages->items[item_index].achievement_count++;
+                free(line);
+            }
+            fclose(achievements);
         }
     }
     return 1;
@@ -775,4 +864,54 @@ done:
     free(temporary);
     free(path);
     return ok;
+}
+
+int zsharp_registry_award_achievement(const char *project_id,
+                                      const char *achievement_id,
+                                      int *newly_awarded,
+                                      char *error, size_t error_size) {
+    char *path;
+    FILE *file;
+    char *line = NULL;
+    int status;
+    if (newly_awarded != NULL) *newly_awarded = 0;
+    if (!text_is_registry_safe(project_id) ||
+        !text_is_registry_safe(achievement_id)) {
+        registry_error(error, error_size, "invalid achievement ID", NULL);
+        return 0;
+    }
+    path = registry_file_path("achievements.registry", error, error_size);
+    if (path == NULL || !make_parent_directories(path, error, error_size)) {
+        free(path); return 0;
+    }
+    file = fopen(path, "rb");
+    if (file != NULL) {
+        while ((status = read_line(file, &line)) == 1) {
+            char *tab = strchr(line, '\t');
+            if (tab != NULL) {
+                *tab++ = '\0';
+                tab[strcspn(tab, "\t\r\n")] = '\0';
+                if (strcmp(line, project_id) == 0 &&
+                    strcmp(tab, achievement_id) == 0) {
+                    free(line); fclose(file); free(path); return 1;
+                }
+            }
+            free(line); line = NULL;
+        }
+        fclose(file);
+    }
+    file = fopen(path, "ab");
+    if (file == NULL) {
+        registry_error(error, error_size, "could not save achievement", path);
+        free(path); return 0;
+    }
+    fprintf(file, "%s\t%s\t%lld\n", project_id, achievement_id,
+            (long long)time(NULL));
+    if (fclose(file) != 0) {
+        registry_error(error, error_size, "could not save achievement", path);
+        free(path); return 0;
+    }
+    free(path);
+    if (newly_awarded != NULL) *newly_awarded = 1;
+    return 1;
 }

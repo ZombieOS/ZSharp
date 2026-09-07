@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.zombieos"
-version = "1.0.2.0"
+version = "1.0.2.1"
 
 repositories {
     mavenCentral()

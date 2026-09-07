@@ -15,6 +15,11 @@ typedef struct ZSharpDependency {
     uint32_t version[ZSHARP_VERSION_PART_COUNT];
 } ZSharpDependency;
 
+typedef struct ZSharpSplash {
+    char *path;
+    double duration_seconds;
+} ZSharpSplash;
+
 typedef struct ZSharpSettings {
     char *project_name;
     char *project_id;
@@ -29,6 +34,9 @@ typedef struct ZSharpSettings {
     int has_window;
     char *window_startup;
     char *window_uninstall;
+    char *game_start_scene;
+    ZSharpSplash *splashes;
+    size_t splash_count;
 } ZSharpSettings;
 
 void zsharp_settings_init(ZSharpSettings *settings);

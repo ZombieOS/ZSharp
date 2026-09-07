@@ -1,0 +1,8 @@
+zsharp = type.object
+
+noticed object GalleryCircle[] (
+ shape: circle:
+ width: 180:
+ height: 180:
+ color: #00E5FF:
+)

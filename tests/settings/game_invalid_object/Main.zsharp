@@ -1,4 +1,4 @@
-zsharp = type.script:2D
+zsharp = type.script
 
 noticed room Main[] (
  noticed brain Start[DR] (

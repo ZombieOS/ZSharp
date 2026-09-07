@@ -24,6 +24,7 @@ typedef struct ZSharpInstalledPackage {
     char *icon_path;
     uint64_t total_play_seconds;
     int64_t last_played;
+    size_t achievement_count;
 } ZSharpInstalledPackage;
 
 typedef struct ZSharpInstalledPackageList {
@@ -47,6 +48,11 @@ int zsharp_registry_forget_package(const char *project_id,
 int zsharp_registry_record_play(const char *project_id, uint64_t seconds,
                                 int64_t started_at, char *error,
                                 size_t error_size);
+
+int zsharp_registry_award_achievement(const char *project_id,
+                                      const char *achievement_id,
+                                      int *newly_awarded,
+                                      char *error, size_t error_size);
 
 void zsharp_registry_package_list_free(ZSharpInstalledPackageList *packages);
 

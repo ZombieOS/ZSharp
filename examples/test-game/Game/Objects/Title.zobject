@@ -1,0 +1,9 @@
+zsharp = type.object
+
+noticed object Title[] (
+ shape: text:
+ text: "Z# VULKAN PLAYGROUND":
+ scaleX: 2.5:
+ color: #FFFFFF:
+ layer: 20:
+)

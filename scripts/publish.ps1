@@ -198,13 +198,43 @@ foreach ($platform in $platforms) {
     } else { "zsharp" }
     $droppedRuntime = Join-Path $drop $executableName
     if (Test-Path -LiteralPath $droppedRuntime -PathType Leaf) {
+        $droppedVersionFile = Join-Path $drop "zsharp.version"
+        $droppedChecksumFile = $droppedRuntime + ".sha256"
+        if (-not (Test-Path -LiteralPath $droppedVersionFile -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $droppedChecksumFile -PathType Leaf)) {
+            throw "The $platform workflow artifact is missing its verification files"
+        }
+        $droppedVersion =
+            (Get-Content -LiteralPath $droppedVersionFile -Raw).Trim()
+        if ($droppedVersion -ne $version) {
+            throw "The $platform workflow artifact contains Z# $droppedVersion instead of Z# $version"
+        }
+        $expectedRuntimeChecksum =
+            (Get-Content -LiteralPath $droppedChecksumFile -Raw).Trim().ToLowerInvariant()
+        $actualRuntimeChecksum =
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $droppedRuntime).Hash.ToLowerInvariant()
+        if ($expectedRuntimeChecksum -ne $actualRuntimeChecksum) {
+            throw "The $platform workflow artifact runtime checksum does not match"
+        }
         $support = @()
         $molten = Join-Path $drop "libMoltenVK.dylib"
         if (Test-Path -LiteralPath $molten -PathType Leaf) {
+            $moltenChecksumFile = $molten + ".sha256"
+            if (-not (Test-Path -LiteralPath $moltenChecksumFile -PathType Leaf)) {
+                throw "The $platform workflow artifact is missing the MoltenVK checksum"
+            }
+            $expectedMoltenChecksum =
+                (Get-Content -LiteralPath $moltenChecksumFile -Raw).Trim().ToLowerInvariant()
+            $actualMoltenChecksum =
+                (Get-FileHash -Algorithm SHA256 -LiteralPath $molten).Hash.ToLowerInvariant()
+            if ($expectedMoltenChecksum -ne $actualMoltenChecksum) {
+                throw "The $platform workflow artifact MoltenVK checksum does not match"
+            }
             $support += $molten
         }
         & (Join-Path $PSScriptRoot "stage-native-runtime.ps1") `
-            -Platform $platform -Runtime $droppedRuntime -Support $support
+            -Platform $platform -Runtime $droppedRuntime -Support $support `
+            -RuntimeVersion $droppedVersion
         if ($LASTEXITCODE -ne 0) { throw "Could not stage $platform" }
     }
 }
@@ -257,11 +287,20 @@ $zig = Find-Tool -Command "zig" -FallbackPattern "zig.exe"
 $testApp = Join-Path `
     ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) `
     "Downloads\Z# Test App\Packages\ZSharp-Test-App.zapp"
+$testGame = Join-Path $ProjectRoot `
+    "examples\test-game\Packages\ZSharpGameTest.zgame"
 $installerArguments = @(
     "-Zig", $zig, "-Version", $version, "-PublishingRoot", $outRoot
 )
+$changelog = Get-Content -LiteralPath (Join-Path $ProjectRoot "CHANGELOG.md") -Raw
+if ($changelog -match "(?m)^##\s+$([regex]::Escape($version)).*\bBeta\b") {
+    $installerArguments += "-Beta"
+}
 if (Test-Path -LiteralPath $testApp -PathType Leaf) {
     $installerArguments += @("-TestAppPackage", $testApp)
+}
+if (Test-Path -LiteralPath $testGame -PathType Leaf) {
+    $installerArguments += @("-TestGamePackage", $testGame)
 }
 $buildInstallerArguments = @(
     "-NoProfile", "-File",

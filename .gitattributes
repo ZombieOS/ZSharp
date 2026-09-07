@@ -1,2 +1,8 @@
 java/src/main/resources/META-INF/zsharp/runtime/**/zsharp binary
 java/src/main/resources/META-INF/zsharp/runtime/**/zsharp.exe binary
+
+project.zsettings linguist-language=JavaScript
+*.zsharp linguist-language=JavaScript
+*.zscene linguist-language=JavaScript
+*.zobject linguist-language=JavaScript
+*.zss linguist-language=CSS

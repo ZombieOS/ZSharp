@@ -37,6 +37,7 @@ typedef struct WindowControl {
     int has_text_color;
     int has_button_color;
     int is_image_input;
+    int is_package_input;
     int is_multiline;
     int placeholder_active;
     int hovered;
@@ -519,6 +520,29 @@ static void choose_image(WindowState *state, WindowControl *control) {
     SetWindowTextA(control->handle, file);
 }
 
+static void choose_package(WindowState *state, WindowControl *control) {
+    OPENFILENAMEA dialog;
+    char file[MAX_PATH] = {0};
+    ZSharpUIProperty *contents;
+    memset(&dialog, 0, sizeof(dialog));
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = state->window;
+    dialog.lpstrFile = file;
+    dialog.nMaxFile = sizeof(file);
+    dialog.lpstrFilter =
+        "Z# packages (*.zapp;*.zgame)\0*.zapp;*.zgame\0\0";
+    dialog.lpstrDefExt = "zapp";
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST |
+                   OFN_HIDEREADONLY;
+    if (!GetOpenFileNameA(&dialog)) return;
+    contents = find_property(control->element, "contents");
+    if (contents != NULL) {
+        free(contents->text_value);
+        contents->text_value = zsharp_copy_text(file, strlen(file));
+    }
+    SetWindowTextA(control->handle, file);
+}
+
 static void set_vertical_scroll(WindowState *state, int position) {
     int maximum;
     RECT area;
@@ -582,6 +606,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
             if (HIWORD(wparam) == BN_CLICKED) {
                 if (control->is_image_input) {
                     choose_image(state, control);
+                } else if (control->is_package_input) {
+                    choose_package(state, control);
                 } else if (control->element->type == ZUI_BUTTON) {
                     run_callback(state, control->element, "left");
                 }
@@ -1155,14 +1181,17 @@ static int create_controls(WindowState *state, int client_width,
             ZSharpUIProperty *display = find_property(element, "display");
             int is_image = type != NULL &&
                            strcmp(type->text_value, "image") == 0;
-            int is_multiline = !is_image &&
+            int is_package = type != NULL &&
+                             strcmp(type->text_value, "package") == 0;
+            int is_multiline = !is_image && !is_package &&
                 status_property(element, "multiline", 0);
             int wraps = status_property(element, "wrap", 1);
             color_property = find_property(element, "textColor");
-            class_name = is_image ? "BUTTON" : "EDIT";
-            display_text = (is_image || is_multiline) && display != NULL
+            class_name = (is_image || is_package) ? "BUTTON" : "EDIT";
+            display_text = (is_image || is_package || is_multiline) &&
+                display != NULL
                 ? display->text_value : "";
-            if (is_image) {
+            if (is_image || is_package) {
                 style |= BS_PUSHBUTTON;
             } else if (is_multiline) {
                 style |= WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL |
@@ -1230,12 +1259,15 @@ static int create_controls(WindowState *state, int client_width,
             ZSharpUIProperty *display = find_property(element, "display");
             control->is_image_input = type != NULL &&
                 strcmp(type->text_value, "image") == 0;
+            control->is_package_input = type != NULL &&
+                strcmp(type->text_value, "package") == 0;
             control->is_multiline = !control->is_image_input &&
+                !control->is_package_input &&
                 status_property(element, "multiline", 0);
             control->placeholder_active = control->is_multiline &&
                 display != NULL && display->text_value != NULL &&
                 display->text_value[0] != '\0';
-            if (!control->is_image_input) {
+            if (!control->is_image_input && !control->is_package_input) {
                 ZSharpUIProperty *padding = find_property(element, "padding");
                 ZSharpUIProperty *padding_left = find_property(
                     element, "paddingLeft");
@@ -1251,7 +1283,8 @@ static int create_controls(WindowState *state, int client_width,
                              EC_LEFTMARGIN | EC_RIGHTMARGIN,
                              MAKELPARAM(left, right));
             }
-            if (!control->is_image_input && !control->is_multiline &&
+            if (!control->is_image_input && !control->is_package_input &&
+                !control->is_multiline &&
                 display != NULL &&
                 display->text_value != NULL) {
                 WCHAR *cue = utf8_to_wide(display->text_value);

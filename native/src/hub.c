@@ -34,6 +34,7 @@
 
 typedef struct HubState {
     ZSharpInstalledPackageList packages;
+    ZSharpUpdatePreferences update_preferences;
 } HubState;
 
 #define ZSHARP_DEFAULT_ICON_URL \
@@ -393,7 +394,7 @@ static int add_package_input(ZSharpProgram *program) {
            add_property(element, "display", ZUI_PROPERTY_TEXT,
                         "Paste a .zapp or .zgame path here", 0,
                         ZUI_UNIT_NONE) &&
-           add_property(element, "type", ZUI_PROPERTY_IDENTIFIER, "text", 0,
+           add_property(element, "type", ZUI_PROPERTY_IDENTIFIER, "package", 0,
                         ZUI_UNIT_NONE) &&
            add_property(element, "contents", ZUI_PROPERTY_TEXT, "", 0,
                         ZUI_UNIT_NONE) &&
@@ -413,6 +414,7 @@ static int add_package_input(ZSharpProgram *program) {
 
 static int build_hub_program(ZSharpProgram *program,
                              const ZSharpInstalledPackageList *packages,
+                             const ZSharpUpdatePreferences *preferences,
                              char *error, size_t error_size) {
     ZSharpUIElement *design;
     char section[128];
@@ -460,7 +462,25 @@ static int build_hub_program(ZSharpProgram *program,
                   "#E4E4EC", 260, -106, 390, 28, "paragraph", 15, 0) ||
         !add_text(program, "DetailsAchievements",
                   "Achievements: Coming soon", "#9A9AAA", 260, -154,
-                  390, 30, "paragraph", 15, 0))
+                  390, 30, "paragraph", 15, 0) ||
+        !add_text(program, "UpdateSettings", "UPDATE SETTINGS", "#A9A9BA",
+                  260, -190, 390, 26, "subheader", 14, 1) ||
+        !add_button(program, "AutomaticUpdates",
+                    preferences->automatic_updates
+                        ? "Auto updates: ON" : "Auto updates: OFF",
+                    "@hub-toggle-auto", 260, -220, 180,
+                    preferences->automatic_updates ? "#236B4D" : "#542633") ||
+        !add_button(program, "BetaUpdates",
+                    preferences->beta_updates
+                        ? "Beta updates: ON" : "Beta updates: OFF",
+                    "@hub-toggle-beta", 260, -258, 180,
+                    preferences->beta_updates ? "#6E45E2" : "#542633") ||
+        !add_button(program, "AutomaticBetaUpdates",
+                    preferences->automatic_beta_updates
+                        ? "Auto beta updates: ON" : "Auto beta updates: OFF",
+                    "@hub-toggle-auto-beta", 260, -296, 180,
+                    preferences->automatic_beta_updates
+                        ? "#6E45E2" : "#542633"))
         return set_error(error, error_size, "out of memory");
     snprintf(section, sizeof(section), "Installed apps and games (%lu)",
              (unsigned long)packages->count);
@@ -642,6 +662,42 @@ static void hub_set_text(const ZSharpWindowRuntime *runtime,
                           message, ZUI_UNIT_NONE, ignored, sizeof(ignored));
 }
 
+static void hub_set_button(const ZSharpWindowRuntime *runtime,
+                           const char *element, const char *text,
+                           const char *color) {
+    char path[128];
+    char ignored[256] = {0};
+    if (runtime == NULL || runtime->set_property == NULL) return;
+    snprintf(path, sizeof(path), "ZSharpHub.%s.text", element);
+    runtime->set_property(runtime->state, path, ZWINDOW_VALUE_TEXT,
+                          text, ZUI_UNIT_NONE, ignored, sizeof(ignored));
+    snprintf(path, sizeof(path), "ZSharpHub.%s.buttonColor", element);
+    runtime->set_property(runtime->state, path, ZWINDOW_VALUE_COLOR,
+                          color, ZUI_UNIT_NONE, ignored, sizeof(ignored));
+}
+
+static int save_hub_update_preferences(
+    HubState *state, const ZSharpWindowRuntime *runtime,
+    char *error, size_t error_size) {
+    if (!zsharp_update_preferences_save(&state->update_preferences,
+                                        error, error_size)) return 0;
+    hub_set_button(runtime, "AutomaticUpdates",
+        state->update_preferences.automatic_updates
+            ? "Auto updates: ON" : "Auto updates: OFF",
+        state->update_preferences.automatic_updates ? "#236B4D" : "#542633");
+    hub_set_button(runtime, "BetaUpdates",
+        state->update_preferences.beta_updates
+            ? "Beta updates: ON" : "Beta updates: OFF",
+        state->update_preferences.beta_updates ? "#6E45E2" : "#542633");
+    hub_set_button(runtime, "AutomaticBetaUpdates",
+        state->update_preferences.automatic_beta_updates
+            ? "Auto beta updates: ON" : "Auto beta updates: OFF",
+        state->update_preferences.automatic_beta_updates
+            ? "#6E45E2" : "#542633");
+    hub_set_status(runtime, "Update settings saved.");
+    return 1;
+}
+
 static void format_playtime(uint64_t seconds, char *output,
                             size_t output_size) {
     if (seconds >= 86400u) {
@@ -696,6 +752,7 @@ static void show_package_details(const ZSharpWindowRuntime *runtime,
     char zsharp_version[128];
     char playtime[160];
     char last_played[160];
+    char achievements[160];
     snprintf(kind, sizeof(kind), "Type: %s   PID: %s",
              item->kind == ZSHARP_PACKAGE_GAME ? "Game" : "App",
              item->project_id);
@@ -712,14 +769,15 @@ static void show_package_details(const ZSharpWindowRuntime *runtime,
                  item->zsharp_version[3]);
     format_playtime(item->total_play_seconds, playtime, sizeof(playtime));
     format_last_played(item->last_played, last_played, sizeof(last_played));
+    snprintf(achievements, sizeof(achievements), "Achievements: %lu earned",
+             (unsigned long)item->achievement_count);
     hub_set_text(runtime, "DetailsTitle", item->project_name);
     hub_set_text(runtime, "DetailsKind", kind);
     hub_set_text(runtime, "DetailsVersion", version);
     hub_set_text(runtime, "DetailsZSharpVersion", zsharp_version);
     hub_set_text(runtime, "DetailsPlaytime", playtime);
     hub_set_text(runtime, "DetailsLastPlayed", last_played);
-    hub_set_text(runtime, "DetailsAchievements",
-                 "Achievements: Coming soon");
+    hub_set_text(runtime, "DetailsAchievements", achievements);
 }
 
 static char *trimmed_package_path(char *value) {
@@ -747,6 +805,29 @@ static int hub_callback(void *user_data, const char *target,
         hub_set_status(runtime,
                        "Checking for updates. You will receive a notification.");
         return 1;
+    }
+    if (strcmp(target, "@hub-toggle-auto") == 0) {
+        state->update_preferences.automatic_updates =
+            !state->update_preferences.automatic_updates;
+        if (!state->update_preferences.automatic_updates)
+            state->update_preferences.automatic_beta_updates = 0;
+        return save_hub_update_preferences(state, runtime, error, error_size);
+    }
+    if (strcmp(target, "@hub-toggle-beta") == 0) {
+        state->update_preferences.beta_updates =
+            !state->update_preferences.beta_updates;
+        if (!state->update_preferences.beta_updates)
+            state->update_preferences.automatic_beta_updates = 0;
+        return save_hub_update_preferences(state, runtime, error, error_size);
+    }
+    if (strcmp(target, "@hub-toggle-auto-beta") == 0) {
+        state->update_preferences.automatic_beta_updates =
+            !state->update_preferences.automatic_beta_updates;
+        if (state->update_preferences.automatic_beta_updates) {
+            state->update_preferences.automatic_updates = 1;
+            state->update_preferences.beta_updates = 1;
+        }
+        return save_hub_update_preferences(state, runtime, error, error_size);
     }
     if (strcmp(target, "@hub-add") == 0) {
         ZSharpWindowReadType value_type;
@@ -869,6 +950,8 @@ int zsharp_hub_show(char *error, size_t error_size) {
     ZSharpProgram program;
     int result;
     memset(&state, 0, sizeof(state));
+    if (!zsharp_update_preferences_load(&state.update_preferences,
+                                        error, error_size)) return 0;
     if (!zsharp_registry_list_packages(&state.packages, error, error_size))
         return 0;
     if (getenv("ZSHARP_HUB_CONSOLE_ONLY") != NULL) {
@@ -876,7 +959,8 @@ int zsharp_hub_show(char *error, size_t error_size) {
         return zsharp_hub_list(error, error_size);
     }
     prepare_package_icons(&state.packages);
-    if (!build_hub_program(&program, &state.packages, error, error_size)) {
+    if (!build_hub_program(&program, &state.packages,
+                           &state.update_preferences, error, error_size)) {
         zsharp_registry_package_list_free(&state.packages);
         zsharp_program_free(&program);
         return 0;

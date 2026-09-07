@@ -420,7 +420,7 @@ static int crc32_file(const char *path, uint32_t *crc) {
 
 static int validate_sources(const PackageFileList *files,
                             const ZSharpSettings *settings,
-                            const char *root, char *error,
+                            const char *root, int force_game, char *error,
                             size_t error_size) {
     size_t index;
     for (index = 0; index < files->count; index++) {
@@ -439,6 +439,8 @@ static int validate_sources(const PackageFileList *files,
             else package_error(error, error_size, "%s", parse_error);
             return 0;
         }
+        if (force_game && program.script_type == ZSCRIPT_NORMAL)
+            program.script_type = ZSCRIPT_GAME;
         if (!zsharp_project_validate(&program, settings, root, error,
                                      error_size)) {
             zsharp_program_free(&program);
@@ -451,70 +453,58 @@ static int validate_sources(const PackageFileList *files,
 
 static char *find_game_startup(const PackageFileList *files, char *error,
                                size_t error_size) {
-    char *first_2d = NULL;
-    char *first_3d = NULL;
+    char *first_script = NULL;
     size_t index;
     for (index = 0; index < files->count; index++) {
         ZSharpProgram program;
         ZSharpDiagnostic diagnostic;
         char parse_error[512] = {0};
-        char **candidate;
         if (!ends_with(files->items[index].relative,
                        ZSHARP_SOURCE_EXTENSION))
             continue;
         if (!zsharp_project_parse_file(files->items[index].absolute, &program,
                                        &diagnostic, parse_error,
                                        sizeof(parse_error))) {
-            free(first_2d);
-            free(first_3d);
+            free(first_script);
             package_error(error, error_size, "%s",
                           diagnostic.message[0] != '\0'
                               ? diagnostic.message
                               : parse_error);
             return NULL;
         }
-        candidate = program.script_type == ZSCRIPT_3D
-                        ? &first_3d
-                        : program.script_type == ZSCRIPT_2D ? &first_2d
-                                                            : NULL;
-        if (candidate != NULL &&
-            (*candidate == NULL ||
-             strcmp(files->items[index].relative, *candidate) < 0)) {
+        if (program.script_type == ZSCRIPT_NORMAL &&
+            (first_script == NULL ||
+             strcmp(files->items[index].relative, first_script) < 0)) {
             char *replacement = copy_text(files->items[index].relative);
             if (replacement == NULL) {
                 zsharp_program_free(&program);
-                free(first_2d);
-                free(first_3d);
+                free(first_script);
                 package_error(error, error_size, "out of memory");
                 return NULL;
             }
-            free(*candidate);
-            *candidate = replacement;
+            free(first_script);
+            first_script = replacement;
         }
         zsharp_program_free(&program);
     }
-    if (first_3d != NULL) {
-        free(first_2d);
-        return first_3d;
-    }
-    if (first_2d != NULL) return first_2d;
+    if (first_script != NULL) return first_script;
     package_error(error, error_size,
-                  "game packages require at least one "
-                  "zsharp = type.script:2D or type.script:3D file");
+                  "game packages require at least one zsharp = type.script file");
     return NULL;
 }
 
 static int validate_game_objects(const PackageFileList *files,
+                                 const ZSharpSettings *settings,
                                  const char *root,
                                  const char *startup_relative,
                                  char *error, size_t error_size) {
     size_t index;
+    if (!zsharp_game_model_validate(root, error, error_size)) return 0;
     for (index = 0; index < files->count; index++) {
         if (strcmp(files->items[index].relative, startup_relative) == 0) {
             ZSharpProgram program;
             ZSharpDiagnostic diagnostic;
             char parse_error[512] = {0};
-            int is_3d;
             int ok;
             if (!zsharp_project_parse_file(files->items[index].absolute,
                                            &program, &diagnostic,
@@ -525,14 +515,14 @@ static int validate_game_objects(const PackageFileList *files,
                                   ? diagnostic.message : parse_error);
                 return 0;
             }
-            is_3d = program.script_type == ZSCRIPT_3D;
+            program.script_type = ZSCRIPT_GAME;
+            ok = zsharp_project_validate(&program, settings, root, error,
+                                         error_size);
             zsharp_program_free(&program);
-            ok = zsharp_game_model_validate(root, is_3d, error, error_size);
             return ok;
         }
     }
-    package_error(error, error_size,
-                  "could not find the game startup while validating objects");
+    package_error(error, error_size, "could not validate the game startup");
     return 0;
 }
 
@@ -540,6 +530,7 @@ static int append_startup_bytecode(PackageFileList *files,
                                    const ZSharpSettings *settings,
                                    const char *root,
                                    const char *startup_relative,
+                                   int force_game,
                                    const char *output_path,
                                    char **temporary_path, char *error,
                                    size_t error_size) {
@@ -564,6 +555,7 @@ static int append_startup_bytecode(PackageFileList *files,
                           diagnostic.column, diagnostic.message);
         goto done;
     }
+    if (force_game) program.script_type = ZSCRIPT_GAME;
     if (!zsharp_project_validate(&program, settings, root, error,
                                  error_size)) {
         zsharp_program_free(&program);
@@ -936,18 +928,20 @@ int zsharp_package_create(const char *project_path, const char *output_path,
         return 0;
     }
     if (!collect_files(root, "", &files, error, error_size) ||
-        !validate_sources(&files, &settings, root, error, error_size))
+        !validate_sources(&files, &settings, root,
+                          kind == ZSHARP_PACKAGE_GAME, error, error_size))
         goto done;
     if (kind == ZSHARP_PACKAGE_GAME) {
         game_startup = find_game_startup(&files, error, error_size);
         if (game_startup == NULL) goto done;
-        if (!validate_game_objects(&files, root, game_startup, error,
+        if (!validate_game_objects(&files, &settings, root, game_startup, error,
                                    error_size)) goto done;
         startup_relative = game_startup;
     } else {
         startup_relative = settings.window_startup;
     }
     if (!append_startup_bytecode(&files, &settings, root, startup_relative,
+                                 kind == ZSHARP_PACKAGE_GAME,
                                  output_path,
                                  &bytecode_temporary, error, error_size))
         goto done;
@@ -1089,12 +1083,13 @@ static int create_source_zip(const char *project_path,
         goto done;
     }
     if (!collect_files(root, "", &files, error, error_size) ||
-        !validate_sources(&files, &settings, root, error, error_size))
+        !validate_sources(&files, &settings, root,
+                          kind == ZSHARP_PACKAGE_GAME, error, error_size))
         goto done;
     if (kind == ZSHARP_PACKAGE_GAME) {
         game_startup = find_game_startup(&files, error, error_size);
         if (game_startup == NULL) goto done;
-        if (!validate_game_objects(&files, root, game_startup, error,
+        if (!validate_game_objects(&files, &settings, root, game_startup, error,
                                    error_size)) goto done;
     }
     if (files.count == 0 || files.count > UINT16_MAX) {

@@ -32,7 +32,7 @@ typedef struct ModelParser {
     const char *path;
     const char *source_name;
     ZSharpGameModel *model;
-    int file_is_3d;
+    int definition_mode;
     char *error;
     size_t error_size;
     int failed;
@@ -275,6 +275,8 @@ static int replace_text(char **target, const char *value) {
     return 1;
 }
 
+static int safe_relative_asset(const char *path);
+
 static ZSharpGameScene *add_scene(ModelParser *parser, char *name) {
     ZSharpGameScene *resized;
     ZSharpGameScene *scene;
@@ -298,9 +300,15 @@ static ZSharpGameScene *add_scene(ModelParser *parser, char *name) {
     scene = &resized[parser->model->scene_count++];
     memset(scene, 0, sizeof(*scene));
     scene->name = name;
+    scene->source_file = zsharp_copy_text(parser->source_name,
+                                           strlen(parser->source_name));
+    if (scene->source_file == NULL) {
+        parser_fail(parser, &parser->current, "out of memory");
+        return NULL;
+    }
     scene->background = 0x08080bu;
     scene->gravity_y = -900.0f;
-    scene->camera_z = parser->file_is_3d ? 8.0f : 0.0f;
+    scene->camera_z = 0.0f;
     scene->camera_fov = 70.0f;
     return scene;
 }
@@ -308,9 +316,13 @@ static ZSharpGameScene *add_scene(ModelParser *parser, char *name) {
 static ZSharpGameObject *add_object(ModelParser *parser, char *name) {
     ZSharpGameObject *resized;
     ZSharpGameObject *object;
+    ZSharpGameObject **items = parser->definition_mode
+        ? &parser->model->definitions : &parser->model->objects;
+    size_t *count = parser->definition_mode
+        ? &parser->model->definition_count : &parser->model->object_count;
     size_t index;
-    for (index = 0; index < parser->model->object_count; index++) {
-        if (strcmp(parser->model->objects[index].name, name) == 0) {
+    for (index = 0; index < *count; index++) {
+        if (strcmp((*items)[index].name, name) == 0) {
             free(name);
             parser_fail(parser, &parser->current,
                         "game object names must be unique across the project");
@@ -318,15 +330,14 @@ static ZSharpGameObject *add_object(ModelParser *parser, char *name) {
         }
     }
     resized = (ZSharpGameObject *)realloc(
-        parser->model->objects,
-        (parser->model->object_count + 1) * sizeof(*resized));
+        *items, (*count + 1) * sizeof(*resized));
     if (resized == NULL) {
         free(name);
         parser_fail(parser, &parser->current, "out of memory");
         return NULL;
     }
-    parser->model->objects = resized;
-    object = &resized[parser->model->object_count++];
+    *items = resized;
+    object = &resized[(*count)++];
     memset(object, 0, sizeof(*object));
     object->name = name;
     object->source_file = zsharp_copy_text(parser->source_name,
@@ -335,11 +346,10 @@ static ZSharpGameObject *add_object(ModelParser *parser, char *name) {
         parser_fail(parser, &parser->current, "out of memory");
         return NULL;
     }
-    object->shape = parser->file_is_3d ? ZGAME_SHAPE_CUBE
-                                      : ZGAME_SHAPE_RECTANGLE;
+    object->shape = ZGAME_SHAPE_RECTANGLE;
     object->body = ZGAME_BODY_STATIC;
     object->collider = ZGAME_COLLIDER_NONE;
-    object->width = parser->file_is_3d ? 1.0f : 64.0f;
+    object->width = 64.0f;
     object->height = object->width;
     object->depth = object->width;
     object->scale_x = object->scale_y = object->scale_z = 1.0f;
@@ -355,20 +365,40 @@ static ZSharpGameObject *add_object(ModelParser *parser, char *name) {
 
 static int apply_scene_field(ModelParser *parser, ZSharpGameScene *scene,
                              const char *field, const ModelValue *value) {
+    if (strcmp(field, "title") == 0) {
+        if (value->type != MODEL_TEXT) {
+            parser_fail(parser, &parser->current,
+                        "scene titles require quoted text");
+            return 0;
+        }
+        return replace_text(&scene->title, value->text);
+    }
+    if (strcmp(field, "icon") == 0) {
+        if (value->type != MODEL_TEXT || !safe_relative_asset(value->text)) {
+            parser_fail(parser, &parser->current,
+                        "scene icons require a safe quoted project-relative path");
+            return 0;
+        }
+        return replace_text(&scene->icon, value->text);
+    }
     if (strcmp(field, "background") == 0)
         return value_color(parser, value, &scene->background);
     if (strcmp(field, "gravityX") == 0)
         return value_number(parser, value, &scene->gravity_x);
     if (strcmp(field, "gravityY") == 0)
         return value_number(parser, value, &scene->gravity_y);
-    if (strcmp(field, "gravityZ") == 0)
+    if (strcmp(field, "gravityZ") == 0) {
+        parser->model->is_3d = 1;
         return value_number(parser, value, &scene->gravity_z);
+    }
     if (strcmp(field, "cameraX") == 0)
         return value_number(parser, value, &scene->camera_x);
     if (strcmp(field, "cameraY") == 0)
         return value_number(parser, value, &scene->camera_y);
-    if (strcmp(field, "cameraZ") == 0)
+    if (strcmp(field, "cameraZ") == 0) {
+        parser->model->is_3d = 1;
         return value_number(parser, value, &scene->camera_z);
+    }
     if (strcmp(field, "cameraFov") == 0)
         return value_number(parser, value, &scene->camera_fov);
     parser_fail(parser, &parser->current, "unknown scene field");
@@ -394,7 +424,7 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
         else if (strcmp(value->text, "sprite") == 0)
             object->shape = ZGAME_SHAPE_SPRITE;
         else if (strcmp(value->text, "cube") == 0)
-            object->shape = ZGAME_SHAPE_CUBE;
+            object->shape = ZGAME_SHAPE_CUBE, parser->model->is_3d = 1;
         else if (strcmp(value->text, "text") == 0)
             object->shape = ZGAME_SHAPE_TEXT;
         else {
@@ -437,30 +467,34 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
 #define NUMBER_FIELD(name, member)                                             \
     if (strcmp(field, name) == 0)                                              \
         return value_number(parser, value, &object->member)
+#define NUMBER_FIELD_3D(name, member)                                          \
+    if (strcmp(field, name) == 0) {                                            \
+        parser->model->is_3d = 1;                                             \
+        return value_number(parser, value, &object->member);                   \
+    }
     NUMBER_FIELD("positionX", x);
     NUMBER_FIELD("positionY", y);
-    NUMBER_FIELD("positionZ", z);
+    NUMBER_FIELD_3D("positionZ", z);
     NUMBER_FIELD("width", width);
     NUMBER_FIELD("height", height);
-    NUMBER_FIELD("depth", depth);
+    NUMBER_FIELD_3D("depth", depth);
+    NUMBER_FIELD_3D("length", depth);
     NUMBER_FIELD("rotation", rotation);
     NUMBER_FIELD("scaleX", scale_x);
     NUMBER_FIELD("scaleY", scale_y);
-    NUMBER_FIELD("scaleZ", scale_z);
+    NUMBER_FIELD_3D("scaleZ", scale_z);
     NUMBER_FIELD("velocityX", velocity_x);
     NUMBER_FIELD("velocityY", velocity_y);
-    NUMBER_FIELD("velocityZ", velocity_z);
+    NUMBER_FIELD_3D("velocityZ", velocity_z);
     NUMBER_FIELD("mass", mass);
     NUMBER_FIELD("gravityScale", gravity_scale);
     NUMBER_FIELD("restitution", restitution);
     NUMBER_FIELD("friction", friction);
-    NUMBER_FIELD("controlX", control_x);
-    NUMBER_FIELD("controlY", control_y);
-    NUMBER_FIELD("jumpSpeed", jump_speed);
     NUMBER_FIELD("audioVolume", audio_volume);
     NUMBER_FIELD("tone", tone_frequency);
     NUMBER_FIELD("toneDuration", tone_duration);
 #undef NUMBER_FIELD
+#undef NUMBER_FIELD_3D
     if (strcmp(field, "layer") == 0) {
         if (!value_number(parser, value, &number)) return 0;
         object->layer = (int)number;
@@ -478,13 +512,14 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
     STATUS_FIELD("audioOnCollision", audio_on_collision);
 #undef STATUS_FIELD
     if (strcmp(field, "text") == 0 || strcmp(field, "asset") == 0 ||
-        strcmp(field, "audio") == 0) {
+        strcmp(field, "texture") == 0 || strcmp(field, "audio") == 0) {
         char **target = strcmp(field, "text") == 0 ? &object->text
-                       : strcmp(field, "asset") == 0 ? &object->asset_path
+                       : (strcmp(field, "asset") == 0 ||
+                          strcmp(field, "texture") == 0) ? &object->asset_path
                                                       : &object->audio_path;
         if (value->type != MODEL_TEXT) {
             parser_fail(parser, &parser->current,
-                        "text, asset, and audio fields require quoted text");
+                        "text, texture, asset, and audio fields require quoted text");
             return 0;
         }
         if (!replace_text(target, value->text)) {
@@ -532,9 +567,350 @@ static int parse_block(ModelParser *parser, int is_scene, char *name) {
                               "expected ')' after game fields");
 }
 
-static int parse_object_file(const char *path, const char *source,
-                             ZSharpGameModel *model, int expected_is_3d,
-                             char *error, size_t error_size) {
+static ZSharpGameObject *find_definition(const ZSharpGameModel *model,
+                                         const char *id) {
+    size_t index;
+    for (index = 0; index < model->definition_count; index++)
+        if (strcmp(model->definitions[index].name, id) == 0)
+            return &model->definitions[index];
+    return NULL;
+}
+
+static int append_attribute(ModelParser *parser, ZSharpGameObject *object,
+                            char *id, int active) {
+    char **ids = (char **)realloc(object->attribute_ids,
+        (object->attribute_count + 1) * sizeof(*ids));
+    int *states;
+    if (ids == NULL) {
+        free(id);
+        parser_fail(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    object->attribute_ids = ids;
+    states = (int *)realloc(object->attribute_active,
+        (object->attribute_count + 1) * sizeof(*states));
+    if (states == NULL) {
+        free(id);
+        parser_fail(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    object->attribute_active = states;
+    object->attribute_ids[object->attribute_count] = id;
+    object->attribute_active[object->attribute_count++] = active;
+    if (active && (strcmp(id, "COLLIDER2D") == 0 ||
+                   strcmp(id, "COLLIDER3D") == 0)) {
+        object->collider = ZGAME_COLLIDER_BOX;
+        if (strcmp(id, "COLLIDER3D") == 0) parser->model->is_3d = 1;
+    }
+    return 1;
+}
+
+static char *json_text(ModelParser *parser, const char *description) {
+    ZSharpToken token = parser->current;
+    char *result;
+    if (token.type != ZTOKEN_STRING) {
+        char message[128];
+        snprintf(message, sizeof(message), "expected quoted %s", description);
+        parser_fail(parser, &token, message);
+        return NULL;
+    }
+    result = zsharp_copy_text(token.start + 1, token.length - 2);
+    if (result == NULL) parser_fail(parser, &token, "out of memory");
+    parser_advance(parser);
+    return result;
+}
+
+static int json_key(ModelParser *parser, const char *key) {
+    char *actual = json_text(parser, "JSON field name");
+    int matches = actual != NULL && strcmp(actual, key) == 0;
+    if (actual != NULL && !matches)
+        parser_fail(parser, &parser->current, "unexpected JSON field");
+    free(actual);
+    return matches && parser_expect_type(parser, ZTOKEN_COLON,
+                                          "expected ':' after JSON field");
+}
+
+static int parse_attributes(ModelParser *parser, ZSharpGameObject *object) {
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' after attributes") ||
+        !parser_expect_word(parser, "JSON") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "expected ']' after JSON") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before attributes") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' before the JSON array")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_BRACKET) {
+        char *id = NULL;
+        int active;
+        if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
+                                "expected '{' before an attribute") ||
+            !json_key(parser, "id") || (id = json_text(parser, "attribute id")) == NULL ||
+            !parser_expect_type(parser, ZTOKEN_COMMA,
+                                "expected ',' after the attribute id") ||
+            !json_key(parser, "active")) {
+            free(id);
+            return 0;
+        }
+        if (parser_match_word(parser, "true")) active = 1;
+        else if (parser_match_word(parser, "false")) active = 0;
+        else {
+            free(id);
+            parser_fail(parser, &parser->current,
+                        "attribute active must be true or false");
+            return 0;
+        }
+        if (!parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                                "expected '}' after an attribute") ||
+            !append_attribute(parser, object, id, active)) return 0;
+        if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                              "expected ']' after the attribute array") &&
+           parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "expected ')' after attributes");
+}
+
+static int copy_optional(char **target, const char *source) {
+    *target = source == NULL ? NULL : zsharp_copy_text(source, strlen(source));
+    return source == NULL || *target != NULL;
+}
+
+static ZSharpGameObject *place_object(ModelParser *parser,
+                                      const ZSharpGameObject *definition,
+                                      const char *scene, char *display_name,
+                                      float x, float y, float z,
+                                      int has_z) {
+    ZSharpGameObject *resized = (ZSharpGameObject *)realloc(
+        parser->model->objects,
+        (parser->model->object_count + 1) * sizeof(*resized));
+    ZSharpGameObject *object;
+    size_t index;
+    if (resized == NULL) goto memory_error;
+    parser->model->objects = resized;
+    object = &resized[parser->model->object_count++];
+    *object = *definition;
+    object->name = object->display_name = object->source_file = NULL;
+    object->scene = object->text = object->asset_path = object->audio_path = NULL;
+    object->attribute_ids = NULL;
+    object->attribute_active = NULL;
+    object->attribute_count = 0;
+    object->audio_stream = object->audio_buffer = NULL;
+    object->audio_length = 0;
+    if (!copy_optional(&object->name, definition->name) ||
+        !copy_optional(&object->source_file, definition->source_file) ||
+        !copy_optional(&object->scene, scene) ||
+        !copy_optional(&object->text, definition->text) ||
+        !copy_optional(&object->asset_path, definition->asset_path) ||
+        !copy_optional(&object->audio_path, definition->audio_path))
+        goto memory_error;
+    object->display_name = display_name;
+    display_name = NULL;
+    if (definition->attribute_count != 0) {
+        object->attribute_ids = (char **)calloc(definition->attribute_count,
+                                                sizeof(char *));
+        object->attribute_active = (int *)malloc(definition->attribute_count *
+                                                 sizeof(int));
+        if (object->attribute_ids == NULL || object->attribute_active == NULL)
+            goto memory_error;
+        object->attribute_count = definition->attribute_count;
+        for (index = 0; index < definition->attribute_count; index++) {
+            object->attribute_ids[index] = zsharp_copy_text(
+                definition->attribute_ids[index],
+                strlen(definition->attribute_ids[index]));
+            if (object->attribute_ids[index] == NULL) goto memory_error;
+            object->attribute_active[index] = definition->attribute_active[index];
+        }
+    }
+    object->x = x;
+    object->y = y;
+    object->z = z;
+    if (has_z) parser->model->is_3d = 1;
+    return object;
+memory_error:
+    free(display_name);
+    parser_fail(parser, &parser->current, "out of memory");
+    return NULL;
+}
+
+static int json_location_number(ModelParser *parser, float *value) {
+    ModelValue parsed;
+    int ok;
+    if (!parse_value(parser, &parsed)) return 0;
+    /* JSON locations may be written as numbers or as quoted values, matching
+     * the scene format's documented XLOCATION/YLOCATION placeholders. */
+    if (parsed.type == MODEL_TEXT) parsed.type = MODEL_NUMBER;
+    ok = value_number(parser, &parsed, value);
+    free(parsed.text);
+    return ok;
+}
+
+static int parse_scene_objects(ModelParser *parser, const char *scene_name) {
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' after objects") ||
+        !parser_expect_word(parser, "JSON") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "expected ']' after JSON") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before objects") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' before the JSON array")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_BRACKET) {
+        char *id = NULL;
+        char *display_name = NULL;
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        int has_z = 0;
+        const ZSharpGameObject *definition;
+        if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
+                                "expected '{' before a scene object") ||
+            !json_key(parser, "id") || (id = json_text(parser, "object id")) == NULL ||
+            !parser_expect_type(parser, ZTOKEN_COMMA,
+                                "expected ',' after the object id") ||
+            !json_key(parser, "name") ||
+            (display_name = json_text(parser, "object display name")) == NULL ||
+            !parser_expect_type(parser, ZTOKEN_COMMA,
+                                "expected ',' after the object name") ||
+            !json_key(parser, "location") ||
+            !parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
+                                "expected '{' before location") ||
+            !json_key(parser, "x") || !json_location_number(parser, &x) ||
+            !parser_expect_type(parser, ZTOKEN_COMMA,
+                                "expected ',' after x") ||
+            !json_key(parser, "y") || !json_location_number(parser, &y)) {
+            free(id);
+            free(display_name);
+            return 0;
+        }
+        if (parser_match_type(parser, ZTOKEN_COMMA)) {
+            if (!json_key(parser, "z") || !json_location_number(parser, &z)) {
+                free(id);
+                free(display_name);
+                return 0;
+            }
+            has_z = 1;
+        }
+        if (!parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                                "expected '}' after location") ||
+            !parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                                "expected '}' after the scene object")) {
+            free(id);
+            free(display_name);
+            return 0;
+        }
+        definition = find_definition(parser->model, id);
+        if (definition == NULL) {
+            parser_fail(parser, &parser->current,
+                        "scene references an unknown object id");
+            free(id);
+            free(display_name);
+            return 0;
+        }
+        if (place_object(parser, definition, scene_name, display_name,
+                         x, y, z, has_z) == NULL) {
+            free(id);
+            return 0;
+        }
+        free(id);
+        if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                              "expected ']' after the object array") &&
+           parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "expected ')' after objects");
+}
+
+static int parse_object_declaration(ModelParser *parser, char *name) {
+    ZSharpGameObject *object;
+    parser->definition_mode = 1;
+    object = add_object(parser, name);
+    if (object == NULL ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' after the object id") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "expected ']' after the object id") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before object fields")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
+           parser->current.type != ZTOKEN_EOF) {
+        char *field = parser_name(parser, "an object field name");
+        ModelValue value;
+        if (field == NULL) return 0;
+        if (strcmp(field, "attributes") == 0) {
+            free(field);
+            if (!parse_attributes(parser, object)) return 0;
+            continue;
+        }
+        if (strcmp(field, "scene") == 0 || strcmp(field, "positionX") == 0 ||
+            strcmp(field, "positionY") == 0 || strcmp(field, "positionZ") == 0) {
+            parser_fail(parser, &parser->current,
+                        "object placement belongs in the scene objects[JSON] block");
+            free(field);
+            return 0;
+        }
+        if (!parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after the field name") ||
+            !parse_value(parser, &value) ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after the field value")) {
+            free(field);
+            return 0;
+        }
+        apply_object_field(parser, object, field, &value);
+        free(value.text);
+        free(field);
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "expected ')' after object fields");
+}
+
+static int parse_scene_declaration(ModelParser *parser, char *outer_name) {
+    char *scene_name = NULL;
+    ZSharpGameScene *scene;
+    free(outer_name);
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' after the scene declaration") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "expected ']' after the scene declaration") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before scene contents") ||
+        !parser_expect_word(parser, "scene") ||
+        (scene_name = parser_name(parser, "the scene name")) == NULL ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before scene fields")) {
+        free(scene_name);
+        return 0;
+    }
+    scene = add_scene(parser, scene_name);
+    if (scene == NULL) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
+           parser->current.type != ZTOKEN_EOF) {
+        char *field = parser_name(parser, "a scene field name");
+        ModelValue value;
+        if (field == NULL ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after the scene field") ||
+            !parse_value(parser, &value) ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after the scene value")) {
+            free(field);
+            return 0;
+        }
+        apply_scene_field(parser, scene, field, &value);
+        free(value.text);
+        free(field);
+    }
+    if (!parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                            "expected ')' after scene fields") ||
+        !parser_expect_word(parser, "objects") ||
+        !parse_scene_objects(parser, scene->name) ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                            "expected ')' after scene contents")) return 0;
+    return 1;
+}
+
+static int parse_model_file(const char *path, const char *source,
+                            ZSharpGameModel *model, int is_scene,
+                            char *error, size_t error_size) {
     ModelParser parser;
     const char *file_name = path;
     const char *cursor;
@@ -562,48 +938,37 @@ static int parse_object_file(const char *path, const char *source,
         !parser_expect_type(&parser, ZTOKEN_EQUAL, "expected '='") ||
         !parser_expect_word(&parser, "type") ||
         !parser_expect_type(&parser, ZTOKEN_DOT, "expected '.'") ||
-        !parser_expect_word(&parser, "object") ||
-        !parser_expect_type(&parser, ZTOKEN_COLON,
-                            "expected ':' before 2D or 3D") ||
-        parser.current.type != ZTOKEN_NUMBER || parser.current.length != 1 ||
-        (parser.current.start[0] != '2' && parser.current.start[0] != '3')) {
+        !parser_expect_word(&parser, is_scene ? "scene" : "object")) {
         if (!parser.failed)
             parser_fail(&parser, &parser.current,
-                        "expected zsharp = type.object:2D or type.object:3D");
+                        is_scene ? "expected zsharp = type.scene"
+                                 : "expected zsharp = type.object");
         free(source_name);
         return 0;
     }
-    parser.file_is_3d = parser.current.start[0] == '3';
-    parser_advance(&parser);
-    if (!parser_expect_word(&parser, "D")) {
-        free(source_name);
-        return 0;
-    }
-    if (parser.file_is_3d != expected_is_3d) {
-        parser_fail(&parser, &parser.current,
-                    "object dimension does not match the game startup script");
-        free(source_name);
-        return 0;
-    }
-    while (!parser.failed && parser.current.type != ZTOKEN_EOF) {
+    {
         char *name;
-        int is_scene;
         if (!parser_match_word(&parser, "noticed") &&
             !parser_match_word(&parser, "silent")) {
             parser_fail(&parser, &parser.current,
                         "expected 'noticed' or 'silent'");
-            break;
-        }
-        if (parser_match_word(&parser, "scene")) is_scene = 1;
-        else if (parser_match_word(&parser, "object")) is_scene = 0;
-        else {
+        } else if (!parser_match_word(&parser,
+                                      is_scene ? "scene" : "object")) {
             parser_fail(&parser, &parser.current,
-                        "expected 'scene' or 'object'");
-            break;
+                        is_scene ? "expected 'scene'" : "expected 'object'");
+        } else {
+            name = parser_name(&parser,
+                               is_scene ? "a scene name" : "an object name");
+            if (name != NULL) {
+                if (is_scene) parse_scene_declaration(&parser, name);
+                else parse_object_declaration(&parser, name);
+            }
         }
-        name = parser_name(&parser, "a scene or object name");
-        if (name == NULL || !parse_block(&parser, is_scene, name)) break;
     }
+    if (!parser.failed && parser.current.type != ZTOKEN_EOF)
+        parser_fail(&parser, &parser.current,
+                    is_scene ? "a .zscene file can define exactly one scene"
+                             : "a .zobject file can define exactly one object");
     free(source_name);
     return !parser.failed;
 }
@@ -813,6 +1178,11 @@ static ZSharpGameObject *find_object(const ZSharpGameModel *model,
                                      const char *name) {
     size_t index;
     for (index = 0; index < model->object_count; index++)
+        if (strcmp(model->objects[index].name, name) == 0 &&
+            model->active_scene != NULL && model->objects[index].scene != NULL &&
+            strcmp(model->objects[index].scene, model->active_scene) == 0)
+            return &model->objects[index];
+    for (index = 0; index < model->object_count; index++)
         if (strcmp(model->objects[index].name, name) == 0)
             return &model->objects[index];
     return NULL;
@@ -825,23 +1195,55 @@ static int safe_relative_asset(const char *path) {
            strstr(path, "..") == NULL;
 }
 
-int zsharp_game_model_load(const char *project_root, int is_3d,
+static int project_asset_exists(const char *root, const char *relative) {
+    size_t root_length = strlen(root);
+    size_t relative_length = strlen(relative);
+    int separator = root_length != 0 && root[root_length - 1] != '/' &&
+                    root[root_length - 1] != '\\';
+    char *path = (char *)malloc(root_length + (size_t)separator +
+                               relative_length + 1);
+    FILE *file;
+    if (path == NULL) return 0;
+    memcpy(path, root, root_length);
+    if (separator) path[root_length++] = '/';
+    memcpy(path + root_length, relative, relative_length + 1);
+    file = fopen(path, "rb");
+    free(path);
+    if (file == NULL) return 0;
+    fclose(file);
+    return 1;
+}
+
+int zsharp_game_model_load(const char *project_root,
                            ZSharpGameModel *model, char *error,
                            size_t error_size) {
     ZSharpSourceList files;
     size_t index;
     ZSharpSourceList styles;
+    ZSharpSettings settings;
+    ZSharpDiagnostic settings_diagnostic;
+    const char *start_file = NULL;
     memset(model, 0, sizeof(*model));
-    model->is_3d = is_3d;
+    zsharp_settings_init(&settings);
     model->project_root = zsharp_copy_text(project_root, strlen(project_root));
     if (model->project_root == NULL) goto out_of_memory;
+    if (!zsharp_settings_load(project_root, &settings, &settings_diagnostic,
+                              error, error_size)) goto failed;
+    if (settings.game_start_scene != NULL) {
+        const char *slash = strrchr(settings.game_start_scene, '/');
+        const char *backslash = strrchr(settings.game_start_scene, '\\');
+        start_file = settings.game_start_scene;
+        if (slash != NULL && slash + 1 > start_file) start_file = slash + 1;
+        if (backslash != NULL && backslash + 1 > start_file)
+            start_file = backslash + 1;
+    }
     if (!zsharp_project_list_files(project_root, ZSHARP_OBJECT_EXTENSION,
                                    &files, error, error_size)) goto failed;
     for (index = 0; index < files.count; index++) {
         char *source = NULL;
         if (!read_file(files.items[index], &source, error, error_size) ||
-            !parse_object_file(files.items[index], source, model, is_3d,
-                               error, error_size)) {
+            !parse_model_file(files.items[index], source, model, 0,
+                              error, error_size)) {
             free(source);
             zsharp_project_source_list_free(&files);
             goto failed;
@@ -849,6 +1251,39 @@ int zsharp_game_model_load(const char *project_root, int is_3d,
         free(source);
     }
     zsharp_project_source_list_free(&files);
+    if (!zsharp_project_list_files(project_root, ZSHARP_SCENE_EXTENSION,
+                                   &files, error, error_size)) goto failed;
+    for (index = 0; index < files.count; index++) {
+        char *source = NULL;
+        if (!read_file(files.items[index], &source, error, error_size) ||
+            !parse_model_file(files.items[index], source, model, 1,
+                              error, error_size)) {
+            free(source);
+            zsharp_project_source_list_free(&files);
+            goto failed;
+        }
+        free(source);
+    }
+    zsharp_project_source_list_free(&files);
+    if (model->scene_count == 0) {
+        model_error(error, error_size,
+                    "game projects require at least one .zscene file");
+        goto failed;
+    }
+    for (index = 0; index < model->scene_count; index++) {
+        const char *icon = model->scenes[index].icon;
+        size_t length;
+        if (icon == NULL) continue;
+        length = strlen(icon);
+        if (length < 4 || strcmp(icon + length - 4, ".png") != 0 ||
+            !project_asset_exists(project_root, icon)) {
+            if (error != NULL && error_size != 0)
+                snprintf(error, error_size,
+                         "game scene '%s' requires an existing project-relative PNG icon",
+                         model->scenes[index].name);
+            goto failed;
+        }
+    }
     if (!zsharp_project_list_files(project_root, ZSHARP_STYLE_EXTENSION,
                                    &styles, error, error_size)) goto failed;
     for (index = 0; index < styles.count; index++) {
@@ -863,18 +1298,31 @@ int zsharp_game_model_load(const char *project_root, int is_3d,
         free(source);
     }
     zsharp_project_source_list_free(&styles);
-    if (model->scene_count == 0) {
-        ModelParser parser;
-        memset(&parser, 0, sizeof(parser));
-        parser.model = model;
-        parser.file_is_3d = is_3d;
-        parser.error = error;
-        parser.error_size = error_size;
-        if (add_scene(&parser, zsharp_copy_text("Main", 4)) == NULL)
-            goto failed;
+    if (model->is_3d) {
+        for (index = 0; index < model->scene_count; index++)
+            if (model->scenes[index].camera_z == 0.0f)
+                model->scenes[index].camera_z = 8.0f;
     }
-    model->active_scene = zsharp_copy_text(model->scenes[0].name,
-                                            strlen(model->scenes[0].name));
+    {
+        ZSharpGameScene *startup = &model->scenes[0];
+        if (start_file != NULL) {
+            size_t base_length = strlen(start_file);
+            size_t extension_length = strlen(ZSHARP_SCENE_EXTENSION);
+            if (base_length > extension_length)
+                base_length -= extension_length;
+            for (index = 0; index < model->scene_count; index++) {
+                if (strlen(model->scenes[index].source_file) == base_length &&
+                    memcmp(model->scenes[index].source_file, start_file,
+                           base_length) == 0) {
+                    startup = &model->scenes[index];
+                    break;
+                }
+            }
+        }
+        model->active_scene = zsharp_copy_text(startup->name,
+                                                strlen(startup->name));
+    }
+    zsharp_settings_free(&settings);
     if (model->active_scene == NULL) goto out_of_memory;
     for (index = 0; index < model->object_count; index++) {
         ZSharpGameObject *object = &model->objects[index];
@@ -890,6 +1338,10 @@ int zsharp_game_model_load(const char *project_root, int is_3d,
                          object->name, object->scene);
             goto failed;
         }
+        object->spawn_x = object->x;
+        object->spawn_y = object->y;
+        object->spawn_z = object->z;
+        object->spawn_initialized = 1;
         if (object->width <= 0.0f || object->height <= 0.0f ||
             object->depth <= 0.0f || object->mass <= 0.0f ||
             object->scale_x <= 0.0f || object->scale_y <= 0.0f ||
@@ -918,35 +1370,50 @@ int zsharp_game_model_load(const char *project_root, int is_3d,
 out_of_memory:
     model_error(error, error_size, "out of memory");
 failed:
+    zsharp_settings_free(&settings);
     zsharp_game_model_free(model);
     return 0;
 }
 
-int zsharp_game_model_validate(const char *project_root, int is_3d,
+int zsharp_game_model_validate(const char *project_root,
                                char *error, size_t error_size) {
     ZSharpGameModel model;
-    int ok = zsharp_game_model_load(project_root, is_3d, &model, error,
-                                    error_size);
+    int ok = zsharp_game_model_load(project_root, &model, error, error_size);
     if (ok) zsharp_game_model_free(&model);
     return ok;
+}
+
+static void free_game_object(ZSharpGameObject *object) {
+    size_t index;
+    free(object->name);
+    free(object->display_name);
+    free(object->source_file);
+    free(object->scene);
+    free(object->text);
+    free(object->asset_path);
+    free(object->audio_path);
+    for (index = 0; index < object->attribute_count; index++)
+        free(object->attribute_ids[index]);
+    free(object->attribute_ids);
+    free(object->attribute_active);
 }
 
 void zsharp_game_model_free(ZSharpGameModel *model) {
     size_t index;
     if (model == NULL) return;
-    for (index = 0; index < model->scene_count; index++)
+    for (index = 0; index < model->scene_count; index++) {
         free(model->scenes[index].name);
-    for (index = 0; index < model->object_count; index++) {
-        ZSharpGameObject *object = &model->objects[index];
-        free(object->name);
-        free(object->source_file);
-        free(object->scene);
-        free(object->text);
-        free(object->asset_path);
-        free(object->audio_path);
+        free(model->scenes[index].title);
+        free(model->scenes[index].icon);
+        free(model->scenes[index].source_file);
     }
+    for (index = 0; index < model->object_count; index++)
+        free_game_object(&model->objects[index]);
+    for (index = 0; index < model->definition_count; index++)
+        free_game_object(&model->definitions[index]);
     free(model->scenes);
     free(model->objects);
+    free(model->definitions);
     free(model->active_scene);
     free(model->project_root);
     memset(model, 0, sizeof(*model));
@@ -956,6 +1423,18 @@ static int same_active_scene(const ZSharpGameModel *model,
                              const ZSharpGameObject *object) {
     return model->active_scene != NULL && object->scene != NULL &&
            strcmp(model->active_scene, object->scene) == 0;
+}
+
+const char *zsharp_game_model_scene_title(const ZSharpGameModel *model) {
+    ZSharpGameScene *scene = model == NULL
+        ? NULL : find_scene(model, model->active_scene);
+    return scene == NULL ? NULL : scene->title;
+}
+
+const char *zsharp_game_model_scene_icon(const ZSharpGameModel *model) {
+    ZSharpGameScene *scene = model == NULL
+        ? NULL : find_scene(model, model->active_scene);
+    return scene == NULL ? NULL : scene->icon;
 }
 
 static int overlaps(const ZSharpGameObject *a, const ZSharpGameObject *b,
@@ -1006,14 +1485,6 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
         if (!same_active_scene(model, object)) continue;
         object->grounded = 0;
         object->colliding = 0;
-        if (object->control_x != 0.0f)
-            object->velocity_x =
-                (float)(model->input.right - model->input.left) *
-                object->control_x;
-        if (object->control_y != 0.0f)
-            object->velocity_y =
-                (float)(model->input.up - model->input.down) *
-                object->control_y;
         if (object->body == ZGAME_BODY_DYNAMIC) {
             object->velocity_x += scene->gravity_x * object->gravity_scale * delta;
             object->velocity_y += scene->gravity_y * object->gravity_scale * delta;
@@ -1048,14 +1519,6 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
                                   overlap_x, overlap_y, overlap_z);
         }
     }
-    for (index = 0; index < model->object_count; index++) {
-        ZSharpGameObject *object = &model->objects[index];
-        if (object->jump_speed != 0.0f && object->grounded &&
-            (model->input.up || model->input.space)) {
-            object->velocity_y = object->jump_speed;
-            object->grounded = 0;
-        }
-    }
 }
 
 static int split_path(const char *path, char *storage, size_t storage_size,
@@ -1075,13 +1538,34 @@ static int split_path(const char *path, char *storage, size_t storage_size,
     return result >= 2;
 }
 
-static int valid_input_field(const char *field) {
-    return strcmp(field, "left") == 0 || strcmp(field, "right") == 0 ||
-           strcmp(field, "up") == 0 || strcmp(field, "down") == 0 ||
-           strcmp(field, "space") == 0 || strcmp(field, "action") == 0 ||
-           strcmp(field, "mouseLeft") == 0 ||
-           strcmp(field, "mouseRight") == 0 ||
-           strcmp(field, "mouseX") == 0 || strcmp(field, "mouseY") == 0;
+static int game_key_from_name(const char *name) {
+    static const char *special[] = {
+        "larrow", "rarrow", "uarrow", "darrow",
+        "space", "enter", "escape", "tab", "backspace",
+        "lshift", "rshift", "lctrl", "rctrl", "lalt", "ralt"
+    };
+    static const int values[] = {
+        ZGAME_KEY_LARROW, ZGAME_KEY_RARROW, ZGAME_KEY_UARROW,
+        ZGAME_KEY_DARROW, ZGAME_KEY_SPACE, ZGAME_KEY_ENTER,
+        ZGAME_KEY_ESCAPE, ZGAME_KEY_TAB, ZGAME_KEY_BACKSPACE,
+        ZGAME_KEY_LSHIFT, ZGAME_KEY_RSHIFT, ZGAME_KEY_LCTRL,
+        ZGAME_KEY_RCTRL, ZGAME_KEY_LALT, ZGAME_KEY_RALT
+    };
+    size_t index;
+    if (name[0] >= 'a' && name[0] <= 'z' && name[1] == '\0')
+        return ZGAME_KEY_A + (name[0] - 'a');
+    if (name[0] >= '0' && name[0] <= '9' && name[1] == '\0')
+        return ZGAME_KEY_0 + (name[0] - '0');
+    if (name[0] == 'f' && name[1] == 'n') {
+        char *end = NULL;
+        long function_number = strtol(name + 2, &end, 10);
+        if (end != name + 2 && *end == '\0' && function_number >= 1 &&
+            function_number <= 24)
+            return ZGAME_KEY_FN1 + (int)function_number - 1;
+    }
+    for (index = 0; index < sizeof(special) / sizeof(special[0]); index++)
+        if (strcmp(name, special[index]) == 0) return values[index];
+    return -1;
 }
 
 static int valid_object_field(const char *field) {
@@ -1089,7 +1573,7 @@ static int valid_object_field(const char *field) {
         "positionX","positionY","positionZ","width","height","depth",
         "rotation","scaleX","scaleY","scaleZ","velocityX","velocityY",
         "velocityZ","mass","gravityScale","restitution","friction",
-        "controlX","controlY","jumpSpeed","audioVolume","tone",
+        "audioVolume","tone",
         "toneDuration","layer","color",
         "visible","trigger","grounded","colliding","text","scene",
         "audioLoop","audioAutoplay","audioOnCollision","audioPlay"
@@ -1118,8 +1602,14 @@ int zsharp_game_model_owns_property(const ZSharpGameModel *model,
     size_t count;
     ZSharpGameObject *object;
     if (!split_path(path, storage, sizeof(storage), parts, &count)) return 0;
-    if (count == 2 && strcmp(parts[0], "Input") == 0)
-        return valid_input_field(parts[1]);
+    if (count == 3 && strcmp(parts[0], "input") == 0 &&
+        strcmp(parts[1], "key") == 0)
+        return game_key_from_name(parts[2]) >= 0;
+    if (count == 3 && strcmp(parts[0], "input") == 0 &&
+        strcmp(parts[1], "mouse") == 0)
+        return strcmp(parts[2], "left") == 0 ||
+               strcmp(parts[2], "right") == 0 ||
+               strcmp(parts[2], "x") == 0 || strcmp(parts[2], "y") == 0;
     if (count == 2 && strcmp(parts[0], "Game") == 0)
         return strcmp(parts[1], "scene") == 0 ||
                strcmp(parts[1], "delta") == 0 ||
@@ -1172,24 +1662,26 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
         return 0;
     }
     field = parts[count - 1];
-    if (count == 2 && strcmp(parts[0], "Input") == 0) {
-        if (strcmp(field, "mouseX") == 0 || strcmp(field, "mouseY") == 0) {
+    if (count == 3 && strcmp(parts[0], "input") == 0 &&
+        strcmp(parts[1], "key") == 0) {
+        int key = game_key_from_name(field);
+        *type = ZWINDOW_READ_STATUS;
+        return status_property(model->input.keys[key], text, error,
+                               error_size);
+    }
+    if (count == 3 && strcmp(parts[0], "input") == 0 &&
+        strcmp(parts[1], "mouse") == 0) {
+        if (strcmp(field, "x") == 0 || strcmp(field, "y") == 0) {
             *type = ZWINDOW_READ_NUMBER;
-            return number_property(strcmp(field, "mouseX") == 0
+            return number_property(strcmp(field, "x") == 0
                                        ? model->input.mouse_x
                                        : model->input.mouse_y,
                                    text, error, error_size);
         }
         *type = ZWINDOW_READ_STATUS;
-        return status_property(
-            strcmp(field, "left") == 0 ? model->input.left :
-            strcmp(field, "right") == 0 ? model->input.right :
-            strcmp(field, "up") == 0 ? model->input.up :
-            strcmp(field, "down") == 0 ? model->input.down :
-            strcmp(field, "space") == 0 ? model->input.space :
-            strcmp(field, "action") == 0 ? model->input.action :
-            strcmp(field, "mouseLeft") == 0 ? model->input.mouse_left
-                                              : model->input.mouse_right,
+        return status_property(strcmp(field, "left") == 0
+                                   ? model->input.mouse_left
+                                   : model->input.mouse_right,
             text, error, error_size);
     }
     if (count == 2 && strcmp(parts[0], "Game") == 0) {
@@ -1247,9 +1739,6 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
     GET_NUMBER("gravityScale", gravity_scale)
     GET_NUMBER("restitution", restitution)
     GET_NUMBER("friction", friction)
-    GET_NUMBER("controlX", control_x)
-    GET_NUMBER("controlY", control_y)
-    GET_NUMBER("jumpSpeed", jump_speed)
     GET_NUMBER("audioVolume", audio_volume)
     GET_NUMBER("tone", tone_frequency)
     GET_NUMBER("toneDuration", tone_duration)
@@ -1315,15 +1804,32 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
     field = parts[count - 1];
     if (count == 2 && strcmp(parts[0], "Game") == 0 &&
         strcmp(field, "scene") == 0) {
+        size_t index;
         if (find_scene(model, value) == NULL) {
             if (error != NULL && error_size != 0)
                 snprintf(error, error_size, "unknown game scene '%s'", value);
             return 0;
         }
-        return replace_text(&model->active_scene, value);
+        if (!replace_text(&model->active_scene, value)) return 0;
+        for (index = 0; index < model->object_count; index++) {
+            ZSharpGameObject *scene_object = &model->objects[index];
+            if (scene_object->scene == NULL ||
+                strcmp(scene_object->scene, value) != 0 ||
+                !scene_object->spawn_initialized) continue;
+            scene_object->x = scene_object->spawn_x;
+            scene_object->y = scene_object->spawn_y;
+            scene_object->z = scene_object->spawn_z;
+            scene_object->velocity_x = 0.0f;
+            scene_object->velocity_y = 0.0f;
+            scene_object->velocity_z = 0.0f;
+            scene_object->grounded = 0;
+            scene_object->colliding = 0;
+            scene_object->was_colliding = 0;
+        }
+        return 1;
     }
-    if (count == 2 && (strcmp(parts[0], "Input") == 0 ||
-                       strcmp(parts[0], "Game") == 0)) {
+    if ((count == 3 && strcmp(parts[0], "input") == 0) ||
+        (count == 2 && strcmp(parts[0], "Game") == 0)) {
         model_error(error, error_size, "that engine property is read-only");
         return 0;
     }
@@ -1425,9 +1931,6 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
     SET_NUMBER("gravityScale", gravity_scale)
     SET_NUMBER("restitution", restitution)
     SET_NUMBER("friction", friction)
-    SET_NUMBER("controlX", control_x)
-    SET_NUMBER("controlY", control_y)
-    SET_NUMBER("jumpSpeed", jump_speed)
     SET_NUMBER("audioVolume", audio_volume)
     SET_NUMBER("tone", tone_frequency)
     SET_NUMBER("toneDuration", tone_duration)

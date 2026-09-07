@@ -179,10 +179,10 @@ expect_failure("wildcard import must be final"
                "'*' must be the final name in an import path"
                "${PROJECT_ROOT}"
                check tests/imports/InvalidWildcardPosition.zsharp)
-expect_success("2D script header" "${PROJECT_ROOT}"
-               check tests/Game2DHeader.zsharp)
-expect_success("3D script header" "${PROJECT_ROOT}"
-               check tests/Game3DHeader.zsharp)
+expect_failure("removed 2D script header" "expected 'window'"
+               "${PROJECT_ROOT}" check tests/Game2DHeader.zsharp)
+expect_failure("removed 3D script header" "expected 'window'"
+               "${PROJECT_ROOT}" check tests/Game3DHeader.zsharp)
 expect_success("SDL/Vulkan game runtime build" "${PROJECT_ROOT}"
                game-info)
 execute_process(
@@ -335,6 +335,29 @@ if(WIN32)
     file(READ "${TEST_PROJECT_REGISTRY}.playtime" playtime_contents)
     if(NOT playtime_contents MATCHES "package_test")
         message(FATAL_ERROR "Hub playtime data did not contain package_test")
+    endif()
+    set(stale_package "${CMAKE_CURRENT_BINARY_DIR}/StalePackage.zapp")
+    file(COPY_FILE "${TEST_PACKAGE}" "${stale_package}" ONLY_IF_DIFFERENT)
+    execute_process(
+        COMMAND "${ZSHARP_BIN}" hub add "${stale_package}"
+        RESULT_VARIABLE stale_add_result
+        ERROR_VARIABLE stale_add_error
+    )
+    file(REMOVE "${stale_package}")
+    execute_process(
+        COMMAND "${ZSHARP_BIN}" hub list
+        RESULT_VARIABLE stale_list_result
+        OUTPUT_VARIABLE stale_list_output
+        ERROR_VARIABLE stale_list_error
+    )
+    file(READ "${TEST_PROJECT_REGISTRY}.packages" pruned_registry)
+    file(READ "${TEST_PROJECT_REGISTRY}.playtime" preserved_playtime)
+    if(NOT stale_add_result EQUAL 0 OR NOT stale_list_result EQUAL 0 OR
+       pruned_registry MATCHES "StalePackage.zapp" OR
+       NOT preserved_playtime MATCHES "package_test")
+        message(FATAL_ERROR
+            "Hub did not prune a missing package while preserving its data\n"
+            "add: ${stale_add_error}\nlist: ${stale_list_output}${stale_list_error}")
     endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env
@@ -506,9 +529,10 @@ expect_failure("window ZSS declaration guard"
                "${PROJECT_ROOT}/tests/settings/window_invalid_zss"
                check project.zsettings)
 expect_failure("game dependency guard"
-               "require zsharpgame:1.0.0.0"
+               "require zsharpgame:1.0.0.1"
                "${PROJECT_ROOT}/tests/settings/game_missing_dependency"
-               check Game.zsharp)
+               package game
+               "${PROJECT_ROOT}/tests/settings/game_missing_dependency" Missing)
 
 file(REMOVE "${TEST_OUTPUT}")
 file(REMOVE "${TEST_PACKAGE}" "${TEST_SOURCE_PACKAGE}"

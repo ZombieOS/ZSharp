@@ -1,13 +1,20 @@
-zsharp = type.script:2D
+zsharp = type.script
 
 noticed room Game[] (
+ import ZSharp.Achievements():
+ noticed brain AwardTest[DR] (
+  ZSharp.Achievement.Award.TEST_GAME:
+ )
  noticed brain Start[] (
   Print("game start ran"):
-  if[Input.left == alive] (
+  if[input.key.a == alive] (
    TestBlock.color.set: #00E5FF:
   ) else (
    TestBlock.color.set: #FF2A72:
   )
-  number.set:TestBlock.positionX = TestBlock.positionX + 1:
+  if[input.key.rarrow == alive or input.key.fn1 == alive] (
+   number.set:TestBlock.positionX = TestBlock.positionX + 1:
+  ) else (
+  )
  )
 )

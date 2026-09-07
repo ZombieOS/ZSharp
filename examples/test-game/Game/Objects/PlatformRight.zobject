@@ -1,0 +1,10 @@
+zsharp = type.object
+
+noticed object PlatformRight[] (
+ shape: rectangle:
+ width: 300:
+ height: 28:
+ color: #34385E:
+ body: static:
+ collider: box:
+)

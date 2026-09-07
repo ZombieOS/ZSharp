@@ -1,0 +1,22 @@
+zsharp = type.scene
+
+noticed scene Main[] (
+ scene Main (
+  title: "Z# Vulkan Playground":
+  background: #08080B:
+  gravityY: -900:
+  cameraX: 0:
+  cameraY: 0:
+ )
+ objects[JSON] (
+  [
+   { "id": "Title", "name": "Title", "location": { "x": "-260", "y": "310" } },
+   { "id": "Instructions", "name": "Instructions", "location": { "x": "-310", "y": "270" } },
+   { "id": "Player", "name": "Player", "location": { "x": "-320", "y": "-224" } },
+   { "id": "Floor", "name": "Floor", "location": { "x": "0", "y": "-280" } },
+   { "id": "PlatformLeft", "name": "Left Platform", "location": { "x": "-210", "y": "-90" } },
+   { "id": "Bouncer", "name": "Bouncer", "location": { "x": "170", "y": "230" } },
+   { "id": "PlatformRight", "name": "Right Platform", "location": { "x": "250", "y": "50" } }
+  ]
+ )
+)

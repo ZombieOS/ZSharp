@@ -3440,8 +3440,8 @@ int zsharp_vm_run_with_providers(
         return 0;
     }
     if (program->script_type == ZSCRIPT_WINDOW ||
-        program->script_type == ZSCRIPT_2D ||
-        program->script_type == ZSCRIPT_3D) {
+        program->script_type == ZSCRIPT_GAME ||
+        program->script_type == ZSCRIPT_LEGACY_GAME) {
         WindowExecutionContext context;
         context.program = program;
         context.heap = &heap;
@@ -3464,7 +3464,6 @@ int zsharp_vm_run_with_providers(
             ok = zsharp_game_run(
                 program->project_id == NULL ? "Z#" : program->project_id,
                 project_root,
-                program->script_type == ZSCRIPT_3D,
                 execute_window_callback, &context, error, error_size);
         }
         goto done;

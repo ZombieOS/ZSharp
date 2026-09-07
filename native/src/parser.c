@@ -960,6 +960,25 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
     }
     if (parser->failed) goto failed;
 
+    if (part_count == 4 && strcmp(parts[0], "ZSharp") == 0 &&
+        strcmp(parts[1], "Achievement") == 0 &&
+        strcmp(parts[2], "Award") == 0 &&
+        parser->current.type == ZTOKEN_COLON) {
+        if (!consume_type(parser, ZTOKEN_COLON,
+                          "':' after the achievement award")) goto failed;
+        instruction = emit(parser, function, ZOP_UI_SET);
+        if (instruction == NULL) goto failed;
+        path = join_path_parts(parser, parts, part_count);
+        if (path == NULL) goto failed;
+        instruction->operand = path;
+        path = NULL;
+        instruction->number_operand = ZUI_PROPERTY_STATUS;
+        instruction->call_function = zsharp_copy_text("alive", 5);
+        if (instruction->call_function == NULL) goto failed;
+        for (index = 0; index < part_count; index++) free(parts[index]);
+        return 1;
+    }
+
     if (is_ui_setter) {
         int32_t value_type = 0;
         uint32_t unit = ZUI_UNIT_NONE;
@@ -2862,24 +2881,19 @@ int zsharp_parse_source(const char *source, const char *source_name,
     if (match_type(&parser, ZTOKEN_COLON)) {
         if (match_word(&parser, "window")) {
             program->script_type = ZSCRIPT_WINDOW;
-        } else if (parser.current.type == ZTOKEN_NUMBER &&
-                   parser.current.length == 1 &&
-                   parser.current.start[0] == '2') {
-            advance_token(&parser);
-            consume_word(&parser, "D");
-            program->script_type = ZSCRIPT_2D;
-        } else if (parser.current.type == ZTOKEN_NUMBER &&
-                   parser.current.length == 1 &&
-                   parser.current.start[0] == '3') {
-            advance_token(&parser);
-            consume_word(&parser, "D");
-            program->script_type = ZSCRIPT_3D;
+        } else if (match_word(&parser, "achievement")) {
+            program->script_type = ZSCRIPT_ACHIEVEMENT;
         } else {
             fail_at(&parser, &parser.current,
-                    "expected 'window', '2D', or '3D' after the script ':'");
+                    "expected 'window' or 'achievement' after the script ':'");
         }
     }
-    if (!parser.failed && program->script_type == ZSCRIPT_WINDOW) {
+    if (!parser.failed && program->script_type == ZSCRIPT_ACHIEVEMENT) {
+        /* Achievement ZSON is validated by the game achievement loader. Keep
+         * its tokens out of the normal room grammar. */
+        while (!parser.failed && parser.current.type != ZTOKEN_EOF)
+            advance_token(&parser);
+    } else if (!parser.failed && program->script_type == ZSCRIPT_WINDOW) {
         parse_window(&parser, program);
         if (!parser.failed && parser.current.type != ZTOKEN_EOF) {
             fail_at(&parser, &parser.current,

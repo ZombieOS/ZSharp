@@ -5,9 +5,9 @@ Official website and downloads: <https://www.zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
-Version 1.0.2.0 is the first playable game-engine update. It adds executable
-`.zgame` packages, declarative `.zobject` scenes and objects, the
-`zsharpgame:1.0.0.0` dependency, Vulkan drawing, input, cameras, frame timing,
+Version 1.0.2.1 uses separate `.zscene` and `.zobject` files for game scenes
+and objects. It adds executable `.zgame` packages, the
+`zsharpgame:1.0.0.1` dependency, Vulkan drawing, named-key input, cameras, frame timing,
 2D/3D transforms, physics, collisions, and audio. Windows and Linux are the
 advertised game targets. A MoltenVK path is built for macOS, but game support
 there remains experimental until it is tested on Mac hardware.
@@ -40,12 +40,16 @@ content, icons, placeholders, size, and position with
 `File.Element.property.set: value:`. Text variables can also hold reusable
 property paths and use `PathAlias.set: value:`; `wait(...)` and `delay(...)` provide
 millisecond/second timing while preserving window redraws. It runs
-`type.script:2D` and `type.script:3D` projects through SDL3 and Vulkan when
-`zsharpgame:1.0.0.0` is declared. `.zobject` files provide scenes, primitive
-and text objects, transforms, cameras, input-driven movement,
+game packages through SDL3 and Vulkan when `zsharpgame:1.0.0.1` is declared.
+Game logic uses normal `type.script` files, every scene uses its own
+`type.scene` `.zscene` file, and every object uses its own `type.object`
+`.zobject` file. These files provide primitive and text objects, transforms,
+cameras, named-key movement,
 static/dynamic/kinematic bodies, gravity, collisions, generated tones, and WAV
 playback. Native `.zss` files apply CSS-style rules to game objects and window
-elements without a browser. Game properties use normal Z# reads and `.set:` writes. The runtime
+elements without a browser. `Window.StartScene` selects the opening scene, and
+optional ordered `Splash[JSON]` PNG/BMP images appear before game scripts begin.
+Game properties use normal Z# reads and `.set:` writes. The runtime
 owns the window, event/input/audio loop, frame timing, concurrent `Start[]`
 tasks, Vulkan presentation, and resize recovery. The bundled
 native `zsharpwindow` backends render designs,
@@ -86,7 +90,7 @@ The `.zbc` bytecode extension shown here is provisional. `.zsharp`, `.zapp`,
 and `.zgame` are official extensions.
 
 End users can install the standalone ZVM with the small platform bootstrap in
-`%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.0`. It downloads the current runtime from
+`%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.1`. It downloads the current runtime from
 `https://www.zsharp.zombieos.com/update.js?v=CURRENTVERSION-OS`, compares the
 installed version with the static GitHub Pages manifest, verifies
 `assets/download/ZVM-LATEST.zip` and the selected runtime, preserves the
@@ -265,7 +269,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.zombieos:zsharp:1.0.2.0")
+    implementation("com.zombieos:zsharp:1.0.2.1")
 }
 ```
 
@@ -275,7 +279,7 @@ or Maven:
 <dependency>
     <groupId>com.zombieos</groupId>
     <artifactId>zsharp</artifactId>
-    <version>1.0.2.0</version>
+    <version>1.0.2.1</version>
 </dependency>
 ```
 

@@ -77,8 +77,9 @@ typedef struct ZSharpImport {
 typedef enum ZSharpScriptType {
     ZSCRIPT_NORMAL = 0,
     ZSCRIPT_WINDOW = 1,
-    ZSCRIPT_2D = 2,
-    ZSCRIPT_3D = 3
+    ZSCRIPT_GAME = 2,
+    ZSCRIPT_LEGACY_GAME = 3,
+    ZSCRIPT_ACHIEVEMENT = 4
 } ZSharpScriptType;
 
 typedef enum ZSharpUIElementType {

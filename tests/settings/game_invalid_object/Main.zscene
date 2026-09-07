@@ -1,0 +1,17 @@
+zsharp = type.scene
+
+noticed scene Main[] (
+ scene Main (
+  title: "Invalid Object Test":
+  background: #08080B:
+ )
+ objects[JSON] (
+  [
+   {
+    "id": "Broken",
+    "name": "Broken",
+    "location": { "x": "0", "y": "0" }
+   }
+  ]
+ )
+)

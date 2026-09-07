@@ -1,0 +1,13 @@
+zsharp = type.object
+
+noticed object Player[] (
+ shape: rectangle:
+ width: 48:
+ height: 72:
+ color: #FF2A72:
+ body: dynamic:
+ collider: box:
+ gravityScale: 1:
+ friction: 0.15:
+ layer: 10:
+)

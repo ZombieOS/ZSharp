@@ -1,0 +1,10 @@
+zsharp = type.object
+
+noticed object Floor[] (
+ shape: rectangle:
+ width: 1120:
+ height: 40:
+ color: #282A42:
+ body: static:
+ collider: box:
+)

@@ -68,6 +68,19 @@ static int settings_consume_word(SettingsParser *parser, const char *word) {
     return 0;
 }
 
+static int settings_consume_json_key(SettingsParser *parser,
+                                     const char *key) {
+    ZSharpToken token = parser->current;
+    size_t key_length = strlen(key);
+    if (token.type == ZTOKEN_STRING && token.length == key_length + 2 &&
+        memcmp(token.start + 1, key, key_length) == 0) {
+        settings_advance(parser);
+        return 1;
+    }
+    settings_fail(parser, &token, "expected JSON key '%s'", key);
+    return 0;
+}
+
 static char *settings_copy_token(const ZSharpToken *token) {
     return zsharp_copy_text(token->start, token->length);
 }
@@ -140,6 +153,49 @@ static int settings_number(SettingsParser *parser, uint32_t *value) {
     }
     free(text);
     *value = (uint32_t)parsed;
+    return 1;
+}
+
+static int settings_duration(SettingsParser *parser, double *value) {
+    ZSharpToken token = parser->current;
+    char *text;
+    char *end;
+    double parsed;
+    if (!settings_consume_type(parser, ZTOKEN_NUMBER,
+                               "a splash duration in seconds")) return 0;
+    text = settings_copy_token(&token);
+    if (text == NULL) {
+        settings_fail(parser, &token, "out of memory");
+        return 0;
+    }
+    errno = 0;
+    parsed = strtod(text, &end);
+    if (errno == ERANGE || end == text || *end != '\0' || parsed <= 0.0 ||
+        parsed > 3600.0) {
+        free(text);
+        settings_fail(parser, &token,
+                      "splash duration must be between 0 and 3600 seconds");
+        return 0;
+    }
+    free(text);
+    *value = parsed;
+    return 1;
+}
+
+static int append_splash(SettingsParser *parser, ZSharpSettings *settings,
+                         char *path, double duration) {
+    ZSharpSplash *resized = (ZSharpSplash *)realloc(
+        settings->splashes,
+        (settings->splash_count + 1) * sizeof(*settings->splashes));
+    if (resized == NULL) {
+        free(path);
+        settings_fail(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    settings->splashes = resized;
+    settings->splashes[settings->splash_count].path = path;
+    settings->splashes[settings->splash_count].duration_seconds = duration;
+    settings->splash_count++;
     return 1;
 }
 
@@ -287,6 +343,44 @@ static int validate_window_path(SettingsParser *parser, const char *name,
     return 1;
 }
 
+static int validate_project_path(SettingsParser *parser, const char *name,
+                                 const char *path, const char *extension) {
+    const char *segment = path;
+    const char *cursor = path;
+    size_t length = strlen(path);
+    size_t extension_length = extension == NULL ? 0 : strlen(extension);
+    if (length == 0 || path[0] == '/' || strchr(path, '\\') != NULL ||
+        strchr(path, ':') != NULL) {
+        settings_fail(parser, &parser->current,
+                      "%s must be a project-relative path using '/'", name);
+        return 0;
+    }
+    for (;;) {
+        if (*cursor == '/' || *cursor == '\0') {
+            size_t segment_length = (size_t)(cursor - segment);
+            if (segment_length == 0 ||
+                (segment_length == 1 && segment[0] == '.') ||
+                (segment_length == 2 && segment[0] == '.' && segment[1] == '.')) {
+                settings_fail(parser, &parser->current,
+                              "%s cannot contain empty, '.', or '..' segments",
+                              name);
+                return 0;
+            }
+            if (*cursor == '\0') break;
+            segment = cursor + 1;
+        }
+        cursor++;
+    }
+    if (extension_length != 0 &&
+        (length < extension_length ||
+         strcmp(path + length - extension_length, extension) != 0)) {
+        settings_fail(parser, &parser->current, "%s must identify a %s file",
+                      name, extension);
+        return 0;
+    }
+    return 1;
+}
+
 static int icon_extension(const char *path) {
     static const char *extensions[] = {".png"};
     size_t path_length = strlen(path);
@@ -387,6 +481,10 @@ void zsharp_settings_free(ZSharpSettings *settings) {
     free(settings->dependencies);
     free(settings->window_startup);
     free(settings->window_uninstall);
+    free(settings->game_start_scene);
+    for (index = 0; index < settings->splash_count; index++)
+        free(settings->splashes[index].path);
+    free(settings->splashes);
     zsharp_settings_init(settings);
 }
 
@@ -602,6 +700,23 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
                     }
                     settings_consume_type(&parser, ZTOKEN_COLON,
                                           "':' after the Uninstall path");
+                } else if (settings_match_word(&parser, "StartScene")) {
+                    if ((window_seen & 4u) != 0) {
+                        settings_fail(&parser, &parser.current,
+                                      "duplicate Window StartScene setting");
+                        break;
+                    }
+                    window_seen |= 4u;
+                    settings_consume_type(&parser, ZTOKEN_COLON,
+                                          "':' after 'StartScene'");
+                    settings->game_start_scene = settings_consume_text(
+                        &parser, "a quoted startup scene path");
+                    if (settings->game_start_scene != NULL)
+                        validate_project_path(&parser, "Window StartScene",
+                                              settings->game_start_scene,
+                                              ZSHARP_SCENE_EXTENSION);
+                    settings_consume_type(&parser, ZTOKEN_COLON,
+                                          "':' after the StartScene path");
                 } else {
                     settings_fail(&parser, &parser.current,
                                   "unknown Window setting '%.*s'",
@@ -611,12 +726,63 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
             }
             settings_consume_type(&parser, ZTOKEN_RIGHT_PAREN,
                                   "')' after Window settings");
-            settings_consume_type(&parser, ZTOKEN_COLON,
-                                  "':' after Window settings");
-            if (!parser.failed && window_seen != 3u) {
+            settings_match_type(&parser, ZTOKEN_COLON);
+            if (!parser.failed && (window_seen & 4u) == 0 && window_seen != 3u) {
                 settings_fail(&parser, &parser.current,
-                              "Window must define Startup and Uninstall");
+                              "Window must define Startup and Uninstall, or a StartScene");
             }
+        } else if (settings_match_word(&parser, "Splash")) {
+            if ((seen & 512u) != 0) {
+                settings_fail(&parser, &parser.current,
+                              "duplicate Splash setting");
+                break;
+            }
+            seen |= 512u;
+            settings_consume_type(&parser, ZTOKEN_LEFT_BRACKET,
+                                  "'[' after Splash");
+            settings_consume_word(&parser, "JSON");
+            settings_consume_type(&parser, ZTOKEN_RIGHT_BRACKET,
+                                  "']' after Splash JSON");
+            settings_consume_type(&parser, ZTOKEN_LEFT_PAREN,
+                                  "'(' before Splash data");
+            settings_consume_type(&parser, ZTOKEN_LEFT_BRACKET,
+                                  "'[' before the Splash array");
+            while (!parser.failed &&
+                   parser.current.type != ZTOKEN_RIGHT_BRACKET) {
+                char *path;
+                double duration = 0.0;
+                settings_consume_type(&parser, ZTOKEN_LEFT_BRACE,
+                                      "'{' before a splash entry");
+                path = NULL;
+                if (settings_consume_json_key(&parser, "path")) {
+                    settings_consume_type(&parser, ZTOKEN_COLON,
+                                          "':' after splash path");
+                    path = settings_consume_text(&parser,
+                                                 "a quoted splash image path");
+                    if (path != NULL)
+                        validate_project_path(&parser, "Splash path", path,
+                                              NULL);
+                } else {
+                    settings_fail(&parser, &parser.current,
+                                  "expected splash field 'path'");
+                }
+                settings_consume_type(&parser, ZTOKEN_COMMA,
+                                      "',' after splash path");
+                settings_consume_json_key(&parser, "duration");
+                settings_consume_type(&parser, ZTOKEN_COLON,
+                                      "':' after splash duration");
+                settings_duration(&parser, &duration);
+                settings_consume_type(&parser, ZTOKEN_RIGHT_BRACE,
+                                      "'}' after a splash entry");
+                if (!parser.failed &&
+                    !append_splash(&parser, settings, path, duration)) break;
+                if (parser.failed) free(path);
+                if (!settings_match_type(&parser, ZTOKEN_COMMA)) break;
+            }
+            settings_consume_type(&parser, ZTOKEN_RIGHT_BRACKET,
+                                  "']' after the Splash array");
+            settings_consume_type(&parser, ZTOKEN_RIGHT_PAREN,
+                                  "')' after Splash data");
         } else {
             settings_fail(&parser, &parser.current,
                           "unknown project setting '%.*s'",
@@ -656,7 +822,8 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
                       ZSHARP_CURRENT_GENERATION,
                       settings->zsharp_version[0]);
     }
-    if (!parser.failed && settings->has_window) {
+    if (!parser.failed &&
+        (settings->window_startup != NULL || settings->window_uninstall != NULL)) {
         size_t dependency_index;
         int found = 0;
         for (dependency_index = 0;

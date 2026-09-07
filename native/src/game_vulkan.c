@@ -242,6 +242,7 @@ static SDL_Texture *load_sprite(ZSharpGameVulkan *renderer,
         }
     }
     surface = SDL_LoadBMP(path);
+    if (surface == NULL) surface = SDL_LoadPNG(path);
     if (surface == NULL) {
         if (error != NULL && error_size != 0)
             snprintf(error, error_size, "could not load sprite '%s': %s",

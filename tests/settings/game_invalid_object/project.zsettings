@@ -2,11 +2,11 @@ zsharp = type.settings
 
 Project: "Invalid Game Object":
 PID: "invalid_game_object":
-Version: [1.0.2.0]:
+Version: [1.0.2.1]:
 Authors: ["Z# Tests"]:
 Description: "Rejects invalid .zobject fields.":
-ZSharp: [1.0.2.0]:
+ZSharp: [1.0.2.1]:
 
 Dependencies (
- zsharpgame:1.0.0.0
+ zsharpgame:1.0.0.1
 ):

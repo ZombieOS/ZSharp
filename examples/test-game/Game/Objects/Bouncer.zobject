@@ -1,0 +1,17 @@
+zsharp = type.object
+
+noticed object Bouncer[] (
+ shape: circle:
+ width: 54:
+ height: 54:
+ color: #FFE66D:
+ body: dynamic:
+ collider: circle:
+ restitution: 0.82:
+ friction: 0:
+ tone: 523.25:
+ toneDuration: 0.07:
+ audioVolume: 0.35:
+ audioOnCollision: alive:
+ layer: 12:
+)

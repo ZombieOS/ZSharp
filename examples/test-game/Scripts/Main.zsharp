@@ -1,16 +1,28 @@
-zsharp = type.script:2D
+zsharp = type.script
 
 noticed room GameLogic[] (
+ import zsharp_game_runtime_test.game.scene():
  noticed brain Start[] (
   Print("Z# game test started - A/D or arrows move, Space jumps, E changes scene"):
   loop (
-   if[Input.left == alive] (
+   if[input.key.a == alive or input.key.larrow == alive] (
+    Player.velocityX.set: -390:
     Player.color.set: #00E5FF:
    ) else (
-    Player.color.set: #FF2A72:
+    if[input.key.d == alive or input.key.rarrow == alive] (
+     Player.velocityX.set: 390:
+     Player.color.set: #FF2A72:
+    ) else (
+     Player.velocityX.set: 0:
+     Player.color.set: #FF2A72:
+    )
+   )
+   if[input.key.space == alive and Player.grounded == alive] (
+    Player.velocityY.set: 680:
+   ) else (
    )
    number.set:Player.rotation = Player.rotation + 1:
-   if[Input.action == alive] (
+   if[input.key.e == alive] (
     if[Game.scene == "Main"] (
      Game.scene.set: Gallery:
     ) else (

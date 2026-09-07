@@ -1,35 +1,47 @@
 # Installing the Z# Virtual Machine
 
-Z# 1.0.2.0 provides small bootstrap installers for Windows, Linux, and macOS.
+Z# 1.0.2.1 provides small bootstrap installers for Windows, Linux, and macOS.
 The installer itself does not contain the ZVM. It asks the official update
 endpoint for the newest runtime for the current operating system and CPU,
 downloads `assets/download/ZVM-LATEST.zip` over HTTPS, verifies the archive,
 extracts only the matching runtime, and verifies that runtime's exact byte size
 and SHA-256 before installing it.
 
+## Update channels
+
+The Z# Hub stores three per-user update preferences:
+
+- **Auto updates** installs stable releases without requiring a manual check.
+- **Beta updates** makes the Hub's manual update check use `beta.js`.
+- **Auto beta updates** enables both options and installs beta releases
+  automatically. Turning beta updates off also turns automatic beta updates off.
+
+Stable releases are published through `update.js`; beta releases are published
+through `beta.js`, so stable installations do not receive beta builds.
+
 ## Download to give users
 
 Most Windows computers use:
 
 ```text
-zsharp-installer-1.0.2.0-windows-x86_64.exe
+zsharp-installer-1.0.2.1-windows-x86_64.exe
 ```
 
 Other available downloads are:
 
 ```text
-zsharp-installer-1.0.2.0-windows-aarch64.exe
-zsharp-installer-1.0.2.0-linux-x86_64
-zsharp-installer-1.0.2.0-linux-aarch64
-zsharp-installer-1.0.2.0-macos-x86_64
-zsharp-installer-1.0.2.0-macos-aarch64
+zsharp-installer-1.0.2.1-windows-aarch64.exe
+zsharp-installer-1.0.2.1-linux-x86_64
+zsharp-installer-1.0.2.1-linux-aarch64
+zsharp-installer-1.0.2.1-macos-x86_64
+zsharp-installer-1.0.2.1-macos-aarch64
 ```
 
 Windows users can double-click the matching `.exe`. Linux and macOS users run:
 
 ```text
-chmod +x zsharp-installer-1.0.2.0-PLATFORM
-./zsharp-installer-1.0.2.0-PLATFORM
+chmod +x zsharp-installer-1.0.2.1-PLATFORM
+./zsharp-installer-1.0.2.1-PLATFORM
 ```
 
 Linux requires `curl` for HTTPS downloads. macOS includes the required command
@@ -123,7 +135,7 @@ https://www.zsharp.zombieos.com/update.js?v=0.0.0.0-windows
 send its installed four-part version instead, for example:
 
 ```text
-https://www.zsharp.zombieos.com/update.js?v=1.0.2.0-windows
+https://www.zsharp.zombieos.com/update.js?v=1.0.2.1-windows
 ```
 
 The query is retained for compatibility and cache separation, but GitHub Pages
@@ -133,7 +145,7 @@ the version comparison locally. The manifest always contains the latest release:
 ```json
 {
   "schema": 1,
-  "latestVersion": "1.0.2.0",
+  "latestVersion": "1.0.2.1",
   "download": {
     "url": "https://www.zsharp.zombieos.com/assets/download/ZVM-LATEST.zip",
     "sha256": "archive-sha256",
@@ -204,25 +216,25 @@ By default, the command keeps generated publishing files outside the source
 repository and produces:
 
 ```text
-%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.0\zsharp-download-site-1.0.2.0.zip
-%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.0\zsharp-installer-1.0.2.0-PLATFORM
-%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.0\zsharp-installer-1.0.2.0-SHA256SUMS.txt
-%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.0\zsharp-update-1.0.2.0.js
+%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.1\zsharp-download-site-1.0.2.1.zip
+%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.1\zsharp-installer-1.0.2.1-PLATFORM
+%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.1\zsharp-installer-1.0.2.1-SHA256SUMS.txt
+%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.1\zsharp-update-1.0.2.1.js
 ```
 
 The download-site ZIP contains the static `update.js` manifest,
 `assets/download/ZVM-LATEST.zip`, the six installer downloads, and
 `assets/download/ZSharp-Test-App.zapp` when a test app package was supplied or
 found in the default Downloads project location. Extract its contents into the
-root of the GitHub Pages site. `zsharp-update-1.0.2.0.js` is a second copy of
+root of the GitHub Pages site. `zsharp-update-1.0.2.1.js` is a second copy of
 the same manifest for release records.
 
 After GitHub Pages publishes the files, test:
 
 ```text
-https://www.zsharp.zombieos.com/update.js?v=1.0.2.0-windows
-https://www.zsharp.zombieos.com/update.js?v=1.0.2.0-linux
-https://www.zsharp.zombieos.com/update.js?v=1.0.2.0-macos
+https://www.zsharp.zombieos.com/update.js?v=1.0.2.1-windows
+https://www.zsharp.zombieos.com/update.js?v=1.0.2.1-linux
+https://www.zsharp.zombieos.com/update.js?v=1.0.2.1-macos
 https://www.zsharp.zombieos.com/update.js?v=1.0.0.1-windows
 https://www.zsharp.zombieos.com/assets/download/ZVM-LATEST.zip
 ```

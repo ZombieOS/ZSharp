@@ -2,11 +2,15 @@ zsharp = type.settings
 
 Project: "Z# Game Runtime Test":
 PID: "zsharp_game_runtime_test":
-Version: [1.0.2.0]:
+Version: [1.0.2.1]:
 Authors: ["ZombieOS"]:
-Description: "A small game that exercises the Z# scene, input, physics, audio, and Vulkan systems.":
-ZSharp: [1.0.2.0]:
+Description: "A small game that exercises Z# scenes, objects, input, physics, audio, and Vulkan rendering.":
+ZSharp: [1.0.2.1]:
 
 Dependencies (
- zsharpgame:1.0.0.0
+ zsharpgame:1.0.0.1
+):
+
+Window (
+ StartScene: "Game/Scenes/Main.zscene":
 ):

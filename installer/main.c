@@ -32,8 +32,10 @@
 #define INSTALLER_MANIFEST_LIMIT (1024u * 1024u)
 #define INSTALLER_RUNTIME_LIMIT (256u * 1024u * 1024u)
 #define INSTALLER_ARCHIVE_LIMIT (512u * 1024u * 1024u)
+#ifndef INSTALLER_UPDATE_ENDPOINT
 #define INSTALLER_UPDATE_ENDPOINT \
     "https://www.zsharp.zombieos.com/update.js?v="
+#endif
 #define INSTALLER_TEST_APP_URL \
     "https://www.zsharp.zombieos.com/assets/download/ZSharp-Test-App.zapp"
 

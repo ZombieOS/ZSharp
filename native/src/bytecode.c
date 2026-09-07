@@ -1039,7 +1039,7 @@ int zsharp_bytecode_read(const char *path, ZSharpProgram *program,
         uint8_t script_type = 0;
         uint8_t has_window = 0;
         ok = read_u8(file, &script_type) &&
-             script_type <= (uint8_t)ZSCRIPT_3D &&
+            script_type <= (uint8_t)ZSCRIPT_ACHIEVEMENT &&
              read_u8(file, &has_window) && has_window <= 1;
         if (ok) {
             program->script_type = (ZSharpScriptType)script_type;

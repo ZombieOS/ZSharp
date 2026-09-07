@@ -1,0 +1,8 @@
+zsharp = type.object
+
+noticed object GalleryTitle[] (
+ shape: text:
+ text: "SCENES WORK - PRESS E TO RETURN":
+ scaleX: 2:
+ color: #FFFFFF:
+)

@@ -8,7 +8,7 @@
 int zsharp_game_runtime_available(void);
 const char *zsharp_game_runtime_backend(void);
 
-int zsharp_game_run(const char *title, const char *project_root, int is_3d,
+int zsharp_game_run(const char *title, const char *project_root,
                     ZSharpWindowCallback callback, void *user_data,
                     char *error, size_t error_size);
 

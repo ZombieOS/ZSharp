@@ -385,7 +385,7 @@ static int load_providers(int argc, char **argv, int first,
 }
 
 static int run_source_command(const char *source_path, int argc, char **argv,
-                              int first_option) {
+                              int first_option, int force_game) {
     ZSharpProgram program;
     ZSharpLoadedProvider *loaded = NULL;
     ZSharpProviderBinding *bindings = NULL;
@@ -398,6 +398,7 @@ static int run_source_command(const char *source_path, int argc, char **argv,
     if (!parse_file(source_path, &program)) {
         return 1;
     }
+    if (force_game) program.script_type = ZSCRIPT_GAME;
     project_root = zsharp_project_find_root(source_path, error, sizeof(error));
     if (project_root == NULL) {
         zsharp_program_free(&program);
@@ -453,7 +454,8 @@ static int run_source_command(const char *source_path, int argc, char **argv,
 }
 
 static int run_bytecode_command(const char *bytecode_path, int argc,
-                                char **argv, int first_option) {
+                                char **argv, int first_option,
+                                int force_game) {
     ZSharpProgram program;
     ZSharpLoadedProvider *loaded = NULL;
     ZSharpProviderBinding *bindings = NULL;
@@ -466,6 +468,7 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
         fprintf(stderr, "error: %s\n", error);
         return 1;
     }
+    if (force_game) program.script_type = ZSCRIPT_GAME;
     project_root = zsharp_project_find_root(bytecode_path, error, sizeof(error));
     if (project_root == NULL) {
         zsharp_program_free(&program);
@@ -702,8 +705,7 @@ static void refresh_desktop_shortcut(const char *app_name,
 static char *find_game_startup_path(const char *project_root, char *error,
                                     size_t error_size) {
     ZSharpSourceList sources;
-    char *first_2d = NULL;
-    char *first_3d = NULL;
+    char *first_script = NULL;
     size_t index;
     if (!zsharp_project_list_sources(project_root, &sources, error,
                                      error_size))
@@ -712,7 +714,6 @@ static char *find_game_startup_path(const char *project_root, char *error,
         ZSharpProgram program;
         ZSharpDiagnostic diagnostic;
         char parse_error[512] = {0};
-        char **candidate;
         if (!zsharp_project_parse_file(sources.items[index], &program,
                                        &diagnostic, parse_error,
                                        sizeof(parse_error))) {
@@ -720,40 +721,31 @@ static char *find_game_startup_path(const char *project_root, char *error,
                      diagnostic.message[0] != '\0'
                          ? diagnostic.message
                          : parse_error);
-            free(first_2d);
-            free(first_3d);
+            free(first_script);
             zsharp_project_source_list_free(&sources);
             return NULL;
         }
-        candidate = program.script_type == ZSCRIPT_3D
-                        ? &first_3d
-                        : program.script_type == ZSCRIPT_2D ? &first_2d
-                                                            : NULL;
-        if (candidate != NULL &&
-            (*candidate == NULL || strcmp(sources.items[index], *candidate) < 0)) {
+        if (program.script_type == ZSCRIPT_NORMAL &&
+            (first_script == NULL ||
+             strcmp(sources.items[index], first_script) < 0)) {
             char *replacement = zsharp_copy_text(
                 sources.items[index], strlen(sources.items[index]));
             if (replacement == NULL) {
                 snprintf(error, error_size, "out of memory");
                 zsharp_program_free(&program);
-                free(first_2d);
-                free(first_3d);
+                free(first_script);
                 zsharp_project_source_list_free(&sources);
                 return NULL;
             }
-            free(*candidate);
-            *candidate = replacement;
+            free(first_script);
+            first_script = replacement;
         }
         zsharp_program_free(&program);
     }
     zsharp_project_source_list_free(&sources);
-    if (first_3d != NULL) {
-        free(first_2d);
-        return first_3d;
-    }
-    if (first_2d != NULL) return first_2d;
+    if (first_script != NULL) return first_script;
     snprintf(error, error_size,
-             "the game package has no 2D or 3D Z# startup script");
+             "the game package has no zsharp = type.script startup script");
     return NULL;
 }
 
@@ -861,10 +853,12 @@ static int open_package_command(const char *package_path, int argc,
     if (file_exists(startup_bytecode)) {
         puts("running bytecoded startup");
         result = run_bytecode_command(startup_bytecode, argc, argv,
-                                      first_option);
+                                      first_option,
+                                      package_kind == ZSHARP_PACKAGE_GAME);
     } else {
         puts("running unbytecoded source startup");
-        result = run_source_command(startup, argc, argv, first_option);
+        result = run_source_command(startup, argc, argv, first_option,
+                                    package_kind == ZSHARP_PACKAGE_GAME);
     }
     free(startup);
     free(startup_bytecode);
@@ -979,7 +973,7 @@ int main(int argc, char **argv) {
         printf("Z# game runtime: %s\n",
                zsharp_game_runtime_available() ? "available" : "unavailable");
         printf("Renderer: %s\n", zsharp_game_runtime_backend());
-        printf("Dependency: zsharpgame:1.0.0.0\n");
+        printf("Dependency: zsharpgame:1.0.0.1\n");
         return zsharp_game_runtime_available() ? 0 : 1;
     }
     if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
@@ -1131,14 +1125,14 @@ int main(int argc, char **argv) {
                   stderr);
             return 2;
         }
-        return run_source_command(argv[2], argc, argv, 3);
+        return run_source_command(argv[2], argc, argv, 3, 0);
     }
     if (strcmp(argv[1], "run-bytecode") == 0) {
         if (argc < 3) {
             fputs("error: use 'zsharp run-bytecode <file.zbc>'\n", stderr);
             return 2;
         }
-        return run_bytecode_command(argv[2], argc, argv, 3);
+        return run_bytecode_command(argv[2], argc, argv, 3, 0);
     }
     fprintf(stderr, "error: unknown command '%s'\n", argv[1]);
     print_help();

@@ -128,6 +128,8 @@ ZSharpToken zsharp_lexer_next(ZSharpLexer *lexer) {
         case ']': return make_token(ZTOKEN_RIGHT_BRACKET, start, lexer, line, column);
         case '(': return make_token(ZTOKEN_LEFT_PAREN, start, lexer, line, column);
         case ')': return make_token(ZTOKEN_RIGHT_PAREN, start, lexer, line, column);
+        case '{': return make_token(ZTOKEN_LEFT_BRACE, start, lexer, line, column);
+        case '}': return make_token(ZTOKEN_RIGHT_BRACE, start, lexer, line, column);
         case ':': return make_token(ZTOKEN_COLON, start, lexer, line, column);
         case ',': return make_token(ZTOKEN_COMMA, start, lexer, line, column);
         case '+': return make_token(ZTOKEN_PLUS, start, lexer, line, column);

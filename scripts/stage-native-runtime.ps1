@@ -11,7 +11,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Runtime,
 
-    [string[]] $Support = @()
+    [string[]] $Support = @(),
+
+    [string] $RuntimeVersion = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,12 +29,17 @@ $expectedName = if ($Platform.StartsWith("windows-")) {
     "zsharp"
 }
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-$versionOutput = (& $resolvedRuntime --version | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or
-    $versionOutput -notmatch '^Z# ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$') {
-    throw "The staged runtime did not report a valid four-part Z# version"
+$runtimeVersion = $RuntimeVersion.Trim()
+if ([string]::IsNullOrWhiteSpace($runtimeVersion)) {
+    $versionOutput = (& $resolvedRuntime --version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or
+        $versionOutput -notmatch '^Z# ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$') {
+        throw "The staged runtime did not report a valid four-part Z# version"
+    }
+    $runtimeVersion = $Matches[1]
+} elseif ($runtimeVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') {
+    throw "RuntimeVersion must be a valid four-part Z# version"
 }
-$runtimeVersion = $Matches[1]
 
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 

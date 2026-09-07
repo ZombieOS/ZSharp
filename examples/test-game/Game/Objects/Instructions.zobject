@@ -1,0 +1,9 @@
+zsharp = type.object
+
+noticed object Instructions[] (
+ shape: text:
+ text: "A/D MOVE   SPACE JUMP   E CHANGE SCENE   ESC QUIT":
+ scaleX: 1.5:
+ color: #8DF7FF:
+ layer: 20:
+)

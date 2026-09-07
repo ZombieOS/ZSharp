@@ -1,0 +1,17 @@
+zsharp = type.scene
+
+noticed scene Gallery[] (
+ scene Gallery (
+  title: "Z# Shape Gallery":
+  background: #11152E:
+  gravityY: 0:
+ )
+ objects[JSON] (
+  [
+   { "id": "GalleryTitle", "name": "Gallery Title", "location": { "x": "-250", "y": "275" } },
+   { "id": "GalleryCircle", "name": "Circle", "location": { "x": "-250", "y": "0" } },
+   { "id": "GalleryTriangle", "name": "Triangle", "location": { "x": "0", "y": "0" } },
+   { "id": "GalleryBox", "name": "Box", "location": { "x": "260", "y": "0" } }
+  ]
+ )
+)

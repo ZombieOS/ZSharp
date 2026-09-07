@@ -1,0 +1,8 @@
+zsharp = type.object
+
+noticed object GalleryTriangle[] (
+ shape: triangle:
+ width: 200:
+ height: 190:
+ color: #FF2A72:
+)

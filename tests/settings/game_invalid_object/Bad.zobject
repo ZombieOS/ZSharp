@@ -1,4 +1,4 @@
-zsharp = type.object:2D
+zsharp = type.object
 
 noticed object Broken[] (
  madeUpPhysics: alive:

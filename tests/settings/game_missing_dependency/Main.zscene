@@ -1,0 +1,11 @@
+zsharp = type.scene
+
+noticed scene Main[] (
+ scene Main (
+  title: "Missing Dependency Test":
+  background: #08080B:
+ )
+ objects[JSON] (
+  []
+ )
+)

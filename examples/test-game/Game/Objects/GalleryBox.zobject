@@ -1,0 +1,9 @@
+zsharp = type.object
+
+noticed object GalleryBox[] (
+ shape: rectangle:
+ width: 180:
+ height: 180:
+ rotation: 18:
+ color: #FFE66D:
+)
