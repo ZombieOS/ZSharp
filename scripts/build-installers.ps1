@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.0.2.1",
+    [string] $Version = "1.0.2.2",
 
     [string] $BaseUrl = "https://www.zsharp.zombieos.com",
 
@@ -21,6 +21,8 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $zigPath = (Resolve-Path -LiteralPath $Zig).Path
 $source = Join-Path $projectRoot "installer\main.c"
+$windowsResource = Join-Path $projectRoot "installer\windows.rc"
+$installerIncludeRoot = Join-Path $projectRoot "installer"
 $hashSource = Join-Path $projectRoot "native\src\hash.c"
 $includeRoot = Join-Path $projectRoot "native\src"
 $resourceRoot = Join-Path $projectRoot `
@@ -126,6 +128,9 @@ foreach ($target in $targets) {
         $source,
         $hashSource
     ) + $target.Libraries
+    if ($target.Id.StartsWith("windows-")) {
+        $arguments += @("-I$installerIncludeRoot", $windowsResource)
+    }
     if ($Beta) {
         $arguments = @($arguments[0],
             "-DINSTALLER_UPDATE_ENDPOINT=`"https://www.zsharp.zombieos.com/beta.js?v=`"") +

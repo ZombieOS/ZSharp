@@ -631,6 +631,29 @@ static void show_app_failure(const char *app_name, const char *reason) {
     free(headline);
 }
 
+static int version_is_newer_than_runtime(
+    const uint32_t version[ZSHARP_VERSION_PART_COUNT]) {
+    const uint32_t runtime[ZSHARP_VERSION_PART_COUNT] = {
+        ZSHARP_VERSION_MAJOR, ZSHARP_VERSION_MINOR,
+        ZSHARP_VERSION_PATCH, ZSHARP_VERSION_REVISION
+    };
+    size_t index;
+    for (index = 0; index < ZSHARP_VERSION_PART_COUNT; index++) {
+        if (version[index] > runtime[index]) return 1;
+        if (version[index] < runtime[index]) return 0;
+    }
+    return 0;
+}
+
+static void show_outdated_version(
+    const uint32_t required[ZSHARP_VERSION_PART_COUNT]) {
+    char reason[160];
+    snprintf(reason, sizeof(reason),
+             "Update to at least %u.%u.%u.%u!",
+             required[0], required[1], required[2], required[3]);
+    show_hub_message("Outdated Z# Version!", reason);
+}
+
 static char *startup_window_icon(const char *startup_path) {
     ZSharpProgram program;
     ZSharpDiagnostic diagnostic;
@@ -787,6 +810,19 @@ static int open_package_command(const char *package_path, int argc,
     }
     if (!load_settings_or_report(root, &settings)) {
         show_app_failure(app_name, command_failure);
+        zsharp_package_info_free(&info);
+        free(root);
+        free(app_name);
+        return 1;
+    }
+    if (version_is_newer_than_runtime(settings.zsharp_version)) {
+        fprintf(stderr,
+                "package error: outdated Z# version; update to at least "
+                "%u.%u.%u.%u\n",
+                settings.zsharp_version[0], settings.zsharp_version[1],
+                settings.zsharp_version[2], settings.zsharp_version[3]);
+        show_outdated_version(settings.zsharp_version);
+        zsharp_settings_free(&settings);
         zsharp_package_info_free(&info);
         free(root);
         free(app_name);

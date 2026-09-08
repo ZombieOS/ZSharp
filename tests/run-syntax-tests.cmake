@@ -277,6 +277,23 @@ if(NOT EXISTS "${TEST_GAME_PACKAGE}" OR
     message(FATAL_ERROR
         "game --unbytecode did not create both game packages")
 endif()
+set(future_game_project "${CMAKE_CURRENT_BINARY_DIR}/future-game-project")
+file(REMOVE_RECURSE "${future_game_project}")
+file(COPY "${PROJECT_ROOT}/tests/game_package/"
+     DESTINATION "${future_game_project}")
+file(READ "${future_game_project}/project.zsettings" future_settings)
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.0.2.3]:"
+       future_settings "${future_settings}")
+file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
+expect_success("future-version game packaging" "${PROJECT_ROOT}"
+               package game "${future_game_project}" FutureVersion)
+set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
+expect_failure("future-version package launch"
+               "Update to at least 1.0.2.3!"
+               "${PROJECT_ROOT}"
+               open "${future_game_project}/Packages/FutureVersion.zgame")
+unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})
+file(REMOVE_RECURSE "${future_game_project}")
 set(source_zip "${CMAKE_CURRENT_BINARY_DIR}/PackageTest-unbytecoded.zip")
 file(REMOVE "${source_zip}")
 file(RENAME "${TEST_SOURCE_PACKAGE}" "${source_zip}")

@@ -1,0 +1,8 @@
+zsharp = type.script:audio
+
+noticed audio Bounce[] (
+ source: "Audio/Bounce.wav":
+ volume: 35:
+ pitch: 100:
+ loop: false:
+)

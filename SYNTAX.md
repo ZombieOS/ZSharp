@@ -60,13 +60,15 @@ The supported file headers are:
 
 ```zsharp
 zsharp = type.script:window
+zsharp = type.script:audio
 zsharp = type.scene
 zsharp = type.object
 zsharp = type.settings
 ```
 
 Normal game logic remains `type.script`. Each `.zscene` file uses `type.scene`,
-and each `.zobject` file uses `type.object`. The old `type.script:2D`,
+each `.zobject` file uses `type.object`, and each `.zaudio` source uses
+`type.script:audio`. The old `type.script:2D`,
 `type.script:3D`, `type.object:2D`, and `type.object:3D` headers are no longer
 valid source syntax.
 
@@ -349,25 +351,42 @@ Awards are idempotent: awarding an earned ID again does nothing. New awards
 are saved locally by project PID, retained across reinstall, counted in the
 Z# Hub, and displayed in-game for five seconds with a short sound.
 
-WAV audio uses a safe project-relative path:
+Reusable scene audio is defined in a `.zaudio` source file. The source points
+to the real WAV asset; `.zaudio` does not contain encoded sound data:
 
 ```zsharp
-noticed object BounceSound[] (
- scene: Main:
- visible: dead:
- audio: "assets/audio/bounce.wav":
- audioVolume: 0.4:
- audioLoop: dead:
- audioAutoplay: dead:
- audioOnCollision: alive:
- collider: box:
+zsharp = type.script:audio
+
+noticed audio Bounce[] (
+ source: "Assets/Audio/Bounce.wav":
+ volume: 35:
+ pitch: 100:
+ loop: false:
 )
 ```
 
-For small effects that need no asset, generate a tone with `tone:` (frequency
-in hertz) and `toneDuration:` (seconds). `audioAutoplay` starts it when the game
-loads, `audioOnCollision` starts it on a new collision, and
-`Object.audioPlay.set: alive:` starts it from a script.
+Place it in a scene's existing `objects[JSON]` list by its audio ID:
+
+```json
+{
+ "id": "Bounce",
+ "name": "Ball Bounce",
+ "location": {
+  "x": "0",
+  "y": "0"
+ }
+}
+```
+
+`volume` and `pitch` use 100 as their normal value. `loop` accepts `true` or
+`false` (and the equivalent Z# statuses `alive` or `dead`). Audio remains idle
+until a script in its active scene starts it with
+`Bounce.audioPlay.set: alive:`. ZVM currently accepts WAV assets for `.zaudio`
+sources.
+
+Object-owned WAV audio and generated tones remain supported for compatibility.
+For small effects that need no asset, use `tone:` (frequency in hertz) and
+`toneDuration:` (seconds).
 
 The complete playable example is in `examples/test-game`. Package both the
 bytecoded and source forms with:
@@ -1713,7 +1732,7 @@ archive. Rename `Application-unbytecoded.zapp` to
 does not change their contents.
 
 The packager checks `project.zsettings` and validates every included `.zsharp`,
-`.zscene`, and `.zobject` file. An app requires a configured `Window Startup`;
+`.zscene`, `.zobject`, and `.zaudio` file. An app requires a configured `Window Startup`;
 a game requires `zsharpgame:1.0.0.1`, at least one normal `type.script` file,
 and at least one `type.scene` `.zscene` file. The first source and scene in
 sorted path order are used as the startup script and initial scene. Renaming an
@@ -1779,8 +1798,8 @@ full safety model.
 
 `.zgame` uses the same secure package, cache, association, shortcut, and
 uninstall foundation as `.zapp`. Opening one launches its normal game startup
-script, loads and validates the project's separate `.zscene` and `.zobject`
-files, starts every
+script, loads and validates the project's separate `.zscene`, `.zobject`, and
+`.zaudio` files, starts every
 eligible non-`DR` `Start[]` task, and enters the SDL3/Vulkan game loop. Windows
 and Linux are the supported game targets for 1.0.2.1. The macOS/MoltenVK game
 path is experimental and is not advertised as supported until hardware tests

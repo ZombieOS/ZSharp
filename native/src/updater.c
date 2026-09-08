@@ -847,7 +847,10 @@ int zsharp_update_now(char *error, size_t error_size) {
     if (!CreateProcessW(wide_installer, command, NULL, NULL, FALSE,
                         CREATE_NO_WINDOW | DETACHED_PROCESS,
                         NULL, NULL, &startup, &process)) {
-        snprintf(error, error_size, "could not start the Z# updater");
+        DWORD launch_error = GetLastError();
+        snprintf(error, error_size,
+                 "could not start the Z# updater (Windows error %lu)",
+                 (unsigned long)launch_error);
         goto windows_done;
     }
     CloseHandle(process.hThread);

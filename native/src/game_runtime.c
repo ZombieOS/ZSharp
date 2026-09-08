@@ -315,6 +315,7 @@ static int load_audio(ZSharpGameState *game, char *error,
             object->audio_length =
                 (unsigned)(sample_count * sizeof(*samples));
             SDL_SetAudioStreamGain(stream, object->audio_volume);
+            SDL_SetAudioStreamFrequencyRatio(stream, object->audio_pitch);
             if (object->audio_autoplay) object->audio_started = 1;
             continue;
         }
@@ -348,6 +349,7 @@ static int load_audio(ZSharpGameState *game, char *error,
             return 0;
         }
         SDL_SetAudioStreamGain(stream, object->audio_volume);
+        SDL_SetAudioStreamFrequencyRatio(stream, object->audio_pitch);
         object->audio_stream = stream;
         object->audio_buffer = buffer;
         object->audio_length = length;
@@ -376,19 +378,33 @@ static void update_audio(ZSharpGameState *game) {
         int collision_started = object->audio_on_collision &&
                                 object->colliding && !object->was_colliding;
         if (stream == NULL) continue;
+        if (object->scene == NULL || game->model.active_scene == NULL ||
+            strcmp(object->scene, game->model.active_scene) != 0) {
+            if (object->audio_playing) {
+                SDL_ClearAudioStream(stream);
+                SDL_PauseAudioStreamDevice(stream);
+                object->audio_playing = 0;
+            }
+            continue;
+        }
         SDL_SetAudioStreamGain(stream, object->audio_volume);
+        SDL_SetAudioStreamFrequencyRatio(stream, object->audio_pitch);
         if (object->audio_started || collision_started) {
             SDL_ClearAudioStream(stream);
             SDL_PutAudioStreamData(stream, object->audio_buffer,
                                    (int)object->audio_length);
             SDL_ResumeAudioStreamDevice(stream);
             object->audio_started = 0;
-        } else if (object->audio_loop &&
+            object->audio_playing = 1;
+        } else if (object->audio_loop && object->audio_playing &&
                    SDL_GetAudioStreamQueued(stream) <
                        (int)(object->audio_length / 3u)) {
             SDL_PutAudioStreamData(stream, object->audio_buffer,
                                    (int)object->audio_length);
             SDL_ResumeAudioStreamDevice(stream);
+        } else if (!object->audio_loop && object->audio_playing &&
+                   SDL_GetAudioStreamQueued(stream) <= 0) {
+            object->audio_playing = 0;
         }
         object->was_colliding = object->colliding;
     }

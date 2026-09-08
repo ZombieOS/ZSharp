@@ -16,6 +16,14 @@ noticed scene Main[] (
      "x": "0",
      "y": "0"
     }
+   },
+   {
+    "id": "Bounce",
+    "name": "Bounce Audio",
+    "location": {
+     "x": "0",
+     "y": "0"
+    }
    }
   ]
  )

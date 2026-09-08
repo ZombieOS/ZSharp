@@ -1,6 +1,16 @@
 # Changelog
 
-## 1.0.2.1 - Game structure and achievements - Beta
+## 1.0.2.2 - Audio and Windows ARM64 updater patch - 2026-09-08
+
+- Fixed Windows ARM64 installers being treated as administrator-only programs,
+  which prevented the Z# Hub from starting its updater.
+- Hub updater launch failures now include the underlying Windows error code.
+- Added scene-owned `.zaudio` sources with WAV playback, volume, pitch, looping,
+  and script-controlled playback.
+- Packages requiring a newer Z# runtime now show the minimum required version
+  instead of failing later on unfamiliar syntax.
+
+## 1.0.2.1 - Game structure and achievements - 2026-09-07
 
 - Reworked games around separate `.zscene`, `.zobject`, and `.zsharp` files,
   with automatic 2D/3D detection and named `input.key.*` controls.

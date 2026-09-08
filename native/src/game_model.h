@@ -94,6 +94,7 @@ typedef struct ZSharpGameObject {
     char *asset_path;
     char *audio_path;
     float audio_volume;
+    float audio_pitch;
     float tone_frequency;
     float tone_duration;
     int audio_loop;
@@ -103,8 +104,10 @@ typedef struct ZSharpGameObject {
     void *audio_buffer;
     unsigned audio_length;
     int audio_started;
+    int audio_playing;
     int was_colliding;
     int spawn_initialized;
+    int is_audio_source;
     char **attribute_ids;
     int *attribute_active;
     size_t attribute_count;

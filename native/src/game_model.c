@@ -38,6 +38,12 @@ typedef struct ModelParser {
     int failed;
 } ModelParser;
 
+typedef enum ModelFileKind {
+    MODEL_FILE_OBJECT,
+    MODEL_FILE_SCENE,
+    MODEL_FILE_AUDIO
+} ModelFileKind;
+
 static void model_error(char *error, size_t error_size, const char *message) {
     if (error != NULL && error_size != 0)
         snprintf(error, error_size, "%s", message == NULL ? "game error"
@@ -239,12 +245,15 @@ static int value_status(ModelParser *parser, const ModelValue *value,
                         int *status) {
     if (value->type != MODEL_IDENTIFIER ||
         (strcmp(value->text, "alive") != 0 &&
-         strcmp(value->text, "dead") != 0)) {
+         strcmp(value->text, "dead") != 0 &&
+         strcmp(value->text, "true") != 0 &&
+         strcmp(value->text, "false") != 0)) {
         parser_fail(parser, &parser->current,
-                    "field requires alive or dead");
+                    "field requires alive/dead or true/false");
         return 0;
     }
-    *status = strcmp(value->text, "alive") == 0;
+    *status = strcmp(value->text, "alive") == 0 ||
+              strcmp(value->text, "true") == 0;
     return 1;
 }
 
@@ -359,6 +368,7 @@ static ZSharpGameObject *add_object(ModelParser *parser, char *name) {
     object->color = 0xffffffu;
     object->visible = 1;
     object->audio_volume = 1.0f;
+    object->audio_pitch = 1.0f;
     object->tone_duration = 0.12f;
     return object;
 }
@@ -800,7 +810,7 @@ static int parse_scene_objects(ModelParser *parser, const char *scene_name) {
         definition = find_definition(parser->model, id);
         if (definition == NULL) {
             parser_fail(parser, &parser->current,
-                        "scene references an unknown object id");
+                        "scene references an unknown object or audio id");
             free(id);
             free(display_name);
             return 0;
@@ -863,6 +873,59 @@ static int parse_object_declaration(ModelParser *parser, char *name) {
                               "expected ')' after object fields");
 }
 
+static int parse_audio_declaration(ModelParser *parser, char *name) {
+    ZSharpGameObject *audio;
+    parser->definition_mode = 1;
+    audio = add_object(parser, name);
+    if (audio == NULL ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' after the audio id") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "expected ']' after the audio id") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before audio fields")) return 0;
+    audio->visible = 0;
+    audio->is_audio_source = 1;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
+           parser->current.type != ZTOKEN_EOF) {
+        char *field = parser_name(parser, "an audio field name");
+        ModelValue value;
+        float number;
+        if (field == NULL ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after the audio field") ||
+            !parse_value(parser, &value) ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after the audio value")) {
+            free(field);
+            return 0;
+        }
+        if (strcmp(field, "source") == 0) {
+            if (value.type != MODEL_TEXT ||
+                !replace_text(&audio->audio_path, value.text))
+                parser_fail(parser, &parser->current,
+                            "audio source requires a quoted path");
+        } else if (strcmp(field, "volume") == 0) {
+            if (value_number(parser, &value, &number))
+                audio->audio_volume = number / 100.0f;
+        } else if (strcmp(field, "pitch") == 0) {
+            if (value_number(parser, &value, &number))
+                audio->audio_pitch = number / 100.0f;
+        } else if (strcmp(field, "loop") == 0) {
+            value_status(parser, &value, &audio->audio_loop);
+        } else {
+            parser_fail(parser, &parser->current, "unknown audio field");
+        }
+        free(value.text);
+        free(field);
+    }
+    if (audio->audio_path == NULL && !parser->failed)
+        parser_fail(parser, &parser->current,
+                    "audio definitions require a source field");
+    return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "expected ')' after audio fields");
+}
+
 static int parse_scene_declaration(ModelParser *parser, char *outer_name) {
     char *scene_name = NULL;
     ZSharpGameScene *scene;
@@ -909,7 +972,7 @@ static int parse_scene_declaration(ModelParser *parser, char *outer_name) {
 }
 
 static int parse_model_file(const char *path, const char *source,
-                            ZSharpGameModel *model, int is_scene,
+                            ZSharpGameModel *model, ModelFileKind kind,
                             char *error, size_t error_size) {
     ModelParser parser;
     const char *file_name = path;
@@ -938,11 +1001,21 @@ static int parse_model_file(const char *path, const char *source,
         !parser_expect_type(&parser, ZTOKEN_EQUAL, "expected '='") ||
         !parser_expect_word(&parser, "type") ||
         !parser_expect_type(&parser, ZTOKEN_DOT, "expected '.'") ||
-        !parser_expect_word(&parser, is_scene ? "scene" : "object")) {
+        !parser_expect_word(&parser, kind == MODEL_FILE_AUDIO
+                                      ? "script"
+                                      : kind == MODEL_FILE_SCENE
+                                            ? "scene" : "object") ||
+        (kind == MODEL_FILE_AUDIO &&
+         (!parser_expect_type(&parser, ZTOKEN_COLON,
+                              "expected ':' after type.script") ||
+          !parser_expect_word(&parser, "audio")))) {
         if (!parser.failed)
             parser_fail(&parser, &parser.current,
-                        is_scene ? "expected zsharp = type.scene"
-                                 : "expected zsharp = type.object");
+                        kind == MODEL_FILE_AUDIO
+                            ? "expected zsharp = type.script:audio"
+                            : kind == MODEL_FILE_SCENE
+                                  ? "expected zsharp = type.scene"
+                                  : "expected zsharp = type.object");
         free(source_name);
         return 0;
     }
@@ -952,23 +1025,39 @@ static int parse_model_file(const char *path, const char *source,
             !parser_match_word(&parser, "silent")) {
             parser_fail(&parser, &parser.current,
                         "expected 'noticed' or 'silent'");
-        } else if (!parser_match_word(&parser,
-                                      is_scene ? "scene" : "object")) {
+        } else if (!parser_match_word(
+                       &parser, kind == MODEL_FILE_AUDIO
+                                      ? "audio"
+                                      : kind == MODEL_FILE_SCENE
+                                            ? "scene" : "object")) {
             parser_fail(&parser, &parser.current,
-                        is_scene ? "expected 'scene'" : "expected 'object'");
+                        kind == MODEL_FILE_AUDIO
+                            ? "expected 'audio'"
+                            : kind == MODEL_FILE_SCENE
+                                  ? "expected 'scene'" : "expected 'object'");
         } else {
-            name = parser_name(&parser,
-                               is_scene ? "a scene name" : "an object name");
+            name = parser_name(
+                &parser, kind == MODEL_FILE_AUDIO
+                             ? "an audio name"
+                             : kind == MODEL_FILE_SCENE
+                                   ? "a scene name" : "an object name");
             if (name != NULL) {
-                if (is_scene) parse_scene_declaration(&parser, name);
-                else parse_object_declaration(&parser, name);
+                if (kind == MODEL_FILE_SCENE)
+                    parse_scene_declaration(&parser, name);
+                else if (kind == MODEL_FILE_AUDIO)
+                    parse_audio_declaration(&parser, name);
+                else
+                    parse_object_declaration(&parser, name);
             }
         }
     }
     if (!parser.failed && parser.current.type != ZTOKEN_EOF)
         parser_fail(&parser, &parser.current,
-                    is_scene ? "a .zscene file can define exactly one scene"
-                             : "a .zobject file can define exactly one object");
+                    kind == MODEL_FILE_AUDIO
+                        ? "a .zaudio file can define exactly one audio source"
+                        : kind == MODEL_FILE_SCENE
+                              ? "a .zscene file can define exactly one scene"
+                              : "a .zobject file can define exactly one object");
     free(source_name);
     return !parser.failed;
 }
@@ -1195,6 +1284,17 @@ static int safe_relative_asset(const char *path) {
            strstr(path, "..") == NULL;
 }
 
+static int wav_asset(const char *path) {
+    size_t length = path == NULL ? 0 : strlen(path);
+    const char *extension;
+    if (length < 4) return 0;
+    extension = path + length - 4;
+    return extension[0] == '.' &&
+           tolower((unsigned char)extension[1]) == 'w' &&
+           tolower((unsigned char)extension[2]) == 'a' &&
+           tolower((unsigned char)extension[3]) == 'v';
+}
+
 static int project_asset_exists(const char *root, const char *relative) {
     size_t root_length = strlen(root);
     size_t relative_length = strlen(relative);
@@ -1242,7 +1342,23 @@ int zsharp_game_model_load(const char *project_root,
     for (index = 0; index < files.count; index++) {
         char *source = NULL;
         if (!read_file(files.items[index], &source, error, error_size) ||
-            !parse_model_file(files.items[index], source, model, 0,
+            !parse_model_file(files.items[index], source, model,
+                              MODEL_FILE_OBJECT,
+                              error, error_size)) {
+            free(source);
+            zsharp_project_source_list_free(&files);
+            goto failed;
+        }
+        free(source);
+    }
+    zsharp_project_source_list_free(&files);
+    if (!zsharp_project_list_files(project_root, ZSHARP_AUDIO_EXTENSION,
+                                   &files, error, error_size)) goto failed;
+    for (index = 0; index < files.count; index++) {
+        char *source = NULL;
+        if (!read_file(files.items[index], &source, error, error_size) ||
+            !parse_model_file(files.items[index], source, model,
+                              MODEL_FILE_AUDIO,
                               error, error_size)) {
             free(source);
             zsharp_project_source_list_free(&files);
@@ -1256,7 +1372,8 @@ int zsharp_game_model_load(const char *project_root,
     for (index = 0; index < files.count; index++) {
         char *source = NULL;
         if (!read_file(files.items[index], &source, error, error_size) ||
-            !parse_model_file(files.items[index], source, model, 1,
+            !parse_model_file(files.items[index], source, model,
+                              MODEL_FILE_SCENE,
                               error, error_size)) {
             free(source);
             zsharp_project_source_list_free(&files);
@@ -1346,10 +1463,11 @@ int zsharp_game_model_load(const char *project_root,
             object->depth <= 0.0f || object->mass <= 0.0f ||
             object->scale_x <= 0.0f || object->scale_y <= 0.0f ||
             object->scale_z <= 0.0f || object->audio_volume < 0.0f ||
-            object->audio_volume > 1.0f) {
+            object->audio_volume > 1.0f || object->audio_pitch <= 0.0f ||
+            object->audio_pitch > 4.0f) {
             if (error != NULL && error_size != 0)
                 snprintf(error, error_size,
-                         "game object '%s' has invalid size, mass, scale, or audioVolume",
+                         "game object '%s' has invalid size, mass, scale, volume, or pitch",
                          object->name);
             goto failed;
         }
@@ -1362,6 +1480,13 @@ int zsharp_game_model_load(const char *project_root,
             if (error != NULL && error_size != 0)
                 snprintf(error, error_size,
                          "game object '%s' requires a safe project-relative asset path",
+                         object->name);
+            goto failed;
+        }
+        if (object->is_audio_source && !wav_asset(object->audio_path)) {
+            if (error != NULL && error_size != 0)
+                snprintf(error, error_size,
+                         "audio source '%s' requires a project-relative WAV source",
                          object->name);
             goto failed;
         }
@@ -1825,6 +1950,8 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
             scene_object->grounded = 0;
             scene_object->colliding = 0;
             scene_object->was_colliding = 0;
+            if (scene_object->audio_autoplay)
+                scene_object->audio_started = 1;
         }
         return 1;
     }

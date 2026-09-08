@@ -5,8 +5,8 @@ Official website and downloads: <https://www.zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
-Version 1.0.2.1 uses separate `.zscene` and `.zobject` files for game scenes
-and objects. It adds executable `.zgame` packages, the
+Version 1.0.2.2 uses separate `.zscene`, `.zobject`, and `.zaudio` files for
+game scenes, objects, and scene-owned WAV sources. It adds executable `.zgame` packages, the
 `zsharpgame:1.0.0.1` dependency, Vulkan drawing, named-key input, cameras, frame timing,
 2D/3D transforms, physics, collisions, and audio. Windows and Linux are the
 advertised game targets. A MoltenVK path is built for macOS, but game support
@@ -46,7 +46,7 @@ Game logic uses normal `type.script` files, every scene uses its own
 `.zobject` file. These files provide primitive and text objects, transforms,
 cameras, named-key movement,
 static/dynamic/kinematic bodies, gravity, collisions, generated tones, and WAV
-playback. Native `.zss` files apply CSS-style rules to game objects and window
+playback with volume, pitch, and looping controls. Native `.zss` files apply CSS-style rules to game objects and window
 elements without a browser. `Window.StartScene` selects the opening scene, and
 optional ordered `Splash[JSON]` PNG/BMP images appear before game scripts begin.
 Game properties use normal Z# reads and `.set:` writes. The runtime
