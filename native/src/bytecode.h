@@ -184,7 +184,9 @@ typedef enum ZSharpOpCode {
     ZOP_PUSH_NULL = 46,
     ZOP_UI_SET = 47,
     ZOP_DELAY = 48,
-    ZOP_UI_SET_DYNAMIC = 49
+    ZOP_UI_SET_DYNAMIC = 49,
+    ZOP_UI_SET_VALUE = 50,
+    ZOP_RANDOM = 51
 } ZSharpOpCode;
 
 typedef struct ZSharpInstruction {

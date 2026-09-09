@@ -1326,10 +1326,12 @@ static int validate_simple_name(const ZSharpProgram *program,
         }
     } else if (instruction->op == ZOP_STORE_GLOBAL ||
                instruction->op == ZOP_STORE_FIELD) {
-        if (model_find_variable(room, instruction->operand) == NULL) {
+        if (!function_knows_name(room, function, instruction_index,
+                                 instruction->operand)) {
             snprintf(error, error_size,
-                     "room '%s' has no field named '%s'",
-                     room->qualified_name, instruction->operand);
+                     "brain '%s.%s' has no local or room field named '%s'",
+                     room->qualified_name, function->name,
+                     instruction->operand);
             return 0;
         }
     } else if (instruction->op == ZOP_CALL_METHOD &&

@@ -319,6 +319,34 @@ static int parse_primary(Parser *parser, ZSharpFunction *function) {
         int qualified = zsharp_token_equals(&token, "number") ||
                         zsharp_token_equals(&token, "var");
         advance_token(parser);
+        if (zsharp_token_equals(&token, "random") &&
+            match_type(parser, ZTOKEN_DOT)) {
+            char *method = consume_name(parser, "number, decimal, or chance");
+            int kind = method != NULL && strcmp(method, "number") == 0 ? 1 :
+                       method != NULL && strcmp(method, "decimal") == 0 ? 2 :
+                       method != NULL && strcmp(method, "chance") == 0 ? 3 : 0;
+            uint32_t arguments = kind == 3 ? 1u : 2u;
+            free(method);
+            if (kind == 0) {
+                fail_at(parser, &token,
+                        "random supports number, decimal, or chance");
+                return 0;
+            }
+            if (!consume_type(parser, ZTOKEN_LEFT_PAREN,
+                              "'(' after the random function") ||
+                !parse_expression(parser, function)) return 0;
+            if (arguments == 2 &&
+                (!consume_type(parser, ZTOKEN_COMMA,
+                               "',' between random bounds") ||
+                 !parse_expression(parser, function))) return 0;
+            if (!consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "')' after the random arguments")) return 0;
+            instruction = emit(parser, function, ZOP_RANDOM);
+            if (instruction == NULL) return 0;
+            instruction->number_operand = kind;
+            instruction->argument_count = arguments;
+            return 1;
+        }
         if (zsharp_token_equals(&token, "Function")) {
             return parse_qualified_call(parser, function, 1);
         }
@@ -990,8 +1018,30 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
             goto failed;
         }
         if (!consume_type(parser, ZTOKEN_COLON,
-                          "':' after the window property setter") ||
-            !parse_ui_update_value(parser, &value_type, &unit, &value_text) ||
+                          "':' after the window property setter")) {
+            goto failed;
+        }
+        if (parser->current.type == ZTOKEN_LEFT_PAREN) {
+            if (part_count == 1) {
+                fail_at(parser, &first_token,
+                        "calculated window setters require an explicit element property path");
+                goto failed;
+            }
+            if (!parse_expression(parser, function) ||
+                !consume_type(parser, ZTOKEN_COLON,
+                              "':' after the calculated window property value")) {
+                goto failed;
+            }
+            path = join_path_parts(parser, parts, part_count);
+            if (path == NULL) goto failed;
+            instruction = emit(parser, function, ZOP_UI_SET_VALUE);
+            if (instruction == NULL) goto failed;
+            instruction->operand = path;
+            path = NULL;
+            for (index = 0; index < part_count; index++) free(parts[index]);
+            return 1;
+        }
+        if (!parse_ui_update_value(parser, &value_type, &unit, &value_text) ||
             !consume_type(parser, ZTOKEN_COLON,
                           "':' after the window property value")) {
             free(value_text);

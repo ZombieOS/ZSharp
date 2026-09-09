@@ -5,6 +5,7 @@ noticed room Actions[] (
  noticed text Background = "Main.Design.background":
 
  noticed brain Theme[] (
+  number CursorLine = 4:
   text FullInput = Main.NameInput.contents:
   number CharacterCount = Main.NameInput.totalcharacters:
   number CurrentColumn = Main.NameInput.currentcolumn:
@@ -24,6 +25,7 @@ noticed room Actions[] (
   Main.Design.locationX.set: 2px:
   Main.Design.locationY.set: -2px:
   Main.Header1.content.set: "Updated text":
+  Main.Header1.content.set: ("L" + CursorLine + ":C12"):
   Main.Header1.color.set: #123456:
   Main.PlayButton.text.set: "Updated button":
   Main.PlayButton.buttonColor.set: #654321:

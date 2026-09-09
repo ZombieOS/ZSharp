@@ -1,0 +1,26 @@
+zsharp = type.script
+
+noticed room Main[] (
+ noticed brain Start[] (
+  number UpSteps = 0:
+  number.set:UpSteps = 5:
+  text Label = "L":
+  text.set.Label = Label + UpSteps + ":" + alive:
+  Print(Label):
+
+  number Whole = random.number(2, 4):
+  number Decimal = random.decimal(10, 11):
+  if[Whole >= 2 and Whole <= 4] (
+   Print("random number accepted"):
+  ) else (
+  )
+  if[Decimal >= 10 and Decimal <= 11] (
+   Print("random decimal accepted"):
+  ) else (
+  )
+  if[random.chance(100)] (
+   Print("random chance accepted"):
+  ) else (
+  )
+ )
+)

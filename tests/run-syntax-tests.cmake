@@ -185,6 +185,26 @@ expect_failure("removed 3D script header" "expected 'window'"
                "${PROJECT_ROOT}" check tests/Game3DHeader.zsharp)
 expect_success("SDL/Vulkan game runtime build" "${PROJECT_ROOT}"
                game-info)
+expect_success("developer experience syntax" "${PROJECT_ROOT}"
+               check tests/DeveloperExperience.zsharp)
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run
+            "${PROJECT_ROOT}/tests/DeveloperExperience.zsharp"
+    WORKING_DIRECTORY "${PROJECT_ROOT}"
+    RESULT_VARIABLE developer_experience_result
+    OUTPUT_VARIABLE developer_experience_output
+    ERROR_VARIABLE developer_experience_error
+)
+if(NOT developer_experience_result EQUAL 0 OR
+   NOT developer_experience_output MATCHES "L5:alive" OR
+   NOT developer_experience_output MATCHES "random number accepted" OR
+   NOT developer_experience_output MATCHES "random decimal accepted" OR
+   NOT developer_experience_output MATCHES "random chance accepted")
+    message(FATAL_ERROR
+        "developer experience runtime test failed (${developer_experience_result})\n"
+        "stdout: ${developer_experience_output}\n"
+        "stderr: ${developer_experience_error}")
+endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             ZSHARP_WINDOW_FORCE_FAILURE=1
@@ -282,14 +302,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.0.2.3]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.0.2.4]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.0.2.3!"
+               "Update to at least 1.0.2.4!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

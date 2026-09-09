@@ -304,6 +304,11 @@ static int write_instruction(FILE *file,
             return write_u32(file, (uint32_t)instruction->number_operand) &&
                    write_u32(file, instruction->index_operand) &&
                    write_string(file, instruction->call_function);
+        case ZOP_UI_SET_VALUE:
+            return write_string(file, instruction->operand);
+        case ZOP_RANDOM:
+            return write_u32(file, (uint32_t)instruction->number_operand) &&
+                   write_u32(file, instruction->argument_count);
         case ZOP_DELAY:
             return write_string(file, instruction->operand);
         case ZOP_ADD:
@@ -736,6 +741,12 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
             instruction->number_operand = (int32_t)value;
             return read_u32(file, &instruction->index_operand) &&
                    read_string(file, &instruction->call_function);
+        case ZOP_UI_SET_VALUE:
+            return read_string(file, &instruction->operand);
+        case ZOP_RANDOM:
+            if (!read_u32(file, &value)) return 0;
+            instruction->number_operand = (int32_t)value;
+            return read_u32(file, &instruction->argument_count);
         case ZOP_DELAY:
             return read_string(file, &instruction->operand);
         case ZOP_ADD:

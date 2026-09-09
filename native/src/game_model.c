@@ -1698,7 +1698,7 @@ static int valid_object_field(const char *field) {
         "positionX","positionY","positionZ","width","height","depth",
         "rotation","scaleX","scaleY","scaleZ","velocityX","velocityY",
         "velocityZ","mass","gravityScale","restitution","friction",
-        "audioVolume","tone",
+        "audioVolume","tone","texture",
         "toneDuration","layer","color",
         "visible","trigger","grounded","colliding","text","scene",
         "audioLoop","audioAutoplay","audioOnCollision","audioPlay"
@@ -1878,10 +1878,14 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
         *type = ZWINDOW_READ_TEXT;
         return copy_property_text(color, text, error, error_size);
     }
-    if (strcmp(field, "text") == 0 || strcmp(field, "scene") == 0) {
+    if (strcmp(field, "text") == 0 || strcmp(field, "scene") == 0 ||
+        strcmp(field, "texture") == 0) {
         *type = ZWINDOW_READ_TEXT;
-        return copy_property_text(strcmp(field, "text") == 0
+        return copy_property_text(
+                                  strcmp(field, "text") == 0
                                       ? (object->text == NULL ? "" : object->text)
+                                  : strcmp(field, "texture") == 0
+                                      ? (object->asset_path == NULL ? "" : object->asset_path)
                                       : object->scene,
                                   text, error, error_size);
     }
@@ -1991,6 +1995,14 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
     object = find_object(model, count == 2 ? parts[0] : parts[1]);
     if (strcmp(field, "text") == 0)
         return replace_text(&object->text, value);
+    if (strcmp(field, "texture") == 0) {
+        if (!safe_relative_asset(value)) {
+            model_error(error, error_size,
+                        "textures require a safe project-relative path");
+            return 0;
+        }
+        return replace_text(&object->asset_path, value);
+    }
     if (strcmp(field, "scene") == 0) {
         if (find_scene(model, value) == NULL) {
             model_error(error, error_size, "unknown game scene");

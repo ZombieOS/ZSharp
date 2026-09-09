@@ -5,11 +5,14 @@
 #include "project.h"
 #include "window.h"
 #include "window_style.h"
+#include "terminal.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -133,6 +136,46 @@ static int coerce_number_to_text(RuntimeHeap *heap, RuntimeValue *value,
     value->type = ZVALUE_TEXT;
     value->text = copy;
     return 1;
+}
+
+static int coerce_value_to_text(RuntimeHeap *heap, RuntimeValue *value,
+                                char *error, size_t error_size) {
+    const char *source = NULL;
+    char *copy;
+    if (value->type == ZVALUE_TEXT) return 1;
+    if (value->type == ZVALUE_NUMBER) source = value->number_text;
+    else if (value->type == ZVALUE_STATUS)
+        source = value->number ? "alive" : "dead";
+    else if (value->type == ZVALUE_NULL) source = "null";
+    else {
+        snprintf(error, error_size,
+                 "that value cannot be converted to text");
+        return 0;
+    }
+    copy = zsharp_copy_text(source, strlen(source));
+    if (copy == NULL || heap_add_text(heap, copy) == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    value->type = ZVALUE_TEXT;
+    value->text = copy;
+    return 1;
+}
+
+static uint64_t random_bits(void) {
+    static _Thread_local uint64_t state;
+    if (state == 0) {
+        state = ((uint64_t)time(NULL) << 32) ^
+                (uint64_t)(uintptr_t)&state ^ 0x9E3779B97F4A7C15ULL;
+    }
+    state ^= state >> 12;
+    state ^= state << 25;
+    state ^= state >> 27;
+    return state * 2685821657736338717ULL;
+}
+
+static double random_unit(void) {
+    return (double)(random_bits() >> 11) * (1.0 / 9007199254740992.0);
 }
 
 static void heap_free(RuntimeHeap *heap) {
@@ -1147,8 +1190,12 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 break;
             case ZOP_UI_SET:
-            case ZOP_UI_SET_DYNAMIC: {
+            case ZOP_UI_SET_DYNAMIC:
+            case ZOP_UI_SET_VALUE: {
                 const char *property_path = instruction->operand;
+                const char *property_value = instruction->call_function;
+                ZSharpWindowValueType property_type =
+                    (ZSharpWindowValueType)instruction->number_operand;
                 if (instruction->op == ZOP_UI_SET_DYNAMIC) {
                     if (!pop(stack, &stack_count, &value, error,
                              error_size)) {
@@ -1166,6 +1213,28 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     }
                     property_path = value.text;
                 }
+                if (instruction->op == ZOP_UI_SET_VALUE) {
+                    if (!pop(stack, &stack_count, &value, error,
+                             error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                    if (value.type == ZVALUE_NUMBER) {
+                        property_type = ZWINDOW_VALUE_MEASUREMENT;
+                        property_value = value.number_text;
+                    } else if (value.type == ZVALUE_STATUS) {
+                        property_type = ZWINDOW_VALUE_STATUS;
+                        property_value = value.number ? "alive" : "dead";
+                    } else if (value.type == ZVALUE_TEXT) {
+                        property_type = ZWINDOW_VALUE_TEXT;
+                        property_value = value.text;
+                    } else {
+                        snprintf(error, error_size,
+                                 "window properties require text, number, or status values");
+                        ok = 0;
+                        goto done;
+                    }
+                }
                 if (module_cache->window_runtime == NULL ||
                     module_cache->window_runtime->set_property == NULL) {
                     snprintf(error, error_size,
@@ -1177,8 +1246,8 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 if (!module_cache->window_runtime->set_property(
                         module_cache->window_runtime->state,
                         property_path,
-                        (ZSharpWindowValueType)instruction->number_operand,
-                        instruction->call_function,
+                        property_type,
+                        property_value,
                         (ZSharpUIUnit)instruction->index_operand,
                         error, error_size)) {
                     ok = 0;
@@ -1239,11 +1308,17 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 break;
             case ZOP_STORE_GLOBAL: {
+                size_t local_index;
                 RuntimeField *field =
                     find_field(current_object, instruction->operand);
                 ZSharpVariable *variable =
                     find_variable(room, instruction->operand);
-                if (field == NULL && variable == NULL) {
+                for (local_index = local_count; local_index > 0;
+                     local_index--) {
+                    if (strcmp(locals[local_index - 1].name,
+                               instruction->operand) == 0) break;
+                }
+                if (field == NULL && variable == NULL && local_index == 0) {
                     snprintf(error, error_size,
                              "room '%s' has no number named '%s'",
                              room->name, instruction->operand);
@@ -1254,8 +1329,12 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     ok = 0;
                     goto done;
                 }
-                if ((field != NULL && field->type != ZVALUE_NUMBER) ||
-                    (field == NULL && variable->type != ZVALUE_NUMBER)) {
+                if ((local_index > 0 &&
+                     locals[local_index - 1].value.type != ZVALUE_NUMBER) ||
+                    (local_index == 0 && field != NULL &&
+                     field->type != ZVALUE_NUMBER) ||
+                    (local_index == 0 && field == NULL &&
+                     variable->type != ZVALUE_NUMBER)) {
                     snprintf(error, error_size,
                              "number.set requires a number variable");
                     ok = 0;
@@ -1269,7 +1348,9 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                             instruction->operand);
                     break;
                 }
-                if (field != NULL) {
+                if (local_index > 0) {
+                    locals[local_index - 1].value = value;
+                } else if (field != NULL) {
                     if (!runtime_field_assign(field, &value, error,
                                               error_size)) {
                         ok = 0;
@@ -1285,9 +1366,15 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 break;
             }
             case ZOP_STORE_FIELD: {
+                size_t local_index;
                 RuntimeField *field =
                     find_field(current_object, instruction->operand);
-                if (field == NULL) {
+                for (local_index = local_count; local_index > 0;
+                     local_index--) {
+                    if (strcmp(locals[local_index - 1].name,
+                               instruction->operand) == 0) break;
+                }
+                if (field == NULL && local_index == 0) {
                     snprintf(error, error_size,
                              "the current object has no field named '%s'",
                              instruction->operand);
@@ -1298,12 +1385,27 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     ok = 0;
                     goto done;
                 }
-                if (field->type == ZVALUE_TEXT &&
+                if (local_index > 0 &&
+                    locals[local_index - 1].value.type != ZVALUE_TEXT) {
+                    snprintf(error, error_size,
+                             "text.set requires a text variable");
+                    ok = 0;
+                    goto done;
+                }
+                if ((local_index > 0 || field->type == ZVALUE_TEXT) &&
                     !coerce_number_to_text(heap, &value, error, error_size)) {
                     ok = 0;
                     goto done;
                 }
-                if (!runtime_field_assign(field, &value, error, error_size)) {
+                if (local_index > 0) {
+                    if (value.type != ZVALUE_TEXT) {
+                        snprintf(error, error_size,
+                                 "text.set requires a text value");
+                        ok = 0;
+                        goto done;
+                    }
+                    locals[local_index - 1].value = value;
+                } else if (!runtime_field_assign(field, &value, error, error_size)) {
                     ok = 0;
                     goto done;
                 }
@@ -1562,11 +1664,18 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                         ok = 0;
                         goto done;
                     }
-                } else if (left.type == ZVALUE_TEXT &&
+                } else if (left.type == ZVALUE_TEXT ||
                            right.type == ZVALUE_TEXT) {
-                    size_t left_length = strlen(left.text);
-                    size_t right_length = strlen(right.text);
+                    size_t left_length;
+                    size_t right_length;
                     char *combined;
+                    if (!coerce_value_to_text(heap, &left, error, error_size) ||
+                        !coerce_value_to_text(heap, &right, error, error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                    left_length = strlen(left.text);
+                    right_length = strlen(right.text);
                     if (left_length > SIZE_MAX - right_length - 1) {
                         snprintf(error, error_size,
                                  "combined text value is too large");
@@ -1591,9 +1700,84 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     }
                 } else {
                     snprintf(error, error_size,
-                             "'+' requires two numbers or two text values");
+                             "'+' requires numbers, or text combined with a printable value");
                     ok = 0;
                     goto done;
+                }
+                if (!push(stack, stack_capacity, &stack_count, value, error,
+                          error_size)) {
+                    ok = 0;
+                    goto done;
+                }
+                break;
+            }
+            case ZOP_RANDOM: {
+                double minimum;
+                double maximum;
+                double generated;
+                char buffer[64];
+                if (!pop(stack, &stack_count, &right, error, error_size)) {
+                    ok = 0;
+                    goto done;
+                }
+                if (instruction->argument_count == 2) {
+                    if (!pop(stack, &stack_count, &left, error, error_size) ||
+                        left.type != ZVALUE_NUMBER ||
+                        right.type != ZVALUE_NUMBER) {
+                        snprintf(error, error_size,
+                                 "random bounds must be numbers");
+                        ok = 0;
+                        goto done;
+                    }
+                    minimum = strtod(left.number_text, NULL);
+                    maximum = strtod(right.number_text, NULL);
+                    if (maximum < minimum) {
+                        snprintf(error, error_size,
+                                 "random maximum must be at least the minimum");
+                        ok = 0;
+                        goto done;
+                    }
+                    if (instruction->number_operand == 1) {
+                        double low = ceil(minimum);
+                        double high = floor(maximum);
+                        uint64_t choices;
+                        if (high < low || high - low > 9007199254740991.0) {
+                            snprintf(error, error_size,
+                                     "random.number requires a usable integer range");
+                            ok = 0;
+                            goto done;
+                        }
+                        choices = (uint64_t)(high - low) + 1u;
+                        generated = low + (double)(random_bits() % choices);
+                        snprintf(buffer, sizeof(buffer), "%.0f", generated);
+                    } else {
+                        generated = minimum + (maximum - minimum) * random_unit();
+                        snprintf(buffer, sizeof(buffer), "%.17g", generated);
+                    }
+                    value.type = ZVALUE_NUMBER;
+                    value.number_text = heap_add_text(
+                        heap, zsharp_copy_text(buffer, strlen(buffer)));
+                    if (value.number_text == NULL) {
+                        snprintf(error, error_size, "out of memory");
+                        ok = 0;
+                        goto done;
+                    }
+                } else {
+                    if (right.type != ZVALUE_NUMBER) {
+                        snprintf(error, error_size,
+                                 "random.chance requires a percentage number");
+                        ok = 0;
+                        goto done;
+                    }
+                    minimum = strtod(right.number_text, NULL);
+                    if (minimum < 0.0 || minimum > 100.0) {
+                        snprintf(error, error_size,
+                                 "random.chance must be between 0 and 100");
+                        ok = 0;
+                        goto done;
+                    }
+                    value.type = ZVALUE_STATUS;
+                    value.number = random_unit() * 100.0 < minimum;
                 }
                 if (!push(stack, stack_capacity, &stack_count, value, error,
                           error_size)) {
@@ -2081,12 +2265,16 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 if (value.type == ZVALUE_NUMBER) {
                     puts(value.number_text);
+                    zsharp_terminal_write(value.number_text);
                 } else if (value.type == ZVALUE_TEXT) {
                     puts(value.text);
+                    zsharp_terminal_write(value.text);
                 } else if (value.type == ZVALUE_STATUS) {
                     puts(value.number ? "alive" : "dead");
+                    zsharp_terminal_write(value.number ? "alive" : "dead");
                 } else if (value.type == ZVALUE_NULL) {
                     puts("null");
+                    zsharp_terminal_write("null");
                 } else {
                     snprintf(error, error_size,
                              "Print does not yet support this value type");
@@ -3155,6 +3343,9 @@ done:
     if (state_locked) unlock_window_room_state(task->room_state);
     if (window_task_cancelled(task)) ok = 1;
     task->failed = !ok;
+    if (!ok && task->runtime != NULL &&
+        task->runtime->request_close != NULL)
+        task->runtime->request_close(task->runtime->state);
     cleanup_module_cache(&module_cache);
     if (initialized) cleanup_program_objects(&program);
     zsharp_program_free(&program);

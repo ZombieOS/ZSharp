@@ -449,9 +449,19 @@ static void mac_right_action(MacId target, MacSelector command, MacId sender) {
     if (control != NULL) run_target(active_state, control, "right");
 }
 
+static void mac_finish_close(void *data);
+
 static int mac_window_cancelled(void *data) {
     MacWindowState *state = (MacWindowState *)data;
     return __atomic_load_n(&state->closing, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void mac_window_request_close(void *data) {
+    MacWindowState *state = (MacWindowState *)data;
+    if (state == NULL) return;
+    __atomic_store_n(&state->closing, 1, __ATOMIC_RELEASE);
+    state->api.dispatch_async_f(state->api.dispatch_get_main_queue(), state,
+                                mac_finish_close);
 }
 
 static void mac_finish_close(void *data) {
@@ -1314,6 +1324,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.runtime.get_property = runtime_get_window_property;
     state.runtime.wait = wait_with_window_events;
     state.runtime.is_cancelled = mac_window_cancelled;
+    state.runtime.request_close = mac_window_request_close;
     design = design_element(&program->window);
     if (design == NULL) {
         snprintf(error, error_size, "window bytecode has no design");

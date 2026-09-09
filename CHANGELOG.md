@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.2.3 - Developer experience patch - 2026-09-09
+
+- Added calculated live-window property setters and mixed text, number, and
+  status concatenation.
+- Added built-in random integers, decimals, and percentage chances for games.
+- Added direct runtime texture swapping for game objects.
+- Added output-only terminal attachment for running installed apps and games.
+- Made typed assignments update local variables when a matching local exists.
+- Runtime task failures now close the affected window or game and report the
+  actual error instead of appearing to freeze silently.
+
 ## 1.0.2.2 - Audio and Windows ARM64 updater patch - 2026-09-08
 
 - Fixed Windows ARM64 installers being treated as administrator-only programs,

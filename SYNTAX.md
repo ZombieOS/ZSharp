@@ -304,6 +304,7 @@ Player.velocityY.set: 500:
 Player.visible.set: alive:
 Game.scene.set: Gallery:
 Main.background.set: #101820:
+Player.texture.set: "Assets/Player2.png":
 ```
 
 Calculated number and text changes use the normal typed assignment forms:
@@ -567,10 +568,12 @@ text LocalMessage = "Hello":
 It is closest to C# `string` and Java `String`. C normally represents text
 with a character array or pointer.
 
-Text concatenation uses `+`:
+Text concatenation uses `+`. Numbers and statuses are converted to their
+printable text when either side is text:
 
 ```zsharp
 text Message = "Hello, " + Name:
+text Position = "L" + CurrentLine + ":C" + CurrentColumn:
 ```
 
 ### Numbers
@@ -835,7 +838,9 @@ Project.File.Room.User.Move[10, 20]:
 
 ## 8. Local values and assignment
 
-Local values omit visibility:
+Local values omit visibility and exist only during that brain call. Room
+fields include a visibility word such as `noticed` and keep their value for
+later calls:
 
 ```zsharp
 noticed brain Start[] (
@@ -843,9 +848,19 @@ noticed brain Start[] (
  text Name = "Zombie":
  status Alive = alive:
 )
+
+noticed number SharedScore = 10:
 ```
 
-A number field is changed with `number.set:`:
+Direct assignment works for a local value:
+
+```zsharp
+Score = 15:
+Name = "Updated":
+```
+
+Typed assignment works for both locals and room fields. If a local shadows a
+room field with the same name, the local is changed:
 
 ```zsharp
 noticed number Score = 10:
@@ -857,6 +872,20 @@ A text field on the current object is changed with `text.set`:
 ```zsharp
 text.set.Name = Name + "!":
 ```
+
+### Random values
+
+Z# provides random integers, decimals, and percentage chances without an
+import:
+
+```zsharp
+number Die = random.number(1, 6):
+number Offset = random.decimal(-1, 1):
+status Critical = random.chance(15):
+```
+
+`random.number` includes both endpoints. `random.decimal` uses the supplied
+bounds, and `random.chance` accepts a percentage from `0` through `100`.
 
 A named object's field uses `.set`:
 
@@ -1239,6 +1268,24 @@ program.
 
 Failures that prevent meaningful execution stop the program. Examples include
 division by zero, a missing required dependency, and corrupt bytecode.
+When an installed app or game fails, its window closes, the Hub displays the
+source error, and Z# writes a timestamped log under the installation data
+folder's `logs` directory (`%LOCALAPPDATA%\\ZombieOS\\ZSharp\\logs` on
+Windows).
+
+### Attaching a terminal
+
+An installed app or game exposes its `Print(...)` output while it is running.
+Connect by using the package filename recorded by the Hub:
+
+```text
+zsharp terminal "Z# IDE.zapp"
+zsharp terminal ZSharpGameTest.zgame
+```
+
+The connection is output-only and does not start another copy of the project.
+Type `zsharp terminal exit` inside the connected session to detach without
+closing the app or game.
 
 ## 19. Compilation and bytecode
 
@@ -1601,6 +1648,14 @@ the active window is already unambiguous:
 
 ```zsharp
 Design.background.set: #FFFFFF:
+```
+
+Wrap an expression in parentheses on the following line when a live property
+needs a calculated value:
+
+```zsharp
+Startup.CursorPosition.content.set:
+ ("L" + CurrentLine + ":C" + CurrentColumn):
 ```
 
 A text variable can serve as a reusable property-path alias. Its value is

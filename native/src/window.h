@@ -32,6 +32,7 @@ typedef struct ZSharpWindowRuntime {
     int (*wait)(void *state, const char *milliseconds,
                 char *error, size_t error_size);
     int (*is_cancelled)(void *state);
+    void (*request_close)(void *state);
 } ZSharpWindowRuntime;
 
 typedef int (*ZSharpWindowCallback)(void *user_data, const char *target,

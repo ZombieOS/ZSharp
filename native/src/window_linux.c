@@ -1181,6 +1181,13 @@ static int linux_window_cancelled(void *data) {
     return __atomic_load_n(&state->closing, __ATOMIC_ACQUIRE) != 0;
 }
 
+static void linux_window_request_close(void *data) {
+    LinuxWindowState *state = (LinuxWindowState *)data;
+    if (state == NULL) return;
+    __atomic_store_n(&state->closing, 1, __ATOMIC_RELEASE);
+    state->api.idle_add(finish_close, state);
+}
+
 static int apply_property_request(void *data) {
     LinuxPropertyRequest *request = (LinuxPropertyRequest *)data;
     LinuxWindowState *state = request->state;
@@ -1612,6 +1619,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.runtime.get_property = runtime_get_window_property;
     state.runtime.wait = wait_with_window_events;
     state.runtime.is_cancelled = linux_window_cancelled;
+    state.runtime.request_close = linux_window_request_close;
     state.screen_width = width * 4;
     state.screen_height = height * 4;
     design = design_element(&program->window);

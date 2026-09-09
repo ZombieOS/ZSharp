@@ -35,6 +35,11 @@ typedef struct ZSharpGameState {
     int cancelled;
 } ZSharpGameState;
 
+static void game_request_close(void *data) {
+    ZSharpGameState *game = (ZSharpGameState *)data;
+    if (game != NULL) game->cancelled = 1;
+}
+
 static void game_error(char *error, size_t error_size, const char *message);
 static char *join_project_path(const char *root, const char *relative);
 
@@ -562,6 +567,7 @@ int zsharp_game_run(const char *title, const char *project_root,
     runtime.set_property = game_set_property;
     runtime.wait = game_wait;
     runtime.is_cancelled = game_cancelled;
+    runtime.request_close = game_request_close;
     if (callback != NULL && !callback(user_data, ZSHARP_WINDOW_PROJECT_STARTS,
                                       &runtime, error, error_size)) goto done;
     tasks_started = callback != NULL;

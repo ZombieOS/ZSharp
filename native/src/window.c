@@ -1534,6 +1534,13 @@ static int window_is_cancelled(void *data) {
     return InterlockedCompareExchange(&state->closing, 0, 0) != 0;
 }
 
+static void window_request_close(void *data) {
+    WindowState *state = (WindowState *)data;
+    if (state == NULL) return;
+    InterlockedExchange(&state->closing, 1);
+    if (state->window != NULL) PostMessageA(state->window, WM_CLOSE, 0, 0);
+}
+
 static int runtime_set_window_property(void *data, const char *path,
                                        ZSharpWindowValueType value_type,
                                        const char *text_value,
@@ -1772,6 +1779,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.runtime.get_property = runtime_get_window_property;
     state.runtime.wait = wait_with_window_events;
     state.runtime.is_cancelled = window_is_cancelled;
+    state.runtime.request_close = window_request_close;
     if (!zsharp_paint_parse(
             background == NULL ? "#FFFFFF" : background->text_value,
             &state.background_paint, error, error_size)) {

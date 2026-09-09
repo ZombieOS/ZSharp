@@ -11,6 +11,7 @@
 #include "provider_loader.h"
 #include "publisher.h"
 #include "registry.h"
+#include "terminal.h"
 #include "updater.h"
 #include "vm.h"
 #include "window.h"
@@ -23,9 +24,65 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <errno.h>
+#include <sys/stat.h>
 #endif
 
 static char command_failure[512];
+
+static int make_log_directory(const char *path) {
+#ifdef _WIN32
+    return CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+    return mkdir(path, 0700) == 0 || errno == EEXIST;
+#endif
+}
+
+static void write_runtime_error_log(const char *app_name, const char *reason) {
+    const char *base;
+    char root[1024];
+    char logs[1024];
+    char path[1200];
+    time_t now = time(NULL);
+    struct tm stamp;
+    FILE *file;
+#ifdef _WIN32
+    base = getenv("LOCALAPPDATA");
+    if (base == NULL || base[0] == '\0') return;
+    snprintf(root, sizeof(root), "%s\\ZombieOS", base);
+    if (!make_log_directory(root)) return;
+    snprintf(root, sizeof(root), "%s\\ZombieOS\\ZSharp", base);
+    if (!make_log_directory(root)) return;
+    snprintf(logs, sizeof(logs), "%s\\logs", root);
+    if (!make_log_directory(logs)) return;
+    localtime_s(&stamp, &now);
+    snprintf(path, sizeof(path), "%s\\runtime-%04d%02d%02d-%02d%02d%02d.log",
+             logs, stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
+             stamp.tm_hour, stamp.tm_min, stamp.tm_sec);
+#else
+    base = getenv("HOME");
+    if (base == NULL || base[0] == '\0') return;
+#ifdef __APPLE__
+    snprintf(root, sizeof(root), "%s/Library/Application Support/ZombieOS", base);
+#else
+    snprintf(root, sizeof(root), "%s/.local/share/zsharp", base);
+#endif
+    if (!make_log_directory(root)) return;
+    snprintf(logs, sizeof(logs), "%s/logs", root);
+    if (!make_log_directory(logs)) return;
+    localtime_r(&now, &stamp);
+    snprintf(path, sizeof(path), "%s/runtime-%04d%02d%02d-%02d%02d%02d.log",
+             logs, stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
+             stamp.tm_hour, stamp.tm_min, stamp.tm_sec);
+#endif
+    file = fopen(path, "wb");
+    if (file == NULL) return;
+    fprintf(file, "Z# runtime error\nApplication: %s\nReason: %s\n",
+            app_name == NULL ? "Z# application" : app_name,
+            reason == NULL || reason[0] == '\0' ? "Unknown error" : reason);
+    fclose(file);
+}
 
 static void remember_failure(const char *message) {
     snprintf(command_failure, sizeof(command_failure), "%s",
@@ -48,6 +105,7 @@ static void print_help(void) {
     puts("  zsharp uninstall <file.zapp|file.zgame>");
     puts("  zsharp associate");
     puts("  zsharp hub [list|add <file.zapp|file.zgame>|remove <PID>|shortcut]");
+    puts("  zsharp terminal <file.zapp|file.zgame>");
     puts("  zsharp update");
     puts("  zsharp publish [repository]");
     puts("  zsharp project <project-directory|project.zsettings>");
@@ -621,6 +679,7 @@ static int show_hub_message(const char *headline, const char *reason) {
 static void show_app_failure(const char *app_name, const char *reason) {
     size_t length = strlen(app_name == NULL ? "Z# application" : app_name);
     char *headline = (char *)malloc(length + 19);
+    write_runtime_error_log(app_name, reason);
     if (headline == NULL) {
         show_hub_message("Z# application failed to launch!", reason);
         return;
@@ -885,6 +944,12 @@ static int open_package_command(const char *package_path, int argc,
     }
     zsharp_settings_free(&settings);
     free(root);
+    {
+        char terminal_error[512] = {0};
+        if (!zsharp_terminal_start(info.project_id, terminal_error,
+                                   sizeof(terminal_error)))
+            fprintf(stderr, "terminal warning: %s\n", terminal_error);
+    }
     play_started = time(NULL);
     if (file_exists(startup_bytecode)) {
         puts("running bytecoded startup");
@@ -898,6 +963,7 @@ static int open_package_command(const char *package_path, int argc,
     }
     free(startup);
     free(startup_bytecode);
+    zsharp_terminal_stop();
     if (result != 0)
         show_app_failure(app_name,
                          command_failure[0] == '\0'
@@ -916,6 +982,54 @@ static int open_package_command(const char *package_path, int argc,
     zsharp_package_info_free(&info);
     free(app_name);
     return result;
+}
+
+static const char *package_filename(const char *path) {
+    const char *slash = strrchr(path, '/');
+    const char *backslash = strrchr(path, '\\');
+    const char *last = slash;
+    if (last == NULL || (backslash != NULL && backslash > last)) last = backslash;
+    return last == NULL ? path : last + 1;
+}
+
+static int package_name_equals(const char *left, const char *right) {
+#ifdef _WIN32
+    return _stricmp(left, right) == 0;
+#else
+    return strcmp(left, right) == 0;
+#endif
+}
+
+static int terminal_command(const char *package_name) {
+    ZSharpInstalledPackageList packages;
+    char error[512] = {0};
+    const char *project_id = NULL;
+    size_t index;
+    if (!zsharp_registry_list_packages(&packages, error, sizeof(error))) {
+        fprintf(stderr, "terminal error: %s\n", error);
+        return 1;
+    }
+    for (index = 0; index < packages.count; index++) {
+        if (package_name_equals(
+                package_filename(packages.items[index].package_path),
+                package_filename(package_name))) {
+            project_id = packages.items[index].project_id;
+            break;
+        }
+    }
+    if (project_id == NULL) {
+        fprintf(stderr, "terminal error: no installed package named '%s'\n",
+                package_name);
+        zsharp_registry_package_list_free(&packages);
+        return 1;
+    }
+    if (!zsharp_terminal_attach(project_id, error, sizeof(error))) {
+        fprintf(stderr, "terminal error: %s\n", error);
+        zsharp_registry_package_list_free(&packages);
+        return 1;
+    }
+    zsharp_registry_package_list_free(&packages);
+    return 0;
 }
 
 static int uninstall_package_command(const char *package_path) {
@@ -1037,6 +1151,14 @@ int main(int argc, char **argv) {
         }
         if (!ok) fprintf(stderr, "Hub error: %s\n", error);
         return ok ? 0 : 1;
+    }
+    if (strcmp(argv[1], "terminal") == 0) {
+        if (argc != 3 || strcmp(argv[2], "exit") == 0) {
+            fputs("error: use 'zsharp terminal <file.zapp|file.zgame>'\n",
+                  stderr);
+            return 2;
+        }
+        return terminal_command(argv[2]);
     }
     if (strcmp(argv[1], "update") == 0) {
         char error[512] = {0};
