@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.2.4 - IDE foundations - In development
+## 1.0.2.4 - JSON patch - 2026-09-09
 
 - Apps and games may target future Z# versions, while launch-time checks keep
   them from opening on an older installed runtime.
