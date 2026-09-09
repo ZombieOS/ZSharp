@@ -110,7 +110,8 @@ typedef enum ZSharpUIPropertyType {
     ZUI_PROPERTY_IDENTIFIER = 5,
     ZUI_PROPERTY_IDENTIFIER_ARRAY = 6,
     ZUI_PROPERTY_CALLBACK = 7,
-    ZUI_PROPERTY_EMPTY_ARRAY = 8
+    ZUI_PROPERTY_EMPTY_ARRAY = 8,
+    ZUI_PROPERTY_TEXT_ARRAY = 9
 } ZSharpUIPropertyType;
 
 typedef enum ZSharpUIUnit {

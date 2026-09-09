@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.0.2.4 LANGUAGES C)
+project(zsharp VERSION 1.0.2.5 LANGUAGES C)
 
 option(ZSHARP_BUILD_EXAMPLES "Build Z# integration examples" OFF)
 option(ZSHARP_BUILD_GAME_RUNTIME

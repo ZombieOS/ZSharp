@@ -308,14 +308,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.0.2.5]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.0.2.6]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.0.2.5!"
+               "Update to at least 1.0.2.6!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

@@ -1558,6 +1558,17 @@ static int validate_window_program(const ZSharpProgram *program,
              property_index < element->property_count; property_index++) {
             const ZSharpUIProperty *property =
                 &element->properties[property_index];
+            if ((strcmp(property->name, "fontSize") == 0 ||
+                 strcmp(property->name, "maxLength") == 0 ||
+                 strcmp(property->name, "textAlign") == 0 ||
+                 strcmp(property->name, "textTransform") == 0 ||
+                 strcmp(property->name, "allowedCharacters") == 0) &&
+                project_version_before(settings, 1, 0, 2, 5)) {
+                snprintf(error, error_size,
+                         "window property '%s' requires ZSharp: [1.0.2.5]: or newer",
+                         property->name);
+                return 0;
+            }
             if (property->type == ZUI_PROPERTY_CALLBACK &&
                 !validate_window_callback(program, settings, &caller,
                                           project_root,

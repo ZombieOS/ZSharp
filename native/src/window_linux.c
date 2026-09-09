@@ -6,6 +6,7 @@
 #if defined(__linux__)
 
 #include <dlfcn.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -58,7 +59,10 @@ typedef struct GtkApi {
     void (*button_set_label)(void *, const char *);
     GtkWidget *(*entry_new)(void);
     void (*entry_set_placeholder_text)(void *, const char *);
+    void (*entry_set_max_length)(void *, int);
+    void (*entry_set_alignment)(void *, float);
     const char *(*entry_get_text)(void *);
+    void (*entry_set_text)(void *, const char *);
     int (*editable_get_position)(void *);
     GtkWidget *(*text_view_new)(void);
     void *(*text_view_get_buffer)(void *);
@@ -119,6 +123,7 @@ typedef struct LinuxControl {
     int is_image_input;
     int is_multiline;
     int placeholder_active;
+    int filtering_input;
     int image_width;
     int image_height;
     void *css_provider;
@@ -223,6 +228,11 @@ static int gtk_api_load(GtkApi *api, char *error, size_t error_size) {
     GTK_REQUIRED(api, entry_new, api->gtk, "gtk_entry_new");
     GTK_REQUIRED(api, entry_set_placeholder_text, api->gtk,
                  "gtk_entry_set_placeholder_text");
+    GTK_REQUIRED(api, entry_set_max_length, api->gtk,
+                 "gtk_entry_set_max_length");
+    GTK_REQUIRED(api, entry_set_alignment, api->gtk,
+                 "gtk_entry_set_alignment");
+    GTK_REQUIRED(api, entry_set_text, api->gtk, "gtk_entry_set_text");
     GTK_REQUIRED(api, entry_get_text, api->gtk, "gtk_entry_get_text");
     GTK_REQUIRED(api, editable_get_position, api->gtk,
                  "gtk_editable_get_position");
@@ -762,10 +772,86 @@ static int image_pressed(GtkWidget *widget, GdkEventButton *event,
     return 0;
 }
 
+static size_t linux_input_utf8_bytes(const char *text) {
+    unsigned char first = (unsigned char)text[0];
+    if (first < 0x80u) return first == 0 ? 0u : 1u;
+    if ((first & 0xe0u) == 0xc0u) return 2u;
+    if ((first & 0xf0u) == 0xe0u) return 3u;
+    if ((first & 0xf8u) == 0xf0u) return 4u;
+    return 1u;
+}
+
+static int linux_input_allowed(const ZSharpUIProperty *allowed,
+                               const char *character, size_t bytes) {
+    size_t index;
+    if (allowed == NULL) return 1;
+    for (index = 0; index < allowed->item_count; index++) {
+        const char *item = allowed->items[index];
+        if (strlen(item) != bytes) continue;
+        if (bytes == 1 && isalpha((unsigned char)item[0]) &&
+            isalpha((unsigned char)character[0])) {
+            if (tolower((unsigned char)item[0]) ==
+                tolower((unsigned char)character[0])) return 1;
+        } else if (memcmp(item, character, bytes) == 0) return 1;
+    }
+    return 0;
+}
+
+static char *filter_linux_input(LinuxControl *control, const char *source,
+                                int *changed) {
+    ZSharpUIProperty *allowed = property(control->element,
+                                          "allowedCharacters");
+    ZSharpUIProperty *transform = property(control->element, "textTransform");
+    ZSharpUIProperty *maximum = property(control->element, "maxLength");
+    size_t limit = maximum == NULL ? (size_t)-1
+        : (size_t)strtoul(maximum->text_value, NULL, 10);
+    size_t length = strlen(source), input = 0, output = 0, characters = 0;
+    char *filtered = (char *)malloc(length + 1);
+    if (filtered == NULL) return NULL;
+    *changed = 0;
+    while (input < length) {
+        size_t bytes = linux_input_utf8_bytes(source + input), index;
+        if (input + bytes > length) bytes = 1;
+        if (characters >= limit ||
+            !linux_input_allowed(allowed, source + input, bytes)) {
+            *changed = 1;
+            input += bytes;
+            continue;
+        }
+        for (index = 0; index < bytes; index++)
+            filtered[output + index] = source[input + index];
+        if (bytes == 1 && transform != NULL) {
+            unsigned char value = (unsigned char)filtered[output];
+            if (strcmp(transform->text_value, "uppercase") == 0)
+                filtered[output] = (char)toupper(value);
+            else if (strcmp(transform->text_value, "lowercase") == 0)
+                filtered[output] = (char)tolower(value);
+            if (filtered[output] != source[input]) *changed = 1;
+        }
+        output += bytes;
+        input += bytes;
+        characters++;
+    }
+    filtered[output] = '\0';
+    return filtered;
+}
+
 static void entry_changed(GtkWidget *widget, void *data) {
     LinuxControl *control = (LinuxControl *)data;
     LinuxWindowState *state = control_state(control);
-    update_contents(state, control, state->api.entry_get_text(widget));
+    const char *text = state->api.entry_get_text(widget);
+    int changed = 0;
+    char *filtered;
+    if (control->filtering_input) return;
+    filtered = filter_linux_input(control, text, &changed);
+    if (filtered == NULL) return;
+    if (changed) {
+        control->filtering_input = 1;
+        state->api.entry_set_text(widget, filtered);
+        control->filtering_input = 0;
+    }
+    update_contents(state, control, filtered);
+    free(filtered);
 }
 
 static char *text_buffer_text(LinuxWindowState *state,
@@ -786,13 +872,25 @@ static void text_buffer_changed(void *buffer, void *data) {
     LinuxWindowState *state = control_state(control);
     char *text;
     (void)buffer;
+    if (control->filtering_input) return;
     if (control->placeholder_active) {
         update_contents(state, control, "");
         return;
     }
     text = text_buffer_text(state, control);
     if (text != NULL) {
-        update_contents(state, control, text);
+        int changed = 0;
+        char *filtered = filter_linux_input(control, text, &changed);
+        if (filtered != NULL) {
+            if (changed) {
+                control->filtering_input = 1;
+                state->api.text_buffer_set_text(control->text_buffer,
+                                                filtered, -1);
+                control->filtering_input = 0;
+            }
+            update_contents(state, control, filtered);
+            free(filtered);
+        }
         state->api.g_free(text);
     }
 }
@@ -1535,6 +1633,20 @@ static int create_controls(LinuxWindowState *state, int width, int height,
                 if (widget != NULL && display != NULL)
                     state->api.entry_set_placeholder_text(widget,
                                                           display->text_value);
+                if (widget != NULL) {
+                    ZSharpUIProperty *maximum = property(element, "maxLength");
+                    ZSharpUIProperty *alignment = property(element, "textAlign");
+                    if (maximum != NULL)
+                        state->api.entry_set_max_length(
+                            widget, (int)strtol(maximum->text_value, NULL, 10));
+                    if (alignment != NULL)
+                        state->api.entry_set_alignment(
+                            widget,
+                            strcmp(alignment->text_value, "center") == 0
+                                ? 0.5f
+                                : strcmp(alignment->text_value, "right") == 0
+                                    ? 1.0f : 0.0f);
+                }
             }
         }
         if (widget == NULL) {

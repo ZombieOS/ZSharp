@@ -50,6 +50,11 @@ noticed Window Main[] (
   type: text:
   multiline: alive:
   wrap: dead:
+  fontSize: 18px:
+  maxLength: 120:
+  allowedCharacters: ["a", "b", "c", "1", "2", "3", "-", " "]:
+  textAlign: center:
+  textTransform: uppercase:
   locationX: 10:
   locationY: 15:
   width: 15:

@@ -7,6 +7,9 @@
  font-family: Consolas;
  font-size: 14px;
  font-weight: normal;
+ text-align: center;
+ text-transform: uppercase;
+ max-length: 100;
  padding-left: 8px;
  caret-color: #FF2A42;
  outline: none;

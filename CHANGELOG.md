@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.2.5 - Text input and ZSS patch - 2026-09-09
+
+- Added direct `fontSize`, `maxLength`, `textAlign`, and `textTransform`
+  properties for text inputs.
+- Added ZSS `text-align`, `text-transform`, `max-length`, `width`, `height`,
+  and `background-color` declarations.
+- Text inputs can force uppercase or lowercase characters as the user types.
+- Added case-insensitive `allowedCharacters` lists that reject unlisted typed
+  or pasted characters.
+
 ## 1.0.2.4 - JSON patch - 2026-09-09
 
 - Apps and games may target future Z# versions, while launch-time checks keep

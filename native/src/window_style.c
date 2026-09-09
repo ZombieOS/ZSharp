@@ -267,6 +267,15 @@ static int apply_declaration(ZSharpUIElement *element, const char *pseudo,
         return set_text_property(element, name, ZUI_PROPERTY_COLOR, value,
                                  ZUI_UNIT_NONE, apply, error, error_size);
     }
+    if (strcmp(field, "background-color") == 0) {
+        if (!valid_color(value)) return 0;
+        base = element->type == ZUI_DESIGN ? "background" :
+               element->type == ZUI_BUTTON ? "buttonColor" :
+                                              "backgroundColor";
+        prefixed_name(name, sizeof(name), pseudo, base);
+        return set_text_property(element, name, ZUI_PROPERTY_COLOR, value,
+                                 ZUI_UNIT_NONE, apply, error, error_size);
+    }
     if (strcmp(field, "color") == 0) {
         base = element->type == ZUI_TEXT ? "color" : "textColor";
         prefixed_name(name, sizeof(name), pseudo, base);
@@ -299,6 +308,35 @@ static int apply_declaration(ZSharpUIElement *element, const char *pseudo,
         return set_text_property(element, name, ZUI_PROPERTY_IDENTIFIER,
                                  value, ZUI_UNIT_NONE, apply, error,
                                  error_size);
+    }
+    if (strcmp(field, "width") == 0 || strcmp(field, "height") == 0) {
+        if (pseudo != NULL && pseudo[0] != '\0') return 0;
+        return set_measurement(element, field, value, apply, error,
+                               error_size);
+    }
+    if (strcmp(field, "text-align") == 0) {
+        if (strcmp(value, "left") != 0 && strcmp(value, "center") != 0 &&
+            strcmp(value, "right") != 0) return 0;
+        prefixed_name(name, sizeof(name), pseudo, "textAlign");
+        return set_text_property(element, name, ZUI_PROPERTY_IDENTIFIER,
+                                 value, ZUI_UNIT_NONE, apply, error,
+                                 error_size);
+    }
+    if (strcmp(field, "text-transform") == 0) {
+        if (strcmp(value, "none") != 0 &&
+            strcmp(value, "uppercase") != 0 &&
+            strcmp(value, "lowercase") != 0) return 0;
+        prefixed_name(name, sizeof(name), pseudo, "textTransform");
+        return set_text_property(element, name, ZUI_PROPERTY_IDENTIFIER,
+                                 value, ZUI_UNIT_NONE, apply, error,
+                                 error_size);
+    }
+    if (strcmp(field, "max-length") == 0 ||
+        strcmp(field, "maxlength") == 0) {
+        if (pseudo != NULL && pseudo[0] != '\0' ||
+            element->type != ZUI_TEXT_INPUT) return 0;
+        return set_measurement(element, "maxLength", value, apply, error,
+                               error_size);
     }
     if (strcmp(field, "padding") == 0 ||
         strcmp(field, "padding-left") == 0 ||

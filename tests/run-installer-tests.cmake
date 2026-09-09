@@ -31,7 +31,7 @@ file(MAKE_DIRECTORY "${test_desktop}")
 file(WRITE "${manifest}"
     "{\n"
     "  \"schema\": 1,\n"
-    "  \"latestVersion\": \"1.0.2.4\",\n"
+    "  \"latestVersion\": \"1.0.2.5\",\n"
     "  \"download\": {\n"
     "    \"url\": \"https://example.invalid/ZVM-LATEST.zip\",\n"
     "    \"sha256\": \"${archive_sha256}\",\n"
@@ -109,12 +109,12 @@ endif()
 
 set(current_manifest "${TEST_ROOT}/current-update.js")
 file(WRITE "${current_manifest}"
-    "{\"schema\":1,\"latestVersion\":\"1.0.2.4\"}")
+    "{\"schema\":1,\"latestVersion\":\"1.0.2.5\"}")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             "ZSHARP_INSTALLER_INSTALL_DIR=${install_directory}"
             ZSHARP_INSTALLER_SKIP_INTEGRATION=1
-            "${installed_updater}" --check --current-version 1.0.2.4
+            "${installed_updater}" --check --current-version 1.0.2.5
             --manifest-file "${current_manifest}"
     RESULT_VARIABLE current_result
     OUTPUT_VARIABLE current_output
@@ -138,7 +138,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             "ZSHARP_INSTALLER_INSTALL_DIR=${install_directory}"
             ZSHARP_INSTALLER_SKIP_INTEGRATION=1
-            "${installed_updater}" --check --current-version 1.0.2.4
+            "${installed_updater}" --check --current-version 1.0.2.5
             --manifest-file "${older_manifest}"
     RESULT_VARIABLE older_result
     OUTPUT_VARIABLE older_output
@@ -162,7 +162,7 @@ file(WRITE "${rejected_manifest}"
     "\"path\":\"runtimes/${TEST_PLATFORM}/${runtime_name}\","
     "\"sha256\":\"${runtime_sha256}\","
     "\"size\":${runtime_size}},"
-    "\"latestVersion\":\"1.0.2.4\","
+    "\"latestVersion\":\"1.0.2.5\","
     "\"download\":{\"url\":\"https://example.invalid/ZVM-LATEST.zip\","
     "\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\","
     "\"size\":${archive_size}}}")
@@ -191,7 +191,7 @@ execute_process(
     OUTPUT_VARIABLE version_output
     ERROR_VARIABLE version_error
 )
-if(NOT version_result EQUAL 0 OR NOT version_output MATCHES "Z# 1.0.2.4")
+if(NOT version_result EQUAL 0 OR NOT version_output MATCHES "Z# 1.0.2.5")
     message(FATAL_ERROR
         "The installed ZVM did not run (${version_result})\n"
         "stdout: ${version_output}\nstderr: ${version_error}")

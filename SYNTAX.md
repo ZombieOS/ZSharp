@@ -1542,6 +1542,11 @@ noticed textInput Input1[] (
  type: text:
  multiline: alive:
  wrap: alive:
+ fontSize: 18px:
+ maxLength: 120:
+ textAlign: center:
+ textTransform: uppercase:
+ allowedCharacters: ["a", "b", "c", "1", "2", "3", "-", " "]:
  locationX: 10:
  locationY: 15:
  width: 15:
@@ -1592,6 +1597,13 @@ long lines should remain on one line and scroll horizontally instead. `wrap`
 cannot be set unless multiline mode is alive, and neither field is valid for
 an image input.
 
+Text inputs can also set `fontSize`, limit input with a positive whole-number
+`maxLength`, and align text with `textAlign: left:`, `center`, or `right`.
+`textTransform` accepts `none`, `uppercase`, or `lowercase`. An optional
+`allowedCharacters` array accepts quoted single characters; letters match
+case-insensitively, so allowing `"b"` permits both `b` and `B`. Characters not
+listed are ignored when typed or pasted. These fields require Z# 1.0.2.5.
+
 Native window scrollbars remain hidden while all elements fit within the
 visible window. A vertical scrollbar appears automatically when content
 extends below the viewport. Multiline input scrollbars are handled inside the
@@ -1629,10 +1641,11 @@ short form when the element name is enough:
 }
 ```
 
-The 1.0.2.1 native window style pass supports `background`, `color`, solid
+The native window style pass supports `background`/`background-color`, `color`, solid
 `border`, `border-color`, `border-radius`, `font-family`, `font-size`,
 `font-weight`, `padding` and its four directional forms, `caret-color`,
-`outline: none`, `selection-background`, and `selection-color`. `:hover`
+`outline: none`, `selection-background`, `selection-color`, `width`, `height`,
+`text-align`, `text-transform`, and `max-length`. `:hover`
 targets buttons and `:focus` targets text inputs. ZSS rules are applied in
 sorted file order and override matching values written in the window script.
 Selectors and declarations are checked while the project compiles. ZSS is

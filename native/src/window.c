@@ -40,6 +40,7 @@ typedef struct WindowControl {
     int is_package_input;
     int is_multiline;
     int placeholder_active;
+    int filtering_input;
     int hovered;
 } WindowControl;
 
@@ -473,6 +474,69 @@ static void run_callback(WindowState *state, ZSharpUIElement *element,
     }
 }
 
+static size_t input_utf8_bytes(const char *text) {
+    unsigned char first = (unsigned char)text[0];
+    if (first < 0x80u) return first == 0 ? 0u : 1u;
+    if ((first & 0xe0u) == 0xc0u) return 2u;
+    if ((first & 0xf0u) == 0xe0u) return 3u;
+    if ((first & 0xf8u) == 0xf0u) return 4u;
+    return 1u;
+}
+
+static int input_character_allowed(const ZSharpUIProperty *allowed,
+                                   const char *character, size_t bytes) {
+    size_t index;
+    if (allowed == NULL) return 1;
+    for (index = 0; index < allowed->item_count; index++) {
+        const char *item = allowed->items[index];
+        if (strlen(item) != bytes) continue;
+        if (bytes == 1 && isalpha((unsigned char)item[0]) &&
+            isalpha((unsigned char)character[0])) {
+            if (tolower((unsigned char)item[0]) ==
+                tolower((unsigned char)character[0])) return 1;
+        } else if (memcmp(item, character, bytes) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static char *filter_input_text(WindowControl *control, const char *source,
+                               int *changed) {
+    ZSharpUIProperty *allowed = find_property(control->element,
+                                               "allowedCharacters");
+    ZSharpUIProperty *transform = find_property(control->element,
+                                                 "textTransform");
+    size_t length = strlen(source), input = 0, output = 0;
+    char *filtered = (char *)malloc(length + 1);
+    if (filtered == NULL) return NULL;
+    *changed = 0;
+    while (input < length) {
+        size_t bytes = input_utf8_bytes(source + input);
+        size_t index;
+        if (input + bytes > length) bytes = 1;
+        if (!input_character_allowed(allowed, source + input, bytes)) {
+            *changed = 1;
+            input += bytes;
+            continue;
+        }
+        for (index = 0; index < bytes; index++)
+            filtered[output + index] = source[input + index];
+        if (bytes == 1 && transform != NULL) {
+            unsigned char value = (unsigned char)filtered[output];
+            if (strcmp(transform->text_value, "uppercase") == 0)
+                filtered[output] = (char)toupper(value);
+            else if (strcmp(transform->text_value, "lowercase") == 0)
+                filtered[output] = (char)tolower(value);
+            if (filtered[output] != source[input]) *changed = 1;
+        }
+        output += bytes;
+        input += bytes;
+    }
+    filtered[output] = '\0';
+    return filtered;
+}
+
 static void update_input_contents(WindowControl *control) {
     ZSharpUIProperty *contents = find_property(control->element, "contents");
     int length;
@@ -489,6 +553,29 @@ static void update_input_contents(WindowControl *control) {
     text = (char *)malloc((size_t)length + 1);
     if (text == NULL) return;
     GetWindowTextA(control->handle, text, length + 1);
+    if (!control->filtering_input) {
+        int changed = 0;
+        char *filtered = filter_input_text(control, text, &changed);
+        if (filtered != NULL && changed) {
+            DWORD selection_start = 0;
+            DWORD selection_end = 0;
+            size_t removed = strlen(text) - strlen(filtered);
+            SendMessageA(control->handle, EM_GETSEL,
+                         (WPARAM)&selection_start, (LPARAM)&selection_end);
+            control->filtering_input = 1;
+            SetWindowTextA(control->handle, filtered);
+            control->filtering_input = 0;
+            selection_start = removed > selection_start
+                ? 0 : selection_start - (DWORD)removed;
+            selection_end = selection_start;
+            SendMessageA(control->handle, EM_SETSEL,
+                         selection_start, selection_end);
+            free(text);
+            text = filtered;
+        } else {
+            free(filtered);
+        }
+    }
     free(contents->text_value);
     contents->text_value = text;
 }
@@ -1262,6 +1349,8 @@ static int create_controls(WindowState *state, int client_width,
         } else {
             ZSharpUIProperty *type = find_property(element, "type");
             ZSharpUIProperty *display = find_property(element, "display");
+            ZSharpUIProperty *alignment = find_property(element, "textAlign");
+            ZSharpUIProperty *transform = find_property(element, "textTransform");
             int is_image = type != NULL &&
                            strcmp(type->text_value, "image") == 0;
             int is_package = type != NULL &&
@@ -1282,6 +1371,20 @@ static int create_controls(WindowState *state, int client_width,
                 if (!wraps) style |= ES_AUTOHSCROLL | WS_HSCROLL;
             } else {
                 style |= WS_BORDER | ES_AUTOHSCROLL;
+            }
+            if (!is_image && !is_package && alignment != NULL) {
+                if (strcmp(alignment->text_value, "center") == 0)
+                    style |= ES_CENTER;
+                else if (strcmp(alignment->text_value, "right") == 0)
+                    style |= ES_RIGHT;
+                else
+                    style |= ES_LEFT;
+            }
+            if (!is_image && !is_package && transform != NULL) {
+                if (strcmp(transform->text_value, "uppercase") == 0)
+                    style |= ES_UPPERCASE;
+                else if (strcmp(transform->text_value, "lowercase") == 0)
+                    style |= ES_LOWERCASE;
             }
         }
         x_property = find_property(element, "locationX");
@@ -1338,6 +1441,13 @@ static int create_controls(WindowState *state, int client_width,
         SendMessageA(control->handle, WM_SETFONT,
                      (WPARAM)control->font, TRUE);
         if (element->type == ZUI_TEXT_INPUT) {
+            ZSharpUIProperty *maximum = find_property(element, "maxLength");
+            if (maximum != NULL && maximum->text_value != NULL) {
+                unsigned long limit = strtoul(maximum->text_value, NULL, 10);
+                if (limit > 0 && limit <= UINT_MAX)
+                    SendMessageA(control->handle, EM_LIMITTEXT,
+                                 (WPARAM)limit, 0);
+            }
             ZSharpUIProperty *type = find_property(element, "type");
             ZSharpUIProperty *display = find_property(element, "display");
             control->is_image_input = type != NULL &&

@@ -474,6 +474,7 @@ static int write_ui_property(FILE *file,
             return write_string(file, property->text_value) &&
                    write_u8(file, (uint8_t)property->unit);
         case ZUI_PROPERTY_IDENTIFIER_ARRAY:
+        case ZUI_PROPERTY_TEXT_ARRAY:
             if (property->item_count > UINT32_MAX ||
                 !write_u32(file, (uint32_t)property->item_count)) return 0;
             for (index = 0; index < property->item_count; index++) {
@@ -952,7 +953,7 @@ static int read_ui_property(FILE *file, ZSharpUIProperty *property) {
     uint32_t index;
     if (!read_string(file, &property->name) || !read_u8(file, &type) ||
         type < (uint8_t)ZUI_PROPERTY_TEXT ||
-        type > (uint8_t)ZUI_PROPERTY_EMPTY_ARRAY) return 0;
+        type > (uint8_t)ZUI_PROPERTY_TEXT_ARRAY) return 0;
     property->type = (ZSharpUIPropertyType)type;
     switch (property->type) {
         case ZUI_PROPERTY_TEXT:
@@ -967,11 +968,13 @@ static int read_ui_property(FILE *file, ZSharpUIProperty *property) {
         case ZUI_PROPERTY_MEASUREMENT:
             if (!read_string(file, &property->text_value) ||
                 !read_u8(file, &value) ||
-                (value != (uint8_t)ZUI_UNIT_ZU &&
+                (value != (uint8_t)ZUI_UNIT_NONE &&
+                 value != (uint8_t)ZUI_UNIT_ZU &&
                  value != (uint8_t)ZUI_UNIT_PX)) return 0;
             property->unit = (ZSharpUIUnit)value;
             return 1;
         case ZUI_PROPERTY_IDENTIFIER_ARRAY:
+        case ZUI_PROPERTY_TEXT_ARRAY:
             if (!read_u32(file, &count) || count > 1000000u) return 0;
             if (count > 0) {
                 property->items =

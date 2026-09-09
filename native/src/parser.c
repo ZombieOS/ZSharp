@@ -2541,6 +2541,42 @@ static int parse_ui_identifier_array(Parser *parser,
                         "']' after the option list");
 }
 
+static size_t utf8_character_bytes(const char *text) {
+    unsigned char first = (unsigned char)text[0];
+    if (first < 0x80u) return first == 0 ? 0u : 1u;
+    if ((first & 0xe0u) == 0xc0u) return 2u;
+    if ((first & 0xf0u) == 0xe0u) return 3u;
+    if ((first & 0xf8u) == 0xf0u) return 4u;
+    return 0u;
+}
+
+static int parse_ui_text_array(Parser *parser,
+                               ZSharpUIProperty *property) {
+    if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
+                      "'[' before the character list")) return 0;
+    if (parser->current.type != ZTOKEN_RIGHT_BRACKET) {
+        do {
+            ZSharpToken token = parser->current;
+            char *item;
+            size_t bytes;
+            if (!consume_type(parser, ZTOKEN_STRING,
+                              "a quoted character")) return 0;
+            item = decode_text(parser, &token);
+            if (item == NULL) return 0;
+            bytes = utf8_character_bytes(item);
+            if (bytes == 0 || item[bytes] != '\0') {
+                free(item);
+                fail_at(parser, &token,
+                        "each allowedCharacters item must contain exactly one character");
+                return 0;
+            }
+            if (!append_ui_item(parser, property, item)) return 0;
+        } while (match_type(parser, ZTOKEN_COMMA));
+    }
+    return consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                        "']' after the character list");
+}
+
 static int parse_ui_empty_array(Parser *parser) {
     if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
                       "'[' before the empty runtime value")) return 0;
@@ -2665,7 +2701,8 @@ static int parse_click_field(Parser *parser, ZSharpUIElement *element) {
 static int field_is_measurement(const char *name) {
     return strcmp(name, "width") == 0 || strcmp(name, "height") == 0 ||
            strcmp(name, "locationX") == 0 ||
-           strcmp(name, "locationY") == 0;
+           strcmp(name, "locationY") == 0 ||
+           strcmp(name, "fontSize") == 0;
 }
 
 static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
@@ -2743,8 +2780,18 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
         } else if (strcmp(name, "supportedTypes") == 0) {
             type = ZUI_PROPERTY_IDENTIFIER_ARRAY;
             valid = 1;
+        } else if (strcmp(name, "allowedCharacters") == 0) {
+            type = ZUI_PROPERTY_TEXT_ARRAY;
+            valid = 1;
         } else if (strcmp(name, "contents") == 0) {
             type = ZUI_PROPERTY_EMPTY_ARRAY;
+            valid = 1;
+        } else if (strcmp(name, "textAlign") == 0 ||
+                   strcmp(name, "textTransform") == 0) {
+            type = ZUI_PROPERTY_IDENTIFIER;
+            valid = 1;
+        } else if (strcmp(name, "maxLength") == 0) {
+            type = ZUI_PROPERTY_MEASUREMENT;
             valid = 1;
         } else if (field_is_measurement(name)) {
             type = ZUI_PROPERTY_MEASUREMENT;
@@ -2780,9 +2827,13 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
          !parse_ui_identifier_value(parser, property)) ||
         (type == ZUI_PROPERTY_IDENTIFIER_ARRAY &&
          !parse_ui_identifier_array(parser, property)) ||
+        (type == ZUI_PROPERTY_TEXT_ARRAY &&
+         !parse_ui_text_array(parser, property)) ||
         (type == ZUI_PROPERTY_EMPTY_ARRAY && !parse_ui_empty_array(parser))) {
         return 0;
     }
+    if (strcmp(property->name, "maxLength") == 0)
+        property->unit = ZUI_UNIT_NONE;
     if (type == ZUI_PROPERTY_COLOR && property->text_value != NULL &&
         (strncmp(property->text_value, "linear-gradient(", 16) == 0 ||
          strncmp(property->text_value, "radial-gradient(", 16) == 0) &&
@@ -2844,6 +2895,45 @@ static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
     supported = find_ui_property(element, "supportedTypes");
     multiline = find_ui_property(element, "multiline");
     wrap = find_ui_property(element, "wrap");
+    {
+        ZSharpUIProperty *alignment = find_ui_property(element, "textAlign");
+        ZSharpUIProperty *transform = find_ui_property(element, "textTransform");
+        ZSharpUIProperty *maximum = find_ui_property(element, "maxLength");
+        ZSharpUIProperty *allowed = find_ui_property(element, "allowedCharacters");
+        if (alignment != NULL &&
+            strcmp(alignment->text_value, "left") != 0 &&
+            strcmp(alignment->text_value, "center") != 0 &&
+            strcmp(alignment->text_value, "right") != 0) {
+            fail_at(parser, &parser->current,
+                    "textAlign must be left, center, or right");
+            return 0;
+        }
+        if (transform != NULL &&
+            strcmp(transform->text_value, "none") != 0 &&
+            strcmp(transform->text_value, "uppercase") != 0 &&
+            strcmp(transform->text_value, "lowercase") != 0) {
+            fail_at(parser, &parser->current,
+                    "textTransform must be none, uppercase, or lowercase");
+            return 0;
+        }
+        if (maximum != NULL && maximum->unit != ZUI_UNIT_NONE) {
+            fail_at(parser, &parser->current,
+                    "maxLength is a character count and cannot use px or zu");
+            return 0;
+        }
+        if (allowed != NULL && allowed->item_count == 0) {
+            fail_at(parser, &parser->current,
+                    "allowedCharacters must contain at least one character");
+            return 0;
+        }
+        if (maximum != NULL &&
+            (strchr(maximum->text_value, '.') != NULL ||
+             zsharp_decimal_compare(maximum->text_value, "0") <= 0)) {
+            fail_at(parser, &parser->current,
+                    "maxLength must be a positive whole character count");
+            return 0;
+        }
+    }
     if (strcmp(input_type->text_value, "text") != 0 &&
         strcmp(input_type->text_value, "image") != 0) {
         fail_at(parser, &parser->current,
@@ -2859,6 +2949,12 @@ static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
     if (strcmp(input_type->text_value, "text") == 0 && supported != NULL) {
         fail_at(parser, &parser->current,
                 "supportedTypes is only valid for an image textInput");
+        return 0;
+    }
+    if (strcmp(input_type->text_value, "text") != 0 &&
+        find_ui_property(element, "allowedCharacters") != NULL) {
+        fail_at(parser, &parser->current,
+                "allowedCharacters is only valid for a text textInput");
         return 0;
     }
     if (strcmp(input_type->text_value, "image") == 0 &&
