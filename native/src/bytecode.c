@@ -9,7 +9,7 @@
 
 static const unsigned char BYTECODE_MAGIC[4] = {'Z', 'S', 'B', 'C'};
 static const uint16_t BYTECODE_MAJOR = 0;
-static const uint16_t BYTECODE_MINOR = 17;
+static const uint16_t BYTECODE_MINOR = 18;
 
 static void set_error(char *error, size_t error_size, const char *message) {
     if (error != NULL && error_size > 0) {
@@ -124,6 +124,18 @@ void zsharp_program_free(ZSharpProgram *program) {
             free(room->imports[import_index].path);
         }
         free(room->imports);
+        for (import_index = 0; import_index < room->json_schema_count;
+             import_index++) {
+            ZSharpJsonSchema *schema = &room->json_schemas[import_index];
+            size_t field_index;
+            free(schema->name);
+            for (field_index = 0; field_index < schema->field_count;
+                 field_index++) {
+                free(schema->fields[field_index].name);
+            }
+            free(schema->fields);
+        }
+        free(room->json_schemas);
         for (variable_index = 0; variable_index < room->variable_count;
              variable_index++) {
             free_variable(&room->variables[variable_index]);
@@ -185,6 +197,14 @@ ZSharpVariable *zsharp_room_add_variable(ZSharpRoom *room) {
 
 ZSharpImport *zsharp_room_add_import(ZSharpRoom *room) {
     ADD_ITEM(room, imports, import_count, ZSharpImport);
+}
+
+ZSharpJsonSchema *zsharp_room_add_json_schema(ZSharpRoom *room) {
+    ADD_ITEM(room, json_schemas, json_schema_count, ZSharpJsonSchema);
+}
+
+ZSharpJsonField *zsharp_json_schema_add_field(ZSharpJsonSchema *schema) {
+    ADD_ITEM(schema, fields, field_count, ZSharpJsonField);
 }
 
 ZSharpFunction *zsharp_room_add_function(ZSharpRoom *room) {
@@ -258,6 +278,7 @@ static int write_instruction(FILE *file,
         case ZOP_STORE_GLOBAL:
         case ZOP_STORE_LOCAL:
         case ZOP_STORE_LOCAL_TEXT:
+        case ZOP_STORE_LOCAL_VALUE:
         case ZOP_STORE_FIELD:
         case ZOP_GET_MEMBER:
         case ZOP_STORE_NAME:
@@ -305,6 +326,8 @@ static int write_instruction(FILE *file,
                    write_u32(file, instruction->index_operand) &&
                    write_string(file, instruction->call_function);
         case ZOP_UI_SET_VALUE:
+            return write_string(file, instruction->operand);
+        case ZOP_JSON_LOAD:
             return write_string(file, instruction->operand);
         case ZOP_RANDOM:
             return write_u32(file, (uint32_t)instruction->number_operand) &&
@@ -551,6 +574,24 @@ int zsharp_bytecode_write(
             ok = write_string(file, room->imports[import_index].path) &&
                  write_u32(file, room->imports[import_index].part_count);
         }
+        ok = ok && room->json_schema_count <= UINT32_MAX &&
+             write_u32(file, (uint32_t)room->json_schema_count);
+        for (import_index = 0;
+             ok && import_index < room->json_schema_count; import_index++) {
+            const ZSharpJsonSchema *schema =
+                &room->json_schemas[import_index];
+            size_t field_index;
+            ok = write_u8(file, (uint8_t)(schema->is_public != 0)) &&
+                 write_string(file, schema->name) &&
+                 schema->field_count <= UINT32_MAX &&
+                 write_u32(file, (uint32_t)schema->field_count);
+            for (field_index = 0;
+                 ok && field_index < schema->field_count; field_index++) {
+                ok = write_string(file, schema->fields[field_index].name) &&
+                     write_u8(file,
+                              (uint8_t)schema->fields[field_index].type);
+            }
+        }
         ok = ok &&
              room->variable_count <= UINT32_MAX &&
              write_u32(file, (uint32_t)room->variable_count);
@@ -693,6 +734,7 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
         case ZOP_STORE_GLOBAL:
         case ZOP_STORE_LOCAL:
         case ZOP_STORE_LOCAL_TEXT:
+        case ZOP_STORE_LOCAL_VALUE:
         case ZOP_STORE_FIELD:
         case ZOP_GET_MEMBER:
         case ZOP_STORE_NAME:
@@ -742,6 +784,8 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
             return read_u32(file, &instruction->index_operand) &&
                    read_string(file, &instruction->call_function);
         case ZOP_UI_SET_VALUE:
+            return read_string(file, &instruction->operand);
+        case ZOP_JSON_LOAD:
             return read_string(file, &instruction->operand);
         case ZOP_RANDOM:
             if (!read_u32(file, &value)) return 0;
@@ -1068,6 +1112,8 @@ int zsharp_bytecode_read(const char *path, ZSharpProgram *program,
         uint8_t horde_room = 0;
         uint32_t import_count = 0;
         uint32_t import_index;
+        uint32_t schema_count = 0;
+        uint32_t schema_index;
         uint32_t variable_count = 0;
         uint32_t variable_index;
         uint32_t function_count = 0;
@@ -1085,6 +1131,33 @@ int zsharp_bytecode_read(const char *path, ZSharpProgram *program,
             ok = import != NULL && read_string(file, &import->path) &&
                  read_u32(file, &import->part_count) &&
                  import->part_count >= 2 && import->part_count <= 64;
+        }
+        if (ok && minor >= 18) {
+            ok = read_u32(file, &schema_count) && schema_count <= 100000u;
+        }
+        for (schema_index = 0; ok && schema_index < schema_count;
+             schema_index++) {
+            ZSharpJsonSchema *schema = zsharp_room_add_json_schema(room);
+            uint8_t is_public = 0;
+            uint32_t field_count = 0;
+            uint32_t field_index;
+            ok = schema != NULL && read_u8(file, &is_public) &&
+                 read_string(file, &schema->name) &&
+                 read_u32(file, &field_count) && field_count <= 1000000u;
+            if (schema != NULL) schema->is_public = is_public != 0;
+            for (field_index = 0; ok && field_index < field_count;
+                 field_index++) {
+                ZSharpJsonField *field =
+                    zsharp_json_schema_add_field(schema);
+                uint8_t field_type = 0;
+                ok = field != NULL && read_string(file, &field->name) &&
+                     read_u8(file, &field_type) &&
+                     (field_type == ZVALUE_TEXT ||
+                      field_type == ZVALUE_NUMBER ||
+                      field_type == ZVALUE_STATUS);
+                if (field != NULL)
+                    field->type = (ZSharpValueType)field_type;
+            }
         }
         ok = ok &&
              read_u32(file, &variable_count) && variable_count <= 1000000u;

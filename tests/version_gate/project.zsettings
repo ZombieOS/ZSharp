@@ -1,0 +1,17 @@
+zsharp = type.settings
+
+Project: "Version Gate Test":
+PID: "version_gate_test":
+Version: [1.0.0.0]:
+Authors: ["ZombieOS"]:
+Description: "Checks feature version enforcement":
+ZSharp: [1.0.2.2]:
+
+Dependencies (
+ zsharpwindow:1.0.0.0
+):
+
+Window (
+ Startup: "Window.zsharp":
+ Uninstall: "Window.zsharp":
+)

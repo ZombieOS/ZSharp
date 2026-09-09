@@ -1,0 +1,11 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import version_gate_test.Window():
+
+ noticed brain Start[] (
+  number Line = 1:
+  Main.Status.content.set:
+   ("L" + Line):
+ )
+)

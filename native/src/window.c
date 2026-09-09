@@ -381,6 +381,26 @@ static HBITMAP load_image_bitmap(const char *path, int requested_width,
     return bitmap;
 }
 
+static int inline_image_text(const char *text, char *relative,
+                             size_t relative_size,
+                             const char **remaining) {
+    const char *end;
+    size_t length;
+    if (text == NULL || strncmp(text, "<img:", 5) != 0) return 0;
+    end = strchr(text + 5, '>');
+    if (end == NULL) return 0;
+    length = (size_t)(end - (text + 5));
+    if (length == 0 || length >= relative_size || text[5] == '/' ||
+        text[5] == '\\' || (length > 1 && text[6] == ':') ||
+        strstr(text + 5, "..") == text + 5) return 0;
+    memcpy(relative, text + 5, length);
+    relative[length] = '\0';
+    if (strstr(relative, "..") != NULL) return 0;
+    *remaining = end + 1;
+    while (**remaining == ' ') (*remaining)++;
+    return 1;
+}
+
 static HICON load_window_icon(const char *path, int size) {
     HBITMAP color = load_image_bitmap(path, size, size);
     HBITMAP mask;
@@ -690,6 +710,69 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
         case WM_DRAWITEM: {
             DRAWITEMSTRUCT *draw = (DRAWITEMSTRUCT *)lparam;
             WindowControl *control = find_control(state, draw->hwndItem);
+            if (control != NULL && control->element->type == ZUI_TEXT) {
+                char text[2048];
+                char relative[MAX_PATH];
+                char full_path[4096];
+                const char *remaining = NULL;
+                HGDIOBJ previous_font;
+                RECT text_area = draw->rcItem;
+                GetWindowTextA(draw->hwndItem, text, sizeof(text));
+                if (state->background_buffer != NULL) {
+                    RECT control_area;
+                    GetWindowRect(control->handle, &control_area);
+                    MapWindowPoints(NULL, state->window,
+                                    (POINT *)&control_area, 2);
+                    BitBlt(draw->hDC, 0, 0,
+                           draw->rcItem.right, draw->rcItem.bottom,
+                           state->background_buffer, control_area.left,
+                           control_area.top, SRCCOPY);
+                } else {
+                    FillRect(draw->hDC, &draw->rcItem,
+                             state->window_background);
+                }
+                previous_font = SelectObject(draw->hDC, control->font);
+                SetBkMode(draw->hDC, TRANSPARENT);
+                SetTextColor(draw->hDC, control->has_text_color
+                    ? control->text_color : RGB(0, 0, 0));
+                if (inline_image_text(text, relative, sizeof(relative),
+                                      &remaining) &&
+                    snprintf(full_path, sizeof(full_path), "%s/%s",
+                             state->project_root, relative) > 0) {
+                    int image_size = draw->rcItem.bottom - draw->rcItem.top;
+                    HBITMAP bitmap;
+                    HDC memory;
+                    HGDIOBJ previous_bitmap;
+                    if (image_size > 24) image_size = 24;
+                    if (image_size < 1) image_size = 1;
+                    bitmap = load_image_bitmap(full_path, image_size,
+                                               image_size);
+                    if (bitmap != NULL) {
+                        memory = CreateCompatibleDC(draw->hDC);
+                        previous_bitmap = SelectObject(memory, bitmap);
+                        BitBlt(draw->hDC, 2,
+                               (draw->rcItem.bottom - image_size) / 2,
+                               image_size, image_size, memory, 0, 0, SRCCOPY);
+                        SelectObject(memory, previous_bitmap);
+                        DeleteDC(memory);
+                        DeleteObject(bitmap);
+                        text_area.left += image_size + 7;
+                        DrawTextA(draw->hDC, remaining, -1, &text_area,
+                                  DT_LEFT | DT_VCENTER | DT_SINGLELINE |
+                                  DT_NOPREFIX);
+                    } else {
+                        DrawTextA(draw->hDC, text, -1, &text_area,
+                                  DT_CENTER | DT_VCENTER | DT_SINGLELINE |
+                                  DT_NOPREFIX);
+                    }
+                } else {
+                    DrawTextA(draw->hDC, text, -1, &text_area,
+                              DT_CENTER | DT_VCENTER | DT_SINGLELINE |
+                              DT_NOPREFIX);
+                }
+                SelectObject(draw->hDC, previous_font);
+                return TRUE;
+            }
             if (control != NULL && control->element->type == ZUI_BUTTON) {
                 char text[512];
                 char paint_error[128] = {0};
@@ -1163,7 +1246,7 @@ static int create_controls(WindowState *state, int client_width,
             text_property = find_property(element, "content");
             color_property = find_property(element, "color");
             display_text = text_property == NULL ? "" : text_property->text_value;
-            style |= SS_CENTER | SS_EDITCONTROL;
+            style |= SS_OWNERDRAW;
         } else if (element->type == ZUI_BUTTON) {
             class_name = "BUTTON";
             text_property = find_property(element, "text");
@@ -1410,7 +1493,9 @@ static int set_window_property(void *data, const char *path,
     WindowState *state = (WindowState *)data;
     ZSharpUIElement *element = NULL;
     ZSharpUIProperty *property = NULL;
-    WindowControl *control;
+    WindowControl *control = NULL;
+    int redraw_window = 0;
+    int redraw_control = 0;
     if (!zsharp_window_model_set(state->program, path, value_type, text_value,
                                  unit, &element, &property,
                                  error, error_size)) return 0;
@@ -1425,6 +1510,7 @@ static int set_window_property(void *data, const char *path,
             zsharp_paint_free(&state->background_paint);
             state->background_paint = replacement;
             replace_background_brush(state);
+            redraw_window = 1;
         } else if (strcmp(property->name, "scalable") == 0) {
             LONG_PTR style = GetWindowLongPtrA(state->window, GWL_STYLE);
             if (property->status_value)
@@ -1489,6 +1575,7 @@ static int set_window_property(void *data, const char *path,
             control->text_color = parse_color(property->text_value,
                                               RGB(0, 0, 0));
             control->has_text_color = 1;
+            redraw_control = 1;
         } else if (strcmp(property->name, "buttonColor") == 0) {
             ZSharpPaint replacement;
             memset(&replacement, 0, sizeof(replacement));
@@ -1499,6 +1586,7 @@ static int set_window_property(void *data, const char *path,
             control->button_color = paint_first_color(
                 &replacement, RGB(240, 240, 240));
             control->has_button_color = 1;
+            redraw_control = 1;
         } else if (strcmp(property->name, "file") == 0) {
             int width;
             int height;
@@ -1523,9 +1611,14 @@ static int set_window_property(void *data, const char *path,
         if (property->type == ZUI_PROPERTY_MEASUREMENT)
             layout_controls(state);
     }
-    RedrawWindow(state->window, NULL, NULL,
-                 RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN |
-                 RDW_NOERASE);
+    if (redraw_window) {
+        RedrawWindow(state->window, NULL, NULL,
+                     RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN |
+                     RDW_NOERASE);
+    } else if (redraw_control && control != NULL) {
+        RedrawWindow(control->handle, NULL, NULL,
+                     RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
+    }
     return 1;
 }
 

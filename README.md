@@ -5,7 +5,7 @@ Official website and downloads: <https://www.zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
-Version 1.0.2.3 uses separate `.zscene`, `.zobject`, and `.zaudio` files for
+Version 1.0.2.4 uses separate `.zscene`, `.zobject`, and `.zaudio` files for
 game scenes, objects, and scene-owned WAV sources. It adds executable `.zgame` packages, the
 `zsharpgame:1.0.0.1` dependency, Vulkan drawing, named-key input, cameras, frame timing,
 2D/3D transforms, physics, collisions, and audio. Windows and Linux are the

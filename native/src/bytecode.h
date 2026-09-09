@@ -74,6 +74,18 @@ typedef struct ZSharpImport {
     uint32_t part_count;
 } ZSharpImport;
 
+typedef struct ZSharpJsonField {
+    char *name;
+    ZSharpValueType type;
+} ZSharpJsonField;
+
+typedef struct ZSharpJsonSchema {
+    int is_public;
+    char *name;
+    ZSharpJsonField *fields;
+    size_t field_count;
+} ZSharpJsonSchema;
+
 typedef enum ZSharpScriptType {
     ZSCRIPT_NORMAL = 0,
     ZSCRIPT_WINDOW = 1,
@@ -186,7 +198,9 @@ typedef enum ZSharpOpCode {
     ZOP_DELAY = 48,
     ZOP_UI_SET_DYNAMIC = 49,
     ZOP_UI_SET_VALUE = 50,
-    ZOP_RANDOM = 51
+    ZOP_RANDOM = 51,
+    ZOP_JSON_LOAD = 52,
+    ZOP_STORE_LOCAL_VALUE = 53
 } ZSharpOpCode;
 
 typedef struct ZSharpInstruction {
@@ -223,6 +237,8 @@ typedef struct ZSharpRoom {
     char *qualified_name;
     ZSharpImport *imports;
     size_t import_count;
+    ZSharpJsonSchema *json_schemas;
+    size_t json_schema_count;
     ZSharpVariable *variables;
     size_t variable_count;
     ZSharpFunction *functions;
@@ -247,6 +263,8 @@ char *zsharp_copy_text(const char *text, size_t length);
 
 ZSharpRoom *zsharp_program_add_room(ZSharpProgram *program);
 ZSharpImport *zsharp_room_add_import(ZSharpRoom *room);
+ZSharpJsonSchema *zsharp_room_add_json_schema(ZSharpRoom *room);
+ZSharpJsonField *zsharp_json_schema_add_field(ZSharpJsonSchema *schema);
 ZSharpVariable *zsharp_room_add_variable(ZSharpRoom *room);
 ZSharpFunction *zsharp_room_add_function(ZSharpRoom *room);
 ZSharpParameter *zsharp_function_add_parameter(ZSharpFunction *function);

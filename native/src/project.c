@@ -632,6 +632,16 @@ static const ZSharpVariable *model_find_variable(const ZSharpRoom *room,
     return NULL;
 }
 
+static const ZSharpJsonSchema *model_find_json_schema(
+    const ZSharpRoom *room, const char *name) {
+    size_t index;
+    for (index = 0; index < room->json_schema_count; index++) {
+        if (strcmp(room->json_schemas[index].name, name) == 0)
+            return &room->json_schemas[index];
+    }
+    return NULL;
+}
+
 static const ZSharpFunction *model_find_function(const ZSharpRoom *room,
                                                   const char *name) {
     size_t index;
@@ -1112,9 +1122,15 @@ static int validate_file_function(const ZSharpProgram *program,
     return ok;
 }
 
+static int function_has_prior_local(const ZSharpFunction *function,
+                                    size_t instruction_index,
+                                    const char *name);
+
 static int validate_instruction(const ZSharpProgram *program,
                                 const ZSharpSettings *settings,
                                 const ZSharpRoom *room,
+                                const ZSharpFunction *function,
+                                size_t instruction_index,
                                 const ZSharpInstruction *instruction,
                                 const char *project_root, char *error,
                                 size_t error_size) {
@@ -1224,13 +1240,30 @@ static int validate_instruction(const ZSharpProgram *program,
     }
     if (count == 2) {
         const ZSharpVariable *base = model_find_variable(room, parts[0]);
-        if (base != NULL && base->type == ZVALUE_OBJECT) {
-            const ZSharpRoom *class_room =
-                model_find_room(program, base->object_type);
-            const ZSharpVariable *field = class_room == NULL
-                ? NULL
-                : model_find_variable(class_room, parts[1]);
-            if (field == NULL) {
+        if (function_has_prior_local(function, instruction_index,
+                                     parts[0])) {
+            ok = 1;
+        } else if (base != NULL && base->type == ZVALUE_OBJECT) {
+            const ZSharpRoom *class_room = NULL;
+            const ZSharpVariable *field = NULL;
+            int found_json_field = 0;
+            if (base->object_type != NULL &&
+                strncmp(base->object_type, "$json:", 6) == 0) {
+                const ZSharpJsonSchema *schema = model_find_json_schema(
+                    room, base->object_type + 6);
+                size_t field_index;
+                for (field_index = 0;
+                     schema != NULL && field_index < schema->field_count;
+                     field_index++) {
+                    if (strcmp(schema->fields[field_index].name,
+                               parts[1]) == 0) found_json_field = 1;
+                }
+            } else {
+                class_room = model_find_room(program, base->object_type);
+                field = class_room == NULL ? NULL :
+                    model_find_variable(class_room, parts[1]);
+            }
+            if (field == NULL && !found_json_field) {
                 snprintf(error, error_size,
                          "object '%s' has no field named '%s'", parts[0],
                          parts[1]);
@@ -1276,12 +1309,74 @@ static int function_knows_name(const ZSharpRoom *room,
         const ZSharpInstruction *instruction =
             &function->instructions[index];
         if ((instruction->op == ZOP_STORE_LOCAL ||
-             instruction->op == ZOP_STORE_LOCAL_TEXT) &&
+             instruction->op == ZOP_STORE_LOCAL_TEXT ||
+             instruction->op == ZOP_STORE_LOCAL_VALUE) &&
             strcmp(instruction->operand, name) == 0) {
             return 1;
         }
     }
     return 0;
+}
+
+static int function_has_prior_local(const ZSharpFunction *function,
+                                    size_t instruction_index,
+                                    const char *name) {
+    size_t index;
+    for (index = 0; index < instruction_index; index++) {
+        const ZSharpInstruction *instruction = &function->instructions[index];
+        if ((instruction->op == ZOP_STORE_LOCAL ||
+             instruction->op == ZOP_STORE_LOCAL_TEXT ||
+             instruction->op == ZOP_STORE_LOCAL_VALUE) &&
+            strcmp(instruction->operand, name) == 0) return 1;
+    }
+    return 0;
+}
+
+static int project_version_before(const ZSharpSettings *settings,
+                                  uint32_t major, uint32_t minor,
+                                  uint32_t patch, uint32_t revision) {
+    const uint32_t required[4] = {major, minor, patch, revision};
+    size_t index;
+    for (index = 0; index < 4; index++) {
+        if (settings->zsharp_version[index] < required[index]) return 1;
+        if (settings->zsharp_version[index] > required[index]) return 0;
+    }
+    return 0;
+}
+
+static int validate_feature_version(const ZSharpSettings *settings,
+                                    const ZSharpFunction *function,
+                                    size_t instruction_index, char *error,
+                                    size_t error_size) {
+    const ZSharpInstruction *instruction =
+        &function->instructions[instruction_index];
+    int requires_1023 = instruction->op == ZOP_UI_SET_VALUE ||
+                        instruction->op == ZOP_RANDOM ||
+                        ((instruction->op == ZOP_STORE_GLOBAL ||
+                          instruction->op == ZOP_STORE_FIELD) &&
+                         function_has_prior_local(function, instruction_index,
+                                                  instruction->operand)) ||
+                        ((instruction->op == ZOP_UI_SET ||
+                          instruction->op == ZOP_UI_SET_VALUE) &&
+                         instruction->operand != NULL &&
+                         strstr(instruction->operand, ".texture") != NULL);
+    if (requires_1023 && project_version_before(settings, 1, 0, 2, 3)) {
+        snprintf(error, error_size,
+                 "this syntax requires ZSharp: [1.0.2.3]: or newer; the project declares %u.%u.%u.%u",
+                 settings->zsharp_version[0], settings->zsharp_version[1],
+                 settings->zsharp_version[2], settings->zsharp_version[3]);
+        return 0;
+    }
+    if ((instruction->op == ZOP_JSON_LOAD ||
+         instruction->op == ZOP_STORE_LOCAL_VALUE) &&
+        project_version_before(settings, 1, 0, 2, 4)) {
+        snprintf(error, error_size,
+                 "this syntax requires ZSharp: [1.0.2.4]: or newer; the project declares %u.%u.%u.%u",
+                 settings->zsharp_version[0], settings->zsharp_version[1],
+                 settings->zsharp_version[2], settings->zsharp_version[3]);
+        return 0;
+    }
+    return 1;
 }
 
 static int program_has_method(const ZSharpProgram *program,
@@ -1515,12 +1610,32 @@ int zsharp_project_validate(const ZSharpProgram *program,
         const ZSharpRoom *room = &program->rooms[room_index];
         size_t variable_index;
         size_t function_index;
+        if (room->json_schema_count > 0 &&
+            project_version_before(settings, 1, 0, 2, 4)) {
+            snprintf(error, error_size,
+                     "custom JSON requires ZSharp: [1.0.2.4]: or newer; the project declares %u.%u.%u.%u",
+                     settings->zsharp_version[0], settings->zsharp_version[1],
+                     settings->zsharp_version[2], settings->zsharp_version[3]);
+            return 0;
+        }
         for (variable_index = 0; variable_index < room->variable_count;
              variable_index++) {
             const ZSharpVariable *variable = &room->variables[variable_index];
             const ZSharpRoom *object_room;
             if (variable->type != ZVALUE_OBJECT &&
                 variable->type != ZVALUE_OBJECT_ARRAY) continue;
+            if (variable->type == ZVALUE_OBJECT &&
+                variable->object_type != NULL &&
+                strncmp(variable->object_type, "$json:", 6) == 0) {
+                if (model_find_json_schema(room,
+                                           variable->object_type + 6) == NULL) {
+                    snprintf(error, error_size,
+                             "JSON variable '%s' uses unknown schema '%s'",
+                             variable->name, variable->object_type + 6);
+                    return 0;
+                }
+                continue;
+            }
             object_room = model_find_room(
                 program, variable->type == ZVALUE_OBJECT
                              ? variable->object_type
@@ -1539,11 +1654,14 @@ int zsharp_project_validate(const ZSharpProgram *program,
             for (instruction_index = 0;
                  instruction_index < function->instruction_count;
                  instruction_index++) {
-                if (!validate_simple_name(
+                if (!validate_feature_version(
+                        settings, function, instruction_index, error,
+                        error_size) ||
+                    !validate_simple_name(
                         program, room, function, instruction_index, error,
                         error_size) ||
                     !validate_instruction(
-                        program, settings, room,
+                        program, settings, room, function, instruction_index,
                         &function->instructions[instruction_index],
                         project_root, error, error_size)) {
                     return 0;

@@ -1,0 +1,23 @@
+zsharp = type.script
+
+noticed room JSONCustom[] (
+ import ZSharp.JSON():
+
+ noticed JSON Custom1[] (
+  name: text:
+  age: number:
+  phone-number: text:
+  enabled: status:
+ )
+
+ silent JSON SavedPerson = JSON.load(Custom1, "tests/Person.json"):
+
+ noticed brain Start[] (
+  JSON Person = JSON.load(Custom1, "tests/Person.json"):
+  Print(Person.name):
+  Print(Person.age):
+  Print(Person["phone-number"]):
+  Print(Person.enabled):
+  Print(SavedPerson.name):
+ )
+)

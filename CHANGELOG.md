@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2.4 - IDE foundations - In development
+
+- Apps and games may target future Z# versions, while launch-time checks keep
+  them from opening on an older installed runtime.
+- Added typed custom JSON schema declarations with text, number, and status
+  fields, including JSON keys containing hyphens.
+- Added project-relative `JSON.load` values for local and room variables with
+  schema validation and normal Z# visibility rules.
+- Added inline PNG images to Windows text controls with the
+  `<img:path/to/image.png>` marker.
+- Reduced native-window flicker caused by frequently updated controls.
+
 ## 1.0.2.3 - Developer experience patch - 2026-09-09
 
 - Added calculated live-window property setters and mixed text, number, and

@@ -187,6 +187,12 @@ expect_success("SDL/Vulkan game runtime build" "${PROJECT_ROOT}"
                game-info)
 expect_success("developer experience syntax" "${PROJECT_ROOT}"
                check tests/DeveloperExperience.zsharp)
+expect_success("custom JSON schema syntax" "${PROJECT_ROOT}"
+               check tests/JsonSchema.zsharp)
+expect_failure("new syntax requires declared project version"
+               "requires ZSharp: [1.0.2.3]: or newer"
+               "${PROJECT_ROOT}"
+               check tests/version_gate/Feature.zsharp)
 execute_process(
     COMMAND "${ZSHARP_BIN}" run
             "${PROJECT_ROOT}/tests/DeveloperExperience.zsharp"
@@ -302,14 +308,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.0.2.4]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.0.2.5]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.0.2.4!"
+               "Update to at least 1.0.2.5!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

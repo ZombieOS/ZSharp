@@ -319,6 +319,30 @@ static int parse_primary(Parser *parser, ZSharpFunction *function) {
         int qualified = zsharp_token_equals(&token, "number") ||
                         zsharp_token_equals(&token, "var");
         advance_token(parser);
+        if (zsharp_token_equals(&token, "JSON") &&
+            match_type(parser, ZTOKEN_DOT)) {
+            char *schema_name;
+            if (!consume_word(parser, "load") ||
+                !consume_type(parser, ZTOKEN_LEFT_PAREN,
+                              "'(' after JSON.load")) return 0;
+            schema_name = consume_name(parser, "a JSON schema name");
+            if (schema_name == NULL ||
+                !consume_type(parser, ZTOKEN_COMMA,
+                              "',' after the JSON schema") ||
+                !parse_expression(parser, function) ||
+                !consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "')' after the JSON path")) {
+                free(schema_name);
+                return 0;
+            }
+            instruction = emit(parser, function, ZOP_JSON_LOAD);
+            if (instruction == NULL) {
+                free(schema_name);
+                return 0;
+            }
+            instruction->operand = schema_name;
+            return 1;
+        }
         if (zsharp_token_equals(&token, "random") &&
             match_type(parser, ZTOKEN_DOT)) {
             char *method = consume_name(parser, "number, decimal, or chance");
@@ -1544,6 +1568,26 @@ static int parse_statement(Parser *parser, ZSharpFunction *function) {
     if (match_word(parser, "text")) {
         return parse_text_statement(parser, function);
     }
+    if (match_word(parser, "JSON")) {
+        ZSharpInstruction *instruction;
+        char *name = consume_name(parser, "a local JSON variable name");
+        if (name == NULL ||
+            !consume_type(parser, ZTOKEN_EQUAL,
+                          "'=' after the local JSON variable") ||
+            !parse_expression(parser, function) ||
+            !consume_type(parser, ZTOKEN_COLON,
+                          "':' after the local JSON value")) {
+            free(name);
+            return 0;
+        }
+        instruction = emit(parser, function, ZOP_STORE_LOCAL_VALUE);
+        if (instruction == NULL) {
+            free(name);
+            return 0;
+        }
+        instruction->operand = name;
+        return 1;
+    }
     if (match_word(parser, "feed")) return parse_feed(parser, function);
     if (match_word(parser, "if")) return parse_if(parser, function);
     if (match_word(parser, "loop")) {
@@ -2033,6 +2077,168 @@ static int parse_custom_member(Parser *parser, ZSharpRoom *room,
                         "':' after the object value");
 }
 
+static char *consume_json_field_name(Parser *parser) {
+    char *parts[32] = {0};
+    size_t count = 0;
+    char *name;
+    parts[count++] = consume_name(parser, "a JSON field name");
+    if (parts[0] == NULL) return NULL;
+    while (parser->current.type == ZTOKEN_MINUS) {
+        advance_token(parser);
+        if (count == 32) {
+            fail_at(parser, &parser->current, "JSON field name is too long");
+            break;
+        }
+        parts[count++] = consume_name(parser, "a name after '-' ");
+        if (parts[count - 1] == NULL) break;
+    }
+    name = join_path_parts(parser, parts, count);
+    if (name != NULL && count > 1) {
+        char *cursor = name;
+        while ((cursor = strchr(cursor, '.')) != NULL) *cursor++ = '-';
+    }
+    while (count > 0) free(parts[--count]);
+    return name;
+}
+
+static int parse_json_schema_member(Parser *parser, ZSharpRoom *room,
+                                    int is_public, char *name) {
+    ZSharpJsonSchema *schema;
+    size_t index;
+    for (index = 0; index < room->json_schema_count; index++) {
+        if (strcmp(room->json_schemas[index].name, name) == 0) {
+            fail_at(parser, &parser->current,
+                    "JSON schema '%s' is already defined", name);
+            free(name);
+            return 0;
+        }
+    }
+    schema = zsharp_room_add_json_schema(room);
+    if (schema == NULL) {
+        free(name);
+        fail_at(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    schema->is_public = is_public;
+    schema->name = name;
+    if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
+                      "'[' after the JSON schema name") ||
+        !consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                      "']' after the JSON schema options") ||
+        !consume_type(parser, ZTOKEN_LEFT_PAREN,
+                      "'(' before the JSON schema fields")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
+           parser->current.type != ZTOKEN_EOF) {
+        ZSharpJsonField *field;
+        char *field_name = consume_json_field_name(parser);
+        ZSharpValueType type;
+        if (field_name == NULL ||
+            !consume_type(parser, ZTOKEN_COLON,
+                          "':' after the JSON field name")) {
+            free(field_name);
+            return 0;
+        }
+        if (match_word(parser, "text")) type = ZVALUE_TEXT;
+        else if (match_word(parser, "number")) type = ZVALUE_NUMBER;
+        else if (match_word(parser, "status")) type = ZVALUE_STATUS;
+        else {
+            fail_at(parser, &parser->current,
+                    "JSON fields must use text, number, or status");
+            free(field_name);
+            return 0;
+        }
+        if (!consume_type(parser, ZTOKEN_COLON,
+                          "':' after the JSON field type")) {
+            free(field_name);
+            return 0;
+        }
+        for (index = 0; index < schema->field_count; index++) {
+            if (strcmp(schema->fields[index].name, field_name) == 0) {
+                fail_at(parser, &parser->current,
+                        "JSON field '%s' is already defined", field_name);
+                free(field_name);
+                return 0;
+            }
+        }
+        field = zsharp_json_schema_add_field(schema);
+        if (field == NULL) {
+            free(field_name);
+            fail_at(parser, &parser->current, "out of memory");
+            return 0;
+        }
+        field->name = field_name;
+        field->type = type;
+    }
+    return consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                        "')' after the JSON schema fields");
+}
+
+static int parse_json_member(Parser *parser, ZSharpRoom *room,
+                             int is_public) {
+    char *name = consume_name(parser, "a JSON schema or variable name");
+    if (name == NULL) return 0;
+    if (parser->current.type == ZTOKEN_LEFT_BRACKET)
+        return parse_json_schema_member(parser, room, is_public, name);
+    if (parser->current.type == ZTOKEN_EQUAL) {
+        ZSharpVariable *variable = zsharp_room_add_variable(room);
+        char *schema_name;
+        char *path;
+        size_t type_length;
+        ZSharpToken path_token;
+        if (variable == NULL) {
+            free(name);
+            fail_at(parser, &parser->current, "out of memory");
+            return 0;
+        }
+        variable->is_public = is_public;
+        variable->type = ZVALUE_OBJECT;
+        variable->name = name;
+        advance_token(parser);
+        if (!consume_word(parser, "JSON") ||
+            !consume_type(parser, ZTOKEN_DOT, "'.' after JSON") ||
+            !consume_word(parser, "load") ||
+            !consume_type(parser, ZTOKEN_LEFT_PAREN,
+                          "'(' after JSON.load")) return 0;
+        schema_name = consume_name(parser, "a JSON schema name");
+        if (schema_name == NULL ||
+            !consume_type(parser, ZTOKEN_COMMA,
+                          "',' after the JSON schema")) {
+            free(schema_name);
+            return 0;
+        }
+        path_token = parser->current;
+        if (!match_type(parser, ZTOKEN_STRING) ||
+            !consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                          "')' after the JSON path") ||
+            !consume_type(parser, ZTOKEN_COLON,
+                          "':' after the JSON value")) {
+            free(schema_name);
+            return 0;
+        }
+        path = decode_text(parser, &path_token);
+        type_length = strlen(schema_name) + 7;
+        variable->object_type = (char *)malloc(type_length);
+        variable->constructor_arguments =
+            (ZSharpLiteral *)calloc(1, sizeof(ZSharpLiteral));
+        if (path == NULL || variable->object_type == NULL ||
+            variable->constructor_arguments == NULL) {
+            free(path); free(schema_name);
+            fail_at(parser, &parser->current, "out of memory");
+            return 0;
+        }
+        snprintf(variable->object_type, type_length, "$json:%s", schema_name);
+        variable->constructor_argument_count = 1;
+        variable->constructor_arguments[0].type = ZVALUE_TEXT;
+        variable->constructor_arguments[0].text_value = path;
+        free(schema_name);
+        return 1;
+    }
+    fail_at(parser, &parser->current,
+            "expected '[' for a JSON schema or '=' for a JSON variable");
+    free(name);
+    return 0;
+}
+
 static int parse_member(Parser *parser, ZSharpRoom *room) {
     int is_public;
     int is_horde;
@@ -2048,7 +2254,9 @@ static int parse_member(Parser *parser, ZSharpRoom *room) {
     }
     variable_count = room->variable_count;
     function_count = room->function_count;
-    if (match_word(parser, "text")) {
+    if (match_word(parser, "JSON")) {
+        parsed = parse_json_member(parser, room, is_public);
+    } else if (match_word(parser, "text")) {
         parsed = parse_text_member(parser, room, is_public);
     } else if (match_word(parser, "number")) {
         parsed = parse_number_member(parser, room, is_public);

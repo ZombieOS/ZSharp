@@ -55,6 +55,8 @@ typedef struct RuntimeObject {
 typedef struct RuntimeHeap {
     char **texts;
     size_t text_count;
+    RuntimeObject **objects;
+    size_t object_count;
 } RuntimeHeap;
 
 typedef struct RuntimeModule {
@@ -124,6 +126,20 @@ static char *heap_add_text(RuntimeHeap *heap, char *text) {
     return text;
 }
 
+static RuntimeObject *heap_add_object(RuntimeHeap *heap,
+                                      RuntimeObject *object) {
+    RuntimeObject **resized = (RuntimeObject **)realloc(
+        heap->objects, (heap->object_count + 1) * sizeof(*heap->objects));
+    if (resized == NULL) {
+        free(object->fields);
+        free(object);
+        return NULL;
+    }
+    heap->objects = resized;
+    heap->objects[heap->object_count++] = object;
+    return object;
+}
+
 static int coerce_number_to_text(RuntimeHeap *heap, RuntimeValue *value,
                                  char *error, size_t error_size) {
     char *copy;
@@ -184,6 +200,189 @@ static void heap_free(RuntimeHeap *heap) {
         free(heap->texts[index]);
     }
     free(heap->texts);
+    for (index = 0; index < heap->object_count; index++) {
+        free(heap->objects[index]->fields);
+        free(heap->objects[index]);
+    }
+    free(heap->objects);
+}
+
+static ZSharpJsonSchema *find_json_schema(ZSharpRoom *room,
+                                          const char *name) {
+    size_t index;
+    for (index = 0; index < room->json_schema_count; index++) {
+        if (strcmp(room->json_schemas[index].name, name) == 0)
+            return &room->json_schemas[index];
+    }
+    return NULL;
+}
+
+static const char *json_skip_space(const char *cursor) {
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' ||
+           *cursor == '\n') cursor++;
+    return cursor;
+}
+
+static char *json_parse_text_value(const char **cursor, RuntimeHeap *heap) {
+    const char *start;
+    const char *scan;
+    char *result;
+    char *write;
+    if (**cursor != '"') return NULL;
+    scan = start = ++*cursor;
+    while (*scan != '\0' && *scan != '"') {
+        if (*scan == '\\' && scan[1] != '\0') scan++;
+        scan++;
+    }
+    if (*scan != '"') return NULL;
+    result = (char *)malloc((size_t)(scan - start) + 1);
+    if (result == NULL) return NULL;
+    write = result;
+    while (start < scan) {
+        if (*start == '\\' && start + 1 < scan) {
+            start++;
+            if (*start == 'n') *write++ = '\n';
+            else if (*start == 'r') *write++ = '\r';
+            else if (*start == 't') *write++ = '\t';
+            else *write++ = *start;
+            start++;
+        } else {
+            *write++ = *start++;
+        }
+    }
+    *write = '\0';
+    *cursor = scan + 1;
+    return heap_add_text(heap, result);
+}
+
+static int json_project_path(const char *project_root, const char *relative,
+                             char *path, size_t path_size) {
+    if (relative == NULL || relative[0] == '\0' ||
+        relative[0] == '/' || relative[0] == '\\' ||
+        (strlen(relative) > 1 && relative[1] == ':') ||
+        strstr(relative, "..") != NULL) return 0;
+    return snprintf(path, path_size, "%s/%s", project_root, relative) > 0 &&
+           strlen(path) < path_size;
+}
+
+static int load_json_object(ZSharpRoom *room, const char *schema_name,
+                            const char *relative_path,
+                            const char *project_root, RuntimeHeap *heap,
+                            int track_in_heap, RuntimeValue *output, char *error,
+                            size_t error_size) {
+    ZSharpJsonSchema *schema = find_json_schema(room, schema_name);
+    RuntimeObject *object;
+    char path[4096];
+    FILE *file;
+    long length;
+    char *source;
+    const char *cursor;
+    unsigned char *seen;
+    size_t index;
+    if (schema == NULL) {
+        snprintf(error, error_size, "room '%s' has no JSON schema named '%s'",
+                 room->name, schema_name);
+        return 0;
+    }
+    if (!json_project_path(project_root, relative_path, path, sizeof(path))) {
+        snprintf(error, error_size, "JSON.load requires a safe project-relative path");
+        return 0;
+    }
+    file = fopen(path, "rb");
+    if (file == NULL || fseek(file, 0, SEEK_END) != 0 ||
+        (length = ftell(file)) < 0 || length > 16 * 1024 * 1024 ||
+        fseek(file, 0, SEEK_SET) != 0) {
+        if (file != NULL) fclose(file);
+        snprintf(error, error_size, "could not read JSON file '%s'", relative_path);
+        return 0;
+    }
+    source = (char *)malloc((size_t)length + 1);
+    if (source == NULL || fread(source, 1, (size_t)length, file) !=
+                              (size_t)length) {
+        free(source);
+        fclose(file);
+        snprintf(error, error_size, "could not read JSON file '%s'", relative_path);
+        return 0;
+    }
+    fclose(file);
+    source[length] = '\0';
+    object = (RuntimeObject *)calloc(1, sizeof(*object));
+    seen = (unsigned char *)calloc(schema->field_count, 1);
+    if (object == NULL || seen == NULL ||
+        (schema->field_count > 0 &&
+         (object->fields = (RuntimeField *)calloc(
+              schema->field_count, sizeof(*object->fields))) == NULL)) {
+        free(source); free(seen); free(object);
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    object->field_count = schema->field_count;
+    for (index = 0; index < schema->field_count; index++) {
+        object->fields[index].name = schema->fields[index].name;
+        object->fields[index].type = schema->fields[index].type;
+        object->fields[index].value.type = schema->fields[index].type;
+    }
+    cursor = json_skip_space(source);
+    if (*cursor++ != '{') goto invalid;
+    cursor = json_skip_space(cursor);
+    while (*cursor != '}') {
+        char *key = json_parse_text_value(&cursor, heap);
+        RuntimeField *field = NULL;
+        if (key == NULL) goto invalid;
+        for (index = 0; index < schema->field_count; index++) {
+            if (strcmp(schema->fields[index].name, key) == 0) {
+                field = &object->fields[index]; seen[index] = 1; break;
+            }
+        }
+        cursor = json_skip_space(cursor);
+        if (field == NULL || *cursor++ != ':') goto invalid;
+        cursor = json_skip_space(cursor);
+        if (field->type == ZVALUE_TEXT) {
+            field->value.text = json_parse_text_value(&cursor, heap);
+            if (field->value.text == NULL) goto invalid;
+        } else if (field->type == ZVALUE_STATUS) {
+            if (strncmp(cursor, "true", 4) == 0) {
+                field->value.number = 1; cursor += 4;
+            } else if (strncmp(cursor, "false", 5) == 0) {
+                field->value.number = 0; cursor += 5;
+            } else goto invalid;
+        } else {
+            const char *start = cursor;
+            char *number;
+            char *end;
+            while (*cursor == '-' || *cursor == '+' || *cursor == '.' ||
+                   (*cursor >= '0' && *cursor <= '9') || *cursor == 'e' ||
+                   *cursor == 'E') cursor++;
+            if (cursor == start) goto invalid;
+            number = zsharp_copy_text(start, (size_t)(cursor - start));
+            if (number == NULL || heap_add_text(heap, number) == NULL) goto invalid;
+            (void)strtod(number, &end);
+            if (*end != '\0') goto invalid;
+            field->value.number_text = number;
+        }
+        cursor = json_skip_space(cursor);
+        if (*cursor == ',') { cursor = json_skip_space(cursor + 1); continue; }
+        if (*cursor != '}') goto invalid;
+    }
+    cursor = json_skip_space(cursor + 1);
+    if (*cursor != '\0') goto invalid;
+    for (index = 0; index < schema->field_count; index++) {
+        if (!seen[index]) goto invalid;
+    }
+    free(source); free(seen);
+    if (track_in_heap && heap_add_object(heap, object) == NULL) {
+        snprintf(error, error_size, "out of memory"); return 0;
+    }
+    memset(output, 0, sizeof(*output));
+    output->type = ZVALUE_OBJECT;
+    output->object = object;
+    return 1;
+invalid:
+    free(source); free(seen); free(object->fields); free(object);
+    snprintf(error, error_size,
+             "JSON file '%s' does not match schema '%s'", relative_path,
+             schema_name);
+    return 0;
 }
 
 static ZSharpRoom *find_room(ZSharpProgram *program, const char *name) {
@@ -690,7 +889,9 @@ static int resolve_value_path(
             if (field == NULL) {
                 snprintf(error, error_size,
                          "room '%s' has no field named '%s'",
-                         base.object->room->name, parts[1]);
+                         base.object->room == NULL ? "JSON" :
+                             base.object->room->name,
+                         parts[1]);
             } else {
                 *value = runtime_field_value(field);
                 ok = 1;
@@ -1481,6 +1682,47 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 break;
             }
+            case ZOP_STORE_LOCAL_VALUE: {
+                size_t local_index;
+                if (!pop(stack, &stack_count, &value, error, error_size)) {
+                    ok = 0;
+                    goto done;
+                }
+                for (local_index = 0; local_index < local_count;
+                     local_index++) {
+                    if (strcmp(locals[local_index].name,
+                               instruction->operand) == 0) {
+                        locals[local_index].value = value;
+                        break;
+                    }
+                }
+                if (local_index == local_count) {
+                    if (local_count >= local_capacity) {
+                        snprintf(error, error_size, "too many local values");
+                        ok = 0;
+                        goto done;
+                    }
+                    locals[local_count].name = instruction->operand;
+                    locals[local_count].value = value;
+                    local_count++;
+                }
+                break;
+            }
+            case ZOP_JSON_LOAD:
+                if (!pop(stack, &stack_count, &value, error, error_size) ||
+                    value.type != ZVALUE_TEXT ||
+                    !load_json_object(room, instruction->operand, value.text,
+                                      project_root, heap, 1, &value, error,
+                                      error_size) ||
+                    !push(stack, stack_capacity, &stack_count, value, error,
+                          error_size)) {
+                    if (error[0] == '\0')
+                        snprintf(error, error_size,
+                                 "JSON.load requires a text file path");
+                    ok = 0;
+                    goto done;
+                }
+                break;
             case ZOP_STORE_NAME: {
                 RuntimeField *field;
                 ZSharpVariable *variable;
@@ -1995,6 +2237,25 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     ok = 0;
                     goto done;
                 }
+                if (left.type == ZVALUE_OBJECT && left.object != NULL &&
+                    left.object->room == NULL && right.type == ZVALUE_TEXT) {
+                    RuntimeField *json_field =
+                        find_field(left.object, right.text);
+                    if (json_field == NULL) {
+                        snprintf(error, error_size,
+                                 "JSON value has no field named '%s'",
+                                 right.text);
+                        ok = 0;
+                        goto done;
+                    }
+                    value = runtime_field_value(json_field);
+                    if (!push(stack, stack_capacity, &stack_count, value,
+                              error, error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                    break;
+                }
                 if ((left.type != ZVALUE_TEXT_ARRAY &&
                      left.type != ZVALUE_NUMBER_ARRAY &&
                      left.type != ZVALUE_OBJECT_ARRAY) ||
@@ -2237,7 +2498,9 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 if (field == NULL) {
                     snprintf(error, error_size,
                              "room '%s' has no field named '%s'",
-                             value.object->room->name, instruction->operand);
+                             value.object->room == NULL ? "JSON" :
+                                 value.object->room->name,
+                             instruction->operand);
                     ok = 0;
                     goto done;
                 }
@@ -2246,7 +2509,9 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     snprintf(error, error_size,
                              "horde field '%s.%s' must be accessed through "
                              "its room",
-                             value.object->room->name, field->name);
+                             value.object->room == NULL ? "JSON" :
+                                 value.object->room->name,
+                             field->name);
                     ok = 0;
                     goto done;
                 }
@@ -2928,6 +3193,28 @@ static RuntimeObject *create_object(ZSharpProgram *program,
     RuntimeValue *arguments = NULL;
     RuntimeObject *object;
     size_t index;
+    if (variable->object_type != NULL &&
+        strncmp(variable->object_type, "$json:", 6) == 0) {
+        RuntimeValue loaded;
+        ZSharpRoom *schema_room = NULL;
+        size_t room_index;
+        for (room_index = 0; room_index < program->room_count; room_index++) {
+            if (find_json_schema(&program->rooms[room_index],
+                                 variable->object_type + 6) != NULL) {
+                schema_room = &program->rooms[room_index];
+                break;
+            }
+        }
+        if (variable->constructor_argument_count != 1 ||
+            variable->constructor_arguments[0].type != ZVALUE_TEXT ||
+            schema_room == NULL ||
+            !load_json_object(schema_room,
+                              variable->object_type + 6,
+                              variable->constructor_arguments[0].text_value,
+                              project_root, heap, 0, &loaded, error,
+                              error_size)) return NULL;
+        return loaded.object;
+    }
     if (variable->constructor_argument_count > 0) {
         arguments = (RuntimeValue *)calloc(
             variable->constructor_argument_count, sizeof(*arguments));

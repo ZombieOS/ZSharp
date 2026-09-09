@@ -1482,6 +1482,16 @@ noticed text[header] Header1[] (
 )
 ```
 
+On Windows, text may begin with a project-relative inline PNG marker:
+
+```zsharp
+content: "<img:Assets/icon.png> Icon":
+```
+
+The image is drawn before the remaining text. The path cannot be absolute or
+leave the project directory. Other desktop renderers will gain the same visual
+behavior after their native implementations are tested.
+
 ### Buttons
 
 ```zsharp
@@ -1900,7 +1910,50 @@ noticed room Main[] (
 )
 ```
 
-## 25. Keyword comparison summary
+## 25. Typed JSON
+
+Z# 1.0.2.4 can define a schema for flat JSON objects. Import the built-in JSON
+feature and declare the expected keys and their Z# types:
+
+```zsharp
+noticed room JSONCustom[] (
+ import ZSharp.JSON():
+
+ noticed JSON PersonSchema[] (
+  name: text:
+  age: number:
+  phone-number: text:
+  enabled: status:
+ )
+)
+```
+
+Load a project-relative JSON file into a local value:
+
+```zsharp
+JSON Person = JSON.load(PersonSchema, "Data/Person.json"):
+Print(Person.name):
+Print(Person.age):
+Print(Person["phone-number"]):
+Print(Person.enabled):
+```
+
+Hyphenated keys use bracket access because `-` is also the subtraction
+operator. A room-level loaded value may be `noticed`, bare/file-only, or
+`silent`:
+
+```zsharp
+noticed JSON CurrentUser = JSON.load(PersonSchema, "Data/Person.json"):
+JSON CachedUser = JSON.load(PersonSchema, "Data/Cached.json"):
+silent JSON PrivateUser = JSON.load(PersonSchema, "Data/Private.json"):
+```
+
+Loading fails with a runtime error if the file is missing, leaves the project,
+contains undeclared keys, omits required keys, or uses a value with the wrong
+type. Schemas currently support `text`, `number`, and `status`; JSON booleans
+become Z# `alive` and `dead` values.
+
+## 26. Keyword comparison summary
 
 | Purpose | Z# | C# | Java | C |
 |---|---|---|---|---|
@@ -1923,7 +1976,7 @@ noticed room Main[] (
 Z# deliberately does not copy the exact grammar of these languages. The table
 compares intent, not necessarily implementation or memory behavior.
 
-## 26. Versioning and generations
+## 27. Versioning and generations
 
 Z# versions have four parts:
 
@@ -1945,9 +1998,9 @@ fixes such as smoother window painting and silent Desktop launches; its package
 does not need to be rebuilt. The `ZSharp` version in `project.zsettings`
 describes the source version the project targets. New source fields and syntax
 must be added to the project's code before the application can use them, while
-runtime-only fixes apply automatically. A current Z1 runtime accepts older Z1
-projects but still rejects projects that require an unreleased future
-generation.
+runtime-only fixes apply automatically. Source may target a future Z# version
+so development can begin early, but an installed runtime refuses to open an app
+or game whose required version is newer than that runtime.
 
 For the current release plan:
 

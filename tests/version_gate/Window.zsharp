@@ -1,0 +1,13 @@
+zsharp = type.script:window
+
+noticed Window Main[] (
+ import ZSharp.Window.*():
+
+ noticed design Design[] (
+  title: "Version Gate":
+ )
+
+ noticed text Status[] (
+  content: "Old":
+ )
+)
