@@ -577,6 +577,7 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
     ZSharpSettings settings;
     int ok = zsharp_bytecode_read(bytecode_path, &program, error, sizeof(error));
     if (!ok) {
+        remember_failure(error);
         fprintf(stderr, "error: %s\n", error);
         return 1;
     }
@@ -584,6 +585,7 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
     project_root = zsharp_project_find_root(bytecode_path, error, sizeof(error));
     if (project_root == NULL) {
         zsharp_program_free(&program);
+        remember_failure(error);
         fprintf(stderr, "runtime error: %s\n", error);
         return 1;
     }
@@ -593,10 +595,13 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
         return 1;
     }
     if (strcmp(program.project_id, settings.project_id) != 0) {
+        snprintf(error, sizeof(error),
+                 "bytecode belongs to project PID '%s', but the current "
+                 "project PID is '%s'",
+                 program.project_id, settings.project_id);
+        remember_failure(error);
         fprintf(stderr,
-                "runtime error: bytecode belongs to project PID '%s', but "
-                "the current project PID is '%s'\n",
-                program.project_id, settings.project_id);
+                "runtime error: %s\n", error);
         zsharp_settings_free(&settings);
         free(project_root);
         zsharp_program_free(&program);
@@ -607,6 +612,7 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
         zsharp_settings_free(&settings);
         free(project_root);
         zsharp_program_free(&program);
+        remember_failure(error);
         fprintf(stderr, "compile error: %s\n", error);
         return 1;
     }
@@ -615,6 +621,7 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
                         &provider_count, error, sizeof(error))) {
         free(project_root);
         zsharp_program_free(&program);
+        remember_failure(error);
         fprintf(stderr, "runtime error: %s\n", error);
         return 1;
     }
@@ -625,6 +632,7 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
     free(project_root);
     zsharp_program_free(&program);
     if (!ok) {
+        remember_failure(error);
         fprintf(stderr, "runtime error: %s\n", error);
         return 1;
     }
@@ -899,6 +907,7 @@ static int open_package_command(const char *package_path, int argc,
     int new_install = 0;
     int result;
     time_t play_started;
+    command_failure[0] = '\0';
     if (!zsharp_package_read_info(package_path, &preview, error,
                                   sizeof(error))) {
         fprintf(stderr, "package error: %s\n", error);

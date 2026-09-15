@@ -297,9 +297,8 @@ if (Test-Path -LiteralPath $statusPath) {
     Remove-Item -LiteralPath $statusPath -Force
 }
 $zig = Find-Tool -Command "zig" -FallbackPattern "zig.exe"
-$testApp = Join-Path `
-    ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) `
-    "Downloads\Z# Test App\Packages\ZSharp-Test-App.zapp"
+$testApp = Join-Path $ProjectRoot `
+    "examples\language-test-app\Packages\ZSharpLanguageTest.zapp"
 $testGame = Join-Path $ProjectRoot `
     "examples\test-game\Packages\ZSharpGameTest.zgame"
 $installerArguments = @(

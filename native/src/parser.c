@@ -1078,7 +1078,14 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
                           "':' after the window property setter")) {
             goto failed;
         }
-        if (parser->current.type == ZTOKEN_LEFT_PAREN) {
+        if (parser->current.type == ZTOKEN_LEFT_PAREN ||
+            (part_count > 1 && parser->current.type == ZTOKEN_IDENTIFIER &&
+             (strcmp(parts[part_count - 1], "content") == 0 ||
+              strcmp(parts[part_count - 1], "title") == 0 ||
+              strcmp(parts[part_count - 1], "icon") == 0 ||
+              strcmp(parts[part_count - 1], "text") == 0 ||
+              strcmp(parts[part_count - 1], "file") == 0 ||
+              strcmp(parts[part_count - 1], "display") == 0))) {
             if (part_count == 1) {
                 fail_at(parser, &first_token,
                         "calculated window setters require an explicit element property path");

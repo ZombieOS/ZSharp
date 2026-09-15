@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0.1 - Window text setter fix - 2026-09-15
+
+- Window text properties now accept text variables directly, such as
+  `Startup.ChatOutput.content.set: Response:`.
+- Bytecoded apps now keep the underlying Z# launch error in Hub messages and
+  runtime failure logs instead of reporting only a generic launch failure.
+
 ## 1.1.0.0 - Python interoperability - 2026-09-14
 
 - Added Python source files to Z# projects with project-scoped `py:` imports.

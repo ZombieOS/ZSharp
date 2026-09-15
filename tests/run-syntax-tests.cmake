@@ -324,14 +324,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.0.1]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.0.2]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.1.0.1!"
+               "Update to at least 1.1.0.2!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})
@@ -569,8 +569,8 @@ execute_process(
 )
 string(CONCAT failure_combined "${failure_output}" "${failure_error}")
 if(failure_result EQUAL 0 OR
-   NOT failure_combined MATCHES "Packaged Window Test failed to launch!" OR
-   NOT failure_combined MATCHES "forced window launch failure")
+   NOT failure_output MATCHES "Packaged Window Test failed to launch!" OR
+   NOT failure_output MATCHES "forced window launch failure")
     message(FATAL_ERROR
         "failed app Hub routing did not preserve its reason (${failure_result})\n"
         "${failure_combined}")

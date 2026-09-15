@@ -1720,6 +1720,13 @@ Startup.CursorPosition.content.set:
  ("L" + CurrentLine + ":C" + CurrentColumn):
 ```
 
+From 1.1.0.1, text properties also accept a text variable directly:
+
+```zsharp
+text Response = "Hello":
+Startup.ChatOutput.content.set: Response:
+```
+
 A text variable can serve as a reusable property-path alias. Its value is
 resolved when the setter runs, so changing the text can retarget later writes:
 
