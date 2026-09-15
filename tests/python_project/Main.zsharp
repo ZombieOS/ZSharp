@@ -1,0 +1,18 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import py:python_runtime_test.Python.Utilities():
+
+ noticed brain Start[] (
+  Print("Before Python"):
+  text Greeting = Function.call(py:Python.Utilities:greet ["Tester"]):
+  number Sum = Function.call(py:Python.Utilities:add [20, 22]):
+  Print(Greeting):
+  Print(Sum):
+  if[Function.call(py:Python.Utilities:is_ready [])] (
+   Print("Python status alive"):
+  ) else (
+   Print("Python status dead"):
+  )
+ )
+)

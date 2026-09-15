@@ -51,6 +51,9 @@ typedef struct ReleaseInfo {
     char *support_path;
     char *support_sha256;
     uint64_t support_size;
+    char *python_path;
+    char *python_sha256;
+    uint64_t python_size;
 } ReleaseInfo;
 
 static void report_error(char *error, size_t error_size,
@@ -739,6 +742,8 @@ static int parse_release(const char *manifest, const char *platform,
     release->runtime_sha256 = json_string(begin, end, "sha256");
     release->support_path = json_string(begin, end, "supportPath");
     release->support_sha256 = json_string(begin, end, "supportSha256");
+    release->python_path = json_string(begin, end, "pythonPath");
+    release->python_sha256 = json_string(begin, end, "pythonSha256");
     if (release->archive_url == NULL || release->archive_sha256 == NULL ||
         release->runtime_path == NULL || release->runtime_sha256 == NULL ||
         !json_u64(download_begin, download_end, "size",
@@ -769,6 +774,18 @@ static int parse_release(const char *manifest, const char *platform,
             return 0;
         }
     }
+    if (release->python_path != NULL || release->python_sha256 != NULL) {
+        if (release->python_path == NULL || release->python_sha256 == NULL ||
+            !json_u64(begin, end, "pythonSize", &release->python_size) ||
+            !valid_sha256(release->python_sha256) ||
+            !safe_zip_member(release->python_path, platform) ||
+            release->python_size == 0 ||
+            release->python_size > INSTALLER_RUNTIME_LIMIT) {
+            report_error(error, error_size,
+                         "the update site returned invalid Python runtime metadata");
+            return 0;
+        }
+    }
     return 1;
 }
 
@@ -780,6 +797,8 @@ static void release_free(ReleaseInfo *release) {
     free(release->runtime_sha256);
     free(release->support_path);
     free(release->support_sha256);
+    free(release->python_path);
+    free(release->python_sha256);
     memset(release, 0, sizeof(*release));
 }
 
@@ -1232,9 +1251,12 @@ int main(int argc, char **argv) {
     char *runtime_backup = NULL;
     char *support = NULL;
     char *support_backup = NULL;
+    char *python_archive = NULL;
+    char *python_archive_backup = NULL;
     char *archive = NULL;
     char *runtime_temporary = NULL;
     char *support_temporary = NULL;
+    char *python_temporary = NULL;
     char *installed_installer = NULL;
     char *installer_backup = NULL;
     char *installer_temporary = NULL;
@@ -1392,6 +1414,21 @@ int main(int argc, char **argv) {
                      install_directory);
         goto done;
     }
+    if (release.python_path != NULL) {
+        python_archive = join_path(install_directory, "python-runtime.tar.gz");
+        python_archive_backup = join_path(install_directory,
+                                          "python-runtime.previous.tar.gz");
+    }
+    if (release.python_path != NULL) {
+        char name[96];
+#ifdef _WIN32
+        unsigned long pid = (unsigned long)GetCurrentProcessId();
+#else
+        unsigned long pid = (unsigned long)getpid();
+#endif
+        snprintf(name, sizeof(name), ".zsharp-python-%lu.tmp", pid);
+        python_temporary = join_path(install_directory, name);
+    }
 #ifdef _WIN32
     runtime = join_path(install_directory, "zsharp.exe");
     runtime_backup = join_path(install_directory, "zsharp.previous.exe");
@@ -1443,7 +1480,10 @@ int main(int argc, char **argv) {
         installer_backup == NULL || installer_temporary == NULL ||
         (release.support_path != NULL &&
          (support == NULL || support_backup == NULL ||
-          support_temporary == NULL))) {
+          support_temporary == NULL)) ||
+        (release.python_path != NULL &&
+         (python_archive == NULL || python_archive_backup == NULL ||
+          python_temporary == NULL))) {
         strcpy(error, "out of memory");
         goto done;
     }
@@ -1495,6 +1535,21 @@ int main(int argc, char **argv) {
             goto done;
         }
     }
+    if (release.python_path != NULL &&
+        (!extract_stored_zip_member(archive, release.python_path,
+                                   python_temporary, release.python_size,
+                                   error, sizeof(error)) ||
+        !zsharp_sha256_file(python_temporary, digest))) {
+        if (error[0] == '\0')
+            strcpy(error, "the Python runtime checksum could not be read");
+        goto done;
+    }
+    if (release.python_path != NULL) zsharp_hash_hex(digest, digest_hex);
+    if (release.python_path != NULL &&
+        strcmp(digest_hex, release.python_sha256) != 0) {
+        strcpy(error, "the Python runtime failed SHA-256 verification");
+        goto done;
+    }
 #ifndef _WIN32
     if (chmod(runtime_temporary, 0755) != 0) {
         strcpy(error, "could not make the downloaded ZVM executable");
@@ -1522,6 +1577,10 @@ int main(int argc, char **argv) {
         !replace_file(support_temporary, support, support_backup,
                       "Z# runtime support", error, sizeof(error)))
         goto done;
+    if (python_temporary != NULL &&
+        !replace_file(python_temporary, python_archive,
+                      python_archive_backup, "Z# Python runtime", error,
+                      sizeof(error))) goto done;
     if (!replace_file(runtime_temporary, runtime, runtime_backup,
                       "Z# runtime", error, sizeof(error)))
         goto done;
@@ -1583,6 +1642,7 @@ done:
     if (archive != NULL) remove(archive);
     if (runtime_temporary != NULL) remove(runtime_temporary);
     if (support_temporary != NULL) remove(support_temporary);
+    if (python_temporary != NULL) remove(python_temporary);
     if (installer_temporary != NULL) remove(installer_temporary);
     if (manifest_temp[0] != '\0') remove(manifest_temp);
 #ifdef _WIN32
@@ -1600,6 +1660,9 @@ done:
     free(support_temporary);
     free(support_backup);
     free(support);
+    free(python_temporary);
+    free(python_archive_backup);
+    free(python_archive);
     free(archive);
     free(runtime_backup);
     free(runtime);

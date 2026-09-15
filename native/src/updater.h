@@ -24,4 +24,9 @@ int zsharp_update_agent_register(char *error, size_t error_size);
 int zsharp_update_agent_start(void);
 int zsharp_update_agent_run(void);
 
+/* Downloads a HTTPS-hosted runtime component to an exact local path. */
+int zsharp_update_download_component(const char *url, const char *destination,
+                                     size_t maximum, char *error,
+                                     size_t error_size);
+
 #endif

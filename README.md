@@ -5,7 +5,7 @@ Official website and downloads: <https://www.zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
-Version 1.0.2.5 uses separate `.zscene`, `.zobject`, and `.zaudio` files for
+Version 1.1.0.0 uses separate `.zscene`, `.zobject`, and `.zaudio` files for
 game scenes, objects, and scene-owned WAV sources. It adds executable `.zgame` packages, the
 `zsharpgame:1.0.0.1` dependency, Vulkan drawing, named-key input, cameras, frame timing,
 2D/3D transforms, physics, collisions, and audio. Windows and Linux are the
@@ -24,6 +24,14 @@ ZVM bootstrap downloads and the official update-site format are documented in
 The toolchain compiles Z# source to portable Z# bytecode and runs that
 bytecode in a fast C virtual machine. Native compilation can be added later for
 programs that need the last bit of performance.
+
+Z# 1.1.0.0 adds Python interoperability. Python modules live inside the Z#
+project and functions must opt in with `@export` before Z# can call them. The
+official installers include a compact Python runtime that is unpacked only
+when it is first needed, so end users do not need a separate Python install.
+Python is not kept running while an app is idle. If an older updater installs
+1.1.0.0 without the new component, the runtime downloads and SHA-256 verifies
+it automatically the first time a Python function is called.
 
 ## Current status
 

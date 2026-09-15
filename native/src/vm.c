@@ -1,8 +1,11 @@
 #include "vm.h"
 
+#include "zsharp.h"
 #include "decimal.h"
 #include "game_runtime.h"
+#include "hash.h"
 #include "project.h"
+#include "updater.h"
 #include "window.h"
 #include "window_style.h"
 #include "terminal.h"
@@ -17,10 +20,15 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <process.h>
 #else
 #include <errno.h>
 #include <pthread.h>
 #include <time.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 #define ZSHARP_MAX_CALL_DEPTH 256
@@ -71,6 +79,8 @@ typedef struct RuntimeModuleCache {
     const ZSharpWindowRuntime *window_runtime;
 } RuntimeModuleCache;
 
+static char *heap_add_text(RuntimeHeap *heap, char *text);
+
 static int runtime_wait(const char *milliseconds, char *error,
                         size_t error_size) {
     char *end = NULL;
@@ -104,6 +114,399 @@ static int runtime_wait(const char *milliseconds, char *error,
         }
     }
 #endif
+    return 1;
+}
+
+static int runtime_file_exists(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return 0;
+    fclose(file);
+    return 1;
+}
+
+static void hex_write(FILE *file, const char *text) {
+    static const char digits[] = "0123456789abcdef";
+    const unsigned char *cursor = (const unsigned char *)text;
+    while (*cursor != 0) {
+        fputc(digits[*cursor >> 4], file);
+        fputc(digits[*cursor & 15], file);
+        cursor++;
+    }
+}
+
+static int hex_value(int value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+static char *hex_decode(const char *text) {
+    size_t length = strlen(text), index;
+    char *decoded;
+    if ((length & 1u) != 0) return NULL;
+    decoded = (char *)malloc(length / 2 + 1);
+    if (decoded == NULL) return NULL;
+    for (index = 0; index < length; index += 2) {
+        int high = hex_value((unsigned char)text[index]);
+        int low = hex_value((unsigned char)text[index + 1]);
+        if (high < 0 || low < 0) {
+            free(decoded);
+            return NULL;
+        }
+        decoded[index / 2] = (char)((high << 4) | low);
+    }
+    decoded[length / 2] = '\0';
+    return decoded;
+}
+
+static const char *python_platform_id(void) {
+#if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
+    return "windows-aarch64";
+#elif defined(_WIN32)
+    return "windows-x86_64";
+#elif defined(__APPLE__) && defined(__aarch64__)
+    return "macos-aarch64";
+#elif defined(__APPLE__)
+    return "macos-x86_64";
+#elif defined(__aarch64__)
+    return "linux-aarch64";
+#else
+    return "linux-x86_64";
+#endif
+}
+
+static int valid_sha256_text(const char *text) {
+    size_t index;
+    for (index = 0; index < 64; index++)
+        if (!((text[index] >= '0' && text[index] <= '9') ||
+              (text[index] >= 'a' && text[index] <= 'f') ||
+              (text[index] >= 'A' && text[index] <= 'F'))) return 0;
+    return text[64] == '\0' || text[64] == '\r' || text[64] == '\n' ||
+           text[64] == ' ' || text[64] == '\t';
+}
+
+static int bootstrap_python_archive(const char *directory,
+                                    const char *archive, char *error,
+                                    size_t error_size) {
+    char base_url[1024], archive_url[1200], checksum_url[1200];
+    char temporary[2300], checksum_path[2300], expected[128] = {0};
+    unsigned char digest[ZSHARP_SHA256_SIZE];
+    char actual[ZSHARP_SHA256_SIZE * 2 + 1];
+    FILE *file;
+    snprintf(base_url, sizeof(base_url),
+             "https://www.zsharp.zombieos.com/assets/download/installers/"
+             "%d.%d.%d.%d/%s", ZSHARP_VERSION_MAJOR,
+             ZSHARP_VERSION_MINOR, ZSHARP_VERSION_PATCH,
+             ZSHARP_VERSION_REVISION, python_platform_id());
+    snprintf(archive_url, sizeof(archive_url),
+             "%s/python-runtime.tar.gz", base_url);
+    snprintf(checksum_url, sizeof(checksum_url),
+             "%s/python-runtime.tar.gz.sha256", base_url);
+    snprintf(temporary, sizeof(temporary), "%s%c.python-runtime.tmp",
+             directory,
+#ifdef _WIN32
+             '\\');
+#else
+             '/');
+#endif
+    snprintf(checksum_path, sizeof(checksum_path), "%s.sha256", temporary);
+    if (!zsharp_update_download_component(checksum_url, checksum_path, 4096,
+                                           error, error_size) ||
+        !zsharp_update_download_component(archive_url, temporary,
+                                           256u * 1024u * 1024u,
+                                           error, error_size)) {
+        remove(checksum_path); remove(temporary); return 0;
+    }
+    file = fopen(checksum_path, "rb");
+    if (file == NULL || fgets(expected, sizeof(expected), file) == NULL) {
+        if (file != NULL) fclose(file);
+        remove(checksum_path); remove(temporary);
+        snprintf(error, error_size, "could not read the Python runtime checksum");
+        return 0;
+    }
+    fclose(file);
+    remove(checksum_path);
+    expected[strcspn(expected, " \t\r\n")] = '\0';
+    {
+        size_t index;
+        for (index = 0; expected[index] != '\0'; index++)
+            if (expected[index] >= 'A' && expected[index] <= 'F')
+                expected[index] = (char)(expected[index] - 'A' + 'a');
+    }
+    if (!valid_sha256_text(expected) ||
+        !zsharp_sha256_file(temporary, digest)) {
+        remove(temporary);
+        snprintf(error, error_size, "the Python runtime checksum is invalid");
+        return 0;
+    }
+    zsharp_hash_hex(digest, actual);
+    if (strcmp(expected, actual) != 0) {
+        remove(temporary);
+        snprintf(error, error_size,
+                 "the downloaded Python runtime failed SHA-256 verification");
+        return 0;
+    }
+#ifdef _WIN32
+    if (!MoveFileExA(temporary, archive,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+#else
+    if (rename(temporary, archive) != 0) {
+#endif
+        remove(temporary);
+        snprintf(error, error_size, "could not install the Python runtime archive");
+        return 0;
+    }
+    return 1;
+}
+
+static int python_runtime_paths(char *python, size_t python_size,
+                                char *bridge, size_t bridge_size,
+                                char *error, size_t error_size) {
+    const char *override_python = getenv("ZSHARP_PYTHON_RUNTIME");
+    const char *override_bridge = getenv("ZSHARP_PYTHON_BRIDGE");
+    char executable[2048] = {0};
+    char *separator;
+    if (override_python != NULL && override_python[0] != '\0')
+        snprintf(python, python_size, "%s", override_python);
+    if (override_bridge != NULL && override_bridge[0] != '\0')
+        snprintf(bridge, bridge_size, "%s", override_bridge);
+#ifdef _WIN32
+    if (GetModuleFileNameA(NULL, executable, (DWORD)sizeof(executable)) == 0)
+        executable[0] = '\0';
+    separator = strrchr(executable, '\\');
+#elif defined(__APPLE__)
+    {
+        uint32_t length = (uint32_t)sizeof(executable);
+        if (_NSGetExecutablePath(executable, &length) != 0)
+            executable[0] = '\0';
+    }
+    separator = strrchr(executable, '/');
+#else
+    {
+        ssize_t length = readlink("/proc/self/exe", executable,
+                                  sizeof(executable) - 1);
+        if (length > 0) executable[length] = '\0';
+        else executable[0] = '\0';
+    }
+    separator = strrchr(executable, '/');
+#endif
+    if (separator != NULL) *separator = '\0';
+    if (python[0] == '\0' && executable[0] != '\0') {
+#ifdef _WIN32
+        snprintf(python, python_size, "%s\\python\\python.exe", executable);
+#else
+        snprintf(python, python_size, "%s/python/bin/python3", executable);
+#endif
+        if (!runtime_file_exists(python)) {
+            char archive[2300];
+            char development_bridge[2300];
+            char command[7000];
+#ifdef _WIN32
+            snprintf(archive, sizeof(archive),
+                     "%s\\python-runtime.tar.gz", executable);
+            snprintf(development_bridge, sizeof(development_bridge),
+                     "%s\\python\\zsharp_bridge.py", executable);
+            snprintf(command, sizeof(command),
+                     "\"\"tar\" -xzf \"%s\" -C \"%s\"\"",
+                     archive, executable);
+#else
+            snprintf(archive, sizeof(archive),
+                     "%s/python-runtime.tar.gz", executable);
+            snprintf(development_bridge, sizeof(development_bridge),
+                     "%s/python/zsharp_bridge.py", executable);
+            snprintf(command, sizeof(command),
+                     "tar -xzf \"%s\" -C \"%s\"", archive, executable);
+#endif
+            if (!runtime_file_exists(archive) &&
+                !runtime_file_exists(development_bridge) &&
+                !bootstrap_python_archive(executable, archive, error,
+                                          error_size)) return 0;
+            if (!runtime_file_exists(development_bridge) &&
+                runtime_file_exists(archive) && system(command) != 0) {
+                snprintf(error, error_size,
+                         "could not unpack the bundled Python runtime");
+                return 0;
+            }
+            if (!runtime_file_exists(python)) python[0] = '\0';
+        }
+    }
+    if (bridge[0] == '\0' && executable[0] != '\0') {
+#ifdef _WIN32
+        snprintf(bridge, bridge_size, "%s\\python\\zsharp_bridge.py",
+                 executable);
+#else
+        snprintf(bridge, bridge_size, "%s/python/zsharp_bridge.py", executable);
+#endif
+    }
+    if (python[0] == '\0') {
+#ifdef _WIN32
+        snprintf(python, python_size, "python");
+#else
+        snprintf(python, python_size, "python3");
+#endif
+    }
+    return bridge[0] != '\0' && runtime_file_exists(bridge);
+}
+
+static int execute_python_call(const ZSharpProgram *program,
+                               const ZSharpInstruction *instruction,
+                               const RuntimeValue *arguments,
+                               const char *project_root, RuntimeHeap *heap,
+                               RuntimeValue *result, char *error,
+                               size_t error_size) {
+    char python[2048] = {0}, bridge[2048] = {0};
+    char module[2048], input_path[2300], output_path[2300], command[9000];
+    char relative[1024];
+    const char *module_name = instruction->call_file;
+    size_t project_length = program->project_id == NULL ? 0
+        : strlen(program->project_id);
+    size_t index;
+    FILE *file;
+    char *response;
+    char *first_tab, *second_tab, *decoded;
+    int process_result;
+    if (!python_runtime_paths(python, sizeof(python), bridge, sizeof(bridge),
+                              error, error_size)) {
+        if (error[0] == '\0') snprintf(error, error_size,
+                 "the bundled Python bridge is missing; reinstall Z#");
+        return 0;
+    }
+    if (project_length > 0 &&
+        strncmp(module_name, program->project_id, project_length) == 0 &&
+        module_name[project_length] == '.')
+        module_name += project_length + 1;
+    snprintf(relative, sizeof(relative), "%s", module_name);
+    for (index = 0; relative[index] != '\0'; index++)
+        if (relative[index] == '.') relative[index] =
+#ifdef _WIN32
+            '\\';
+#else
+            '/';
+#endif
+    snprintf(module, sizeof(module), "%s%c%s.py", project_root,
+#ifdef _WIN32
+             '\\',
+#else
+             '/',
+#endif
+             relative);
+    snprintf(input_path, sizeof(input_path), "%s%c.zsharp-python-%lu-%lu.in",
+             project_root,
+#ifdef _WIN32
+             '\\', (unsigned long)_getpid(), (unsigned long)clock());
+#else
+             '/', (unsigned long)getpid(), (unsigned long)clock());
+#endif
+    snprintf(output_path, sizeof(output_path), "%s.out",
+             input_path);
+    file = fopen(input_path, "wb");
+    if (file == NULL) {
+        snprintf(error, error_size, "could not create the Python call input");
+        return 0;
+    }
+    for (index = 0; index < instruction->argument_count; index++) {
+        const RuntimeValue *value = &arguments[index];
+        if (value->type == ZVALUE_TEXT) {
+            fputs("text\t", file);
+            hex_write(file, value->text == NULL ? "" : value->text);
+        } else if (value->type == ZVALUE_NUMBER) {
+            fprintf(file, "number\t%s", value->number_text);
+        } else if (value->type == ZVALUE_STATUS) {
+            fprintf(file, "status\t%d", value->number != 0);
+        } else if (value->type == ZVALUE_NULL) {
+            fputs("null\t", file);
+        } else {
+            fclose(file);
+            remove(input_path);
+            snprintf(error, error_size,
+                     "Python arguments currently support text, number, status, and null");
+            return 0;
+        }
+        fputc('\n', file);
+    }
+    fclose(file);
+#ifdef _WIN32
+    snprintf(command, sizeof(command), "\"\"%s\" \"%s\" \"%s\" \"%s\" \"%s\" \"%s\"\"",
+#else
+    snprintf(command, sizeof(command), "\"%s\" \"%s\" \"%s\" \"%s\" \"%s\" \"%s\"",
+#endif
+             python, bridge, module, instruction->call_function,
+             input_path, output_path);
+    process_result = system(command);
+    file = fopen(output_path, "rb");
+    remove(input_path);
+    if (file == NULL) {
+        snprintf(error, error_size,
+                 "Python runtime exited without a result (code %d)", process_result);
+        return 0;
+    }
+    response = (char *)malloc(1024u * 1024u);
+    if (response == NULL) {
+        fclose(file);
+        remove(output_path);
+        snprintf(error, error_size, "out of memory reading the Python result");
+        return 0;
+    }
+    index = fread(response, 1, 1024u * 1024u - 1u, file);
+    fclose(file);
+    remove(output_path);
+    response[index] = '\0';
+    response[strcspn(response, "\r\n")] = '\0';
+    first_tab = strchr(response, '\t');
+    if (first_tab == NULL) {
+        snprintf(error, error_size, "invalid response from the Python runtime");
+        free(response);
+        return 0;
+    }
+    *first_tab++ = '\0';
+    if (strcmp(response, "ERROR") == 0) {
+        decoded = hex_decode(first_tab);
+        snprintf(error, error_size, "Python call %s:%s failed:\n%s",
+                 instruction->call_file, instruction->call_function,
+                 decoded == NULL ? "invalid Python traceback" : decoded);
+        free(decoded);
+        free(response);
+        return 0;
+    }
+    second_tab = strchr(first_tab, '\t');
+    if (strcmp(response, "OK") != 0 || second_tab == NULL) {
+        snprintf(error, error_size, "invalid response from the Python runtime");
+        free(response);
+        return 0;
+    }
+    *second_tab++ = '\0';
+    memset(result, 0, sizeof(*result));
+    if (strcmp(first_tab, "text") == 0) {
+        decoded = hex_decode(second_tab);
+        if (decoded == NULL || heap_add_text(heap, decoded) == NULL) {
+            snprintf(error, error_size, "out of memory");
+            free(response);
+            return 0;
+        }
+        result->type = ZVALUE_TEXT;
+        result->text = decoded;
+    } else if (strcmp(first_tab, "number") == 0) {
+        decoded = zsharp_copy_text(second_tab, strlen(second_tab));
+        if (decoded == NULL || heap_add_text(heap, decoded) == NULL) {
+            snprintf(error, error_size, "out of memory");
+            free(response);
+            return 0;
+        }
+        result->type = ZVALUE_NUMBER;
+        result->number_text = decoded;
+        result->number = (int32_t)strtol(decoded, NULL, 10);
+    } else if (strcmp(first_tab, "status") == 0) {
+        result->type = ZVALUE_STATUS;
+        result->number = strcmp(second_tab, "1") == 0;
+    } else if (strcmp(first_tab, "null") == 0) {
+        result->type = ZVALUE_NULL;
+    } else {
+        snprintf(error, error_size, "unsupported Python result type '%s'", first_tab);
+        free(response);
+        return 0;
+    }
+    free(response);
     return 1;
 }
 
@@ -2851,6 +3254,25 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                         ok = 0;
                         goto done;
                     }
+                }
+                if (instruction->operand != NULL &&
+                    strcmp(instruction->operand, "@py") == 0) {
+                    if (!execute_python_call(program, instruction,
+                                             call_arguments, project_root,
+                                             heap, &call_return, error,
+                                             error_size)) {
+                        free(call_arguments);
+                        ok = 0;
+                        goto done;
+                    }
+                    free(call_arguments);
+                    if (instruction->op == ZOP_CALL_QUALIFIED_VALUE &&
+                        !push(stack, stack_capacity, &stack_count, call_return,
+                              error, error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                    break;
                 }
                 if (instruction->operand != NULL &&
                     instruction->operand[0] != '\0') {

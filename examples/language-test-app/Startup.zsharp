@@ -1,0 +1,55 @@
+zsharp = type.script:window
+
+noticed Window Startup[] (
+ import ZSharp.Window.*():
+ import zsharp_language_test.PythonTest():
+
+ noticed design Design[] (
+  title: "Z# Language Test":
+  width: 720px:
+  height: 420px:
+  scalable: alive:
+  background: #08080B:
+ )
+
+ noticed text[header] Heading[] (
+  content: "Z# Language Test - Python":
+  color: #FFFFFF:
+  width: 600px:
+  height: 50px:
+  locationX: 0px:
+  locationY: 125px:
+ )
+
+ noticed textInput Name[] (
+  display: "Enter a name":
+  type: text:
+  width: 360px:
+  height: 42px:
+  locationX: 0px:
+  locationY: 50px:
+ )
+
+ noticed button RunPython[] (
+  text: "Run Python":
+  textColor: #FFFFFF:
+  buttonColor: #6F42E8:
+  width: 180px:
+  height: 42px:
+  locationX: 0px:
+  locationY: -15px:
+  Click[
+   left: [PythonTest:PythonTest:Run]:
+   right: []:
+  ]:
+ )
+
+ noticed text[subheader] Result[] (
+  content: "Python has not run yet.":
+  color: #FFFFFF:
+  width: 600px:
+  height: 70px:
+  locationX: 0px:
+  locationY: -100px:
+ )
+)

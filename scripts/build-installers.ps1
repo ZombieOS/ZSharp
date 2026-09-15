@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.0.2.5",
+    [string] $Version = "1.1.0.0",
 
     [string] $BaseUrl = "https://www.zsharp.zombieos.com",
 
@@ -171,6 +171,26 @@ foreach ($target in $targets) {
         sha256 = $runtimeChecksum
         size = (Get-Item -LiteralPath $runtimeSource).Length
     }
+    $pythonSource = Join-Path (Join-Path $resourceRoot $target.Id) `
+        "python-runtime.tar.gz"
+    $pythonChecksumFile = $pythonSource + ".sha256"
+    if (-not (Test-Path -LiteralPath $pythonSource -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $pythonChecksumFile -PathType Leaf)) {
+        throw "The embedded $($target.Id) Python runtime is missing"
+    }
+    $pythonChecksum = (Get-Content -LiteralPath $pythonChecksumFile -Raw).Trim()
+    $actualPythonChecksum =
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $pythonSource).Hash.ToLowerInvariant()
+    if ($pythonChecksum -ne $actualPythonChecksum) {
+        throw "The embedded $($target.Id) Python runtime checksum does not match"
+    }
+    Copy-Item -LiteralPath $pythonSource -Destination $archiveRuntimeDirectory
+    Copy-Item -LiteralPath $pythonSource, $pythonChecksumFile `
+        -Destination $siteInstallerDirectory -Force
+    $platformMetadata.pythonPath =
+        "runtimes/$($target.Id)/python-runtime.tar.gz"
+    $platformMetadata.pythonSha256 = $pythonChecksum
+    $platformMetadata.pythonSize = (Get-Item -LiteralPath $pythonSource).Length
     if ($target.ContainsKey("Support")) {
         $supportSource = Join-Path (Join-Path $resourceRoot $target.Id) `
             $target.Support

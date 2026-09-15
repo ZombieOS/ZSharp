@@ -1193,6 +1193,45 @@ visibility rules.
 
 Using another file or project without importing it is a compile error.
 
+### Python imports (1.1.0.0)
+
+Python imports always name the language and project ID. Import one module or
+all Python modules in a project with:
+
+```zsharp
+import py:my_project.Python.Utilities():
+import py:my_project.*():
+```
+
+Inside the same project, a call omits the project ID because the import has
+already identified it:
+
+```zsharp
+text Greeting = Function.call(py:Python.Utilities:greet ["Z#"]):
+number Total = Function.call(py:Python.Utilities:add [20, 22]):
+```
+
+The corresponding `Python/Utilities.py` file explicitly exports callable
+functions:
+
+```python
+from zsharp import export
+
+@export
+def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+@export
+def add(left: int, right: int) -> int:
+    return left + right
+```
+
+Initial Python interoperability supports Z# text, number, status, and null
+values, mapped to Python `str`, `int`/`float`, `bool`, and `None`. A Python
+exception fails the Z# call and includes its Python traceback in the runtime
+error. The official ZVM bundles Python; developers may set
+`ZSHARP_PYTHON_RUNTIME` while testing a custom interpreter.
+
 ## 16. Qualified names
 
 Value paths grow according to location:

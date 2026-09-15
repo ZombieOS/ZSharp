@@ -1,0 +1,11 @@
+zsharp = type.settings
+
+Project: "Python Runtime Test":
+PID: "python_runtime_test":
+Version: [1.1.0.0]:
+Authors: ["Z# Tests"]:
+Description: "Automated Python interoperability coverage.":
+ZSharp: [1.1.0.0]:
+
+Dependencies (
+):

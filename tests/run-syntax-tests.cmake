@@ -71,6 +71,22 @@ function(expect_failure label expected working_dir)
     endif()
 endfunction()
 
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run Main.zsharp
+    WORKING_DIRECTORY "${PROJECT_ROOT}/tests/python_project"
+    RESULT_VARIABLE python_result
+    OUTPUT_VARIABLE python_output
+    ERROR_VARIABLE python_error
+)
+if(NOT python_result EQUAL 0 OR
+   NOT python_output MATCHES "Hello, Tester!" OR
+   NOT python_output MATCHES "42" OR
+   NOT python_output MATCHES "Python status alive")
+    message(FATAL_ERROR
+        "Python interoperability test failed (${python_result})\n"
+        "stdout: ${python_output}\nstderr: ${python_error}")
+endif()
+
 expect_success("window settings" "${WINDOW_DIR}"
                check project.zsettings)
 expect_failure("missing project icon" "project Icon"
@@ -308,14 +324,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.0.2.6]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.0.1]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.0.2.6!"
+               "Update to at least 1.1.0.1!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

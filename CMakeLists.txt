@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.0.2.5 LANGUAGES C)
+project(zsharp VERSION 1.1.0.0 LANGUAGES C)
 
 option(ZSHARP_BUILD_EXAMPLES "Build Z# integration examples" OFF)
 option(ZSHARP_BUILD_GAME_RUNTIME
@@ -40,6 +40,13 @@ add_executable(zsharp
     native/src/window_linux.c
     native/src/window_macos.c
 )
+
+add_custom_command(TARGET zsharp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:zsharp>/python"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/native/python/zsharp_bridge.py"
+            "$<TARGET_FILE_DIR:zsharp>/python/zsharp_bridge.py"
+    VERBATIM)
 
 add_executable(zsharp_installer
     installer/main.c
@@ -127,6 +134,7 @@ else()
 endif()
 
 install(TARGETS zsharp zsharp_installer RUNTIME DESTINATION bin)
+install(FILES native/python/zsharp_bridge.py DESTINATION bin/python)
 install(FILES
     native/include/zsharp.h
     native/include/zsharp_provider.h

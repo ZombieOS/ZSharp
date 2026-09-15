@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0.0 - Python interoperability - 2026-09-14
+
+- Added Python source files to Z# projects with project-scoped `py:` imports.
+- Added calls from Z# into explicitly exported Python functions, including
+  text, number, status, and null values.
+- Added a lazily loaded bundled Python runtime, so users do not need to install
+  Python separately and idle Z# apps do not carry Python's memory cost.
+- Existing installations updated by a pre-1.1 updater automatically download
+  and verify the missing Python component the first time Python is used.
+- Added Python exceptions and tracebacks to Z# runtime errors.
+- Added a shared language-interoperability test app, beginning with Python.
+
 ## 1.0.2.5 - Text input and ZSS patch - 2026-09-09
 
 - Added direct `fontSize`, `maxLength`, `textAlign`, and `textTransform`

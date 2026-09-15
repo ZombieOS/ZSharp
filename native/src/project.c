@@ -1125,6 +1125,89 @@ static int validate_file_function(const ZSharpProgram *program,
 static int function_has_prior_local(const ZSharpFunction *function,
                                     size_t instruction_index,
                                     const char *name);
+static int project_version_before(const ZSharpSettings *settings,
+                                  unsigned major, unsigned minor,
+                                  unsigned patch, unsigned revision);
+
+static int validate_python_call(const ZSharpProgram *program,
+                                const ZSharpSettings *settings,
+                                const ZSharpRoom *room,
+                                const ZSharpInstruction *instruction,
+                                const char *project_root, char *error,
+                                size_t error_size) {
+    char qualified[1024];
+    char relative[1024];
+    char absolute[2048];
+    const char *module = instruction->call_file;
+    const char *local_module = module;
+    size_t project_length = strlen(settings->project_id);
+    size_t index;
+    int imported = 0;
+    FILE *file;
+    if (project_version_before(settings, 1, 1, 0, 0)) {
+        snprintf(error, error_size,
+                 "Python imports require ZSharp: [1.1.0.0]: or newer");
+        return 0;
+    }
+    if (strncmp(module, settings->project_id, project_length) == 0 &&
+        module[project_length] == '.') {
+        local_module = module + project_length + 1;
+        snprintf(qualified, sizeof(qualified), "py:%s", module);
+    } else {
+        snprintf(qualified, sizeof(qualified), "py:%s.%s",
+                 settings->project_id, module);
+    }
+    for (index = 0; index < room->import_count; index++) {
+        const char *candidate = room->imports[index].path;
+        size_t length = strlen(candidate);
+        if (strcmp(candidate, qualified) == 0 ||
+            (length >= 2 && candidate[length - 2] == '.' &&
+             candidate[length - 1] == '*' &&
+             strncmp(candidate, qualified, length - 1) == 0)) {
+            imported = 1;
+            break;
+        }
+    }
+    if (!imported) {
+        snprintf(error, error_size,
+                 "Python call '%s:%s' requires import py:%s.%s()",
+                 module, instruction->call_function, settings->project_id,
+                 module);
+        return 0;
+    }
+    if (strchr(local_module, '/') != NULL || strchr(local_module, '\\') != NULL ||
+        strstr(local_module, "..") != NULL) {
+        snprintf(error, error_size, "invalid Python module path '%s'", module);
+        return 0;
+    }
+    snprintf(relative, sizeof(relative), "%s.py", local_module);
+    for (index = 0; relative[index] != '\0'; index++)
+        if (relative[index] == '.') relative[index] =
+#ifdef _WIN32
+            '\\';
+#else
+            '/';
+#endif
+    /* Restore the extension separator replaced by the loop. */
+    if (strlen(relative) >= 3) relative[strlen(relative) - 3] = '.';
+    snprintf(absolute, sizeof(absolute), "%s%c%s", project_root,
+#ifdef _WIN32
+             '\\',
+#else
+             '/',
+#endif
+             relative);
+    file = fopen(absolute, "rb");
+    if (file == NULL) {
+        snprintf(error, error_size,
+                 "Python module '%s' was not found at '%s'", module,
+                 absolute);
+        return 0;
+    }
+    fclose(file);
+    (void)program;
+    return 1;
+}
 
 static int validate_instruction(const ZSharpProgram *program,
                                 const ZSharpSettings *settings,
@@ -1188,6 +1271,11 @@ static int validate_instruction(const ZSharpProgram *program,
     }
     if (instruction->op == ZOP_CALL_QUALIFIED ||
         instruction->op == ZOP_CALL_QUALIFIED_VALUE) {
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@py") == 0) {
+            return validate_python_call(program, settings, room, instruction,
+                                        project_root, error, error_size);
+        }
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
             return require_project_import(room, settings, instruction->operand,
                                           instruction->call_file, error,

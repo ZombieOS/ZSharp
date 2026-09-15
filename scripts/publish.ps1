@@ -232,6 +232,19 @@ foreach ($platform in $platforms) {
             }
             $support += $molten
         }
+        $pythonRuntime = Join-Path $drop "python-runtime.tar.gz"
+        if (-not (Test-Path -LiteralPath $pythonRuntime -PathType Leaf) -or
+            -not (Test-Path -LiteralPath ($pythonRuntime + ".sha256") -PathType Leaf)) {
+            throw "The $platform workflow artifact is missing its Python runtime"
+        }
+        $expectedPythonChecksum =
+            (Get-Content -LiteralPath ($pythonRuntime + ".sha256") -Raw).Trim().ToLowerInvariant()
+        $actualPythonChecksum =
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $pythonRuntime).Hash.ToLowerInvariant()
+        if ($expectedPythonChecksum -ne $actualPythonChecksum) {
+            throw "The $platform workflow artifact Python checksum does not match"
+        }
+        $support += $pythonRuntime
         & (Join-Path $PSScriptRoot "stage-native-runtime.ps1") `
             -Platform $platform -Runtime $droppedRuntime -Support $support `
             -RuntimeVersion $droppedVersion

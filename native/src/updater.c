@@ -744,6 +744,112 @@ int zsharp_update_agent_run(void) {
 
 #endif
 
+int zsharp_update_download_component(const char *url, const char *destination,
+                                     size_t maximum, char *error,
+                                     size_t error_size) {
+#ifdef _WIN32
+    WCHAR *wide_url = wide_text(url);
+    URL_COMPONENTSW parts;
+    WCHAR *host = NULL;
+    WCHAR *path = NULL;
+    HINTERNET session = NULL;
+    HINTERNET connection = NULL;
+    HINTERNET request = NULL;
+    FILE *output = NULL;
+    DWORD status = 0;
+    DWORD status_size = sizeof(status);
+    size_t total = 0;
+    int ok = 0;
+    if (wide_url == NULL) goto done;
+    memset(&parts, 0, sizeof(parts));
+    parts.dwStructSize = sizeof(parts);
+    parts.dwSchemeLength = (DWORD)-1;
+    parts.dwHostNameLength = (DWORD)-1;
+    parts.dwUrlPathLength = (DWORD)-1;
+    parts.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(wide_url, 0, 0, &parts) ||
+        parts.nScheme != INTERNET_SCHEME_HTTPS || parts.dwHostNameLength == 0)
+        goto done;
+    host = (WCHAR *)calloc((size_t)parts.dwHostNameLength + 1,
+                           sizeof(*host));
+    path = (WCHAR *)calloc((size_t)parts.dwUrlPathLength +
+                               (size_t)parts.dwExtraInfoLength + 1,
+                           sizeof(*path));
+    if (host == NULL || path == NULL) goto done;
+    memcpy(host, parts.lpszHostName,
+           (size_t)parts.dwHostNameLength * sizeof(*host));
+    memcpy(path, parts.lpszUrlPath,
+           (size_t)parts.dwUrlPathLength * sizeof(*path));
+    if (parts.dwExtraInfoLength != 0)
+        memcpy(path + parts.dwUrlPathLength, parts.lpszExtraInfo,
+               (size_t)parts.dwExtraInfoLength * sizeof(*path));
+    session = WinHttpOpen(L"ZSharp Component Bootstrap/1.0",
+                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (session == NULL) goto done;
+    WinHttpSetTimeouts(session, 20000, 20000, 20000, 600000);
+    connection = WinHttpConnect(session, host, parts.nPort, 0);
+    if (connection == NULL) goto done;
+    request = WinHttpOpenRequest(connection, L"GET", path, NULL,
+                                 WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 WINHTTP_FLAG_SECURE);
+    if (request == NULL || !WinHttpSendRequest(
+            request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(request, NULL) ||
+        !WinHttpQueryHeaders(request,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size,
+            WINHTTP_NO_HEADER_INDEX) || status < 200 || status >= 300)
+        goto done;
+    output = fopen(destination, "wb");
+    if (output == NULL) goto done;
+    for (;;) {
+        unsigned char buffer[64 * 1024];
+        DWORD received = 0;
+        if (!WinHttpReadData(request, buffer, sizeof(buffer), &received))
+            goto done;
+        if (received == 0) break;
+        total += received;
+        if (total > maximum || fwrite(buffer, 1, received, output) != received)
+            goto done;
+    }
+    if (fclose(output) != 0) { output = NULL; goto done; }
+    output = NULL;
+    ok = 1;
+done:
+    if (output != NULL) fclose(output);
+    if (request != NULL) WinHttpCloseHandle(request);
+    if (connection != NULL) WinHttpCloseHandle(connection);
+    if (session != NULL) WinHttpCloseHandle(session);
+    free(path); free(host); free(wide_url);
+    if (!ok) remove(destination);
+#else
+    pid_t child;
+    int status;
+    char maximum_text[32];
+    int ok;
+    snprintf(maximum_text, sizeof(maximum_text), "%llu",
+             (unsigned long long)maximum);
+    child = fork();
+    if (child == 0) {
+        execlp("curl", "curl", "--fail", "--location", "--silent",
+               "--show-error", "--proto", "=https", "--tlsv1.2",
+               "--connect-timeout", "20", "--max-time", "600",
+               "--max-filesize", maximum_text, "--output", destination,
+               url, (char *)NULL);
+        _exit(127);
+    }
+    ok = child > 0 && waitpid(child, &status, 0) >= 0 &&
+         WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (!ok) remove(destination);
+#endif
+    if (!ok && error != NULL && error_size != 0)
+        snprintf(error, error_size, "could not securely download '%s'", url);
+    return ok;
+}
+
 void zsharp_update_check_start(void) {
 #ifdef _WIN32
     return;

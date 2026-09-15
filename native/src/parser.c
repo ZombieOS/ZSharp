@@ -597,7 +597,7 @@ static int parse_print(Parser *parser, ZSharpFunction *function) {
 
 static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
                                 int produces_value) {
-    char *parts[4] = {0};
+    char *parts[66] = {0};
     size_t part_count = 0;
     size_t index;
     uint32_t argument_count = 0;
@@ -612,20 +612,24 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
     while (!parser->failed &&
            (parser->current.type == ZTOKEN_COLON ||
             parser->current.type == ZTOKEN_DOT)) {
-        if (part_count == 4) {
+        if (part_count == 66) {
             fail_at(parser, &parser->current,
-                    "Function.call accepts File.Room.Function or "
-                    "Project.File.Room.Function");
+                    "Function.call target is too long");
             break;
         }
         advance_token(parser);
         parts[part_count++] =
             consume_name(parser, "the next Function.call target name");
     }
-    if (!parser->failed && part_count != 3 && part_count != 4) {
+    if (!parser->failed && strcmp(parts[0], "py") != 0 &&
+        part_count != 3 && part_count != 4) {
         fail_at(parser, &parser->current,
                 "Function.call requires File.Room.Function or "
                 "Project.File.Room.Function");
+    }
+    if (!parser->failed && strcmp(parts[0], "py") == 0 && part_count < 3) {
+        fail_at(parser, &parser->current,
+                "Python calls require py:Path.To.File:function");
     }
     if (!parser->failed && match_type(parser, ZTOKEN_LEFT_BRACKET)) {
         if (parser->current.type != ZTOKEN_RIGHT_BRACKET) {
@@ -668,7 +672,36 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
         free(call_outcome);
         return 0;
     }
-    if (part_count == 4) {
+    if (strcmp(parts[0], "py") == 0) {
+        size_t module_length = 0;
+        char *module;
+        char *cursor;
+        for (index = 1; index + 1 < part_count; index++)
+            module_length += strlen(parts[index]) + (index > 1 ? 1u : 0u);
+        module = (char *)malloc(module_length + 1);
+        instruction->operand = zsharp_copy_text("@py", 3);
+        instruction->call_room = zsharp_copy_text("", 0);
+        if (module == NULL || instruction->operand == NULL ||
+            instruction->call_room == NULL) {
+            free(module);
+            for (index = 0; index < part_count; index++) free(parts[index]);
+            free(call_outcome);
+            fail_at(parser, &parser->current, "out of memory");
+            return 0;
+        }
+        cursor = module;
+        for (index = 1; index + 1 < part_count; index++) {
+            size_t length = strlen(parts[index]);
+            if (index > 1) *cursor++ = '.';
+            memcpy(cursor, parts[index], length);
+            cursor += length;
+        }
+        *cursor = '\0';
+        instruction->call_file = module;
+        instruction->call_function = parts[part_count - 1];
+        parts[part_count - 1] = NULL;
+        for (index = 0; index < part_count; index++) free(parts[index]);
+    } else if (part_count == 4) {
         instruction->operand = parts[0];
         instruction->call_file = parts[1];
         instruction->call_room = parts[2];
@@ -2290,7 +2323,14 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     size_t index;
     char *path;
     ZSharpImport *import;
+    int is_python = 0;
     parts[part_count++] = consume_name(parser, "an imported project name");
+    if (!parser->failed && strcmp(parts[0], "py") == 0 &&
+        match_type(parser, ZTOKEN_COLON)) {
+        is_python = 1;
+        parts[part_count++] = consume_name(parser,
+                                           "the Python project name");
+    }
     while (!parser->failed && match_type(parser, ZTOKEN_DOT)) {
         if (part_count == 64) {
             fail_at(parser, &parser->current,
@@ -2310,9 +2350,11 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
         parts[part_count++] =
             consume_name(parser, "a name or '*' in the import path");
     }
-    if (!parser->failed && part_count < 2) {
+    if (!parser->failed && part_count < (is_python ? 3u : 2u)) {
         fail_at(parser, &parser->current,
-                "an import requires at least Project.File");
+                is_python
+                    ? "a Python import requires py:Project.File"
+                    : "an import requires at least Project.File");
     }
     if (!parser->failed &&
         (!consume_type(parser, ZTOKEN_LEFT_PAREN,
@@ -2330,6 +2372,17 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     path = join_path_parts(parser, parts, part_count);
     for (index = 0; index < part_count; index++) free(parts[index]);
     if (path == NULL) return 0;
+    if (is_python) {
+        char *qualified = (char *)malloc(strlen(path) + 2);
+        if (qualified == NULL) {
+            free(path);
+            fail_at(parser, &parser->current, "out of memory");
+            return 0;
+        }
+        sprintf(qualified, "py:%s", path + 3);
+        free(path);
+        path = qualified;
+    }
     for (index = 0; index < room->import_count; index++) {
         if (strcmp(room->imports[index].path, path) == 0) {
             fail_at(parser, &parser->current, "duplicate import '%s'", path);
@@ -2354,7 +2407,14 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     size_t index;
     char *path;
     ZSharpImport *import;
+    int is_python = 0;
     parts[part_count++] = consume_name(parser, "an imported project name");
+    if (!parser->failed && strcmp(parts[0], "py") == 0 &&
+        match_type(parser, ZTOKEN_COLON)) {
+        is_python = 1;
+        parts[part_count++] = consume_name(parser,
+                                           "the Python project name");
+    }
     while (!parser->failed && match_type(parser, ZTOKEN_DOT)) {
         if (part_count == 64) {
             fail_at(parser, &parser->current,
@@ -2374,9 +2434,11 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
         parts[part_count++] =
             consume_name(parser, "a name or '*' in the import path");
     }
-    if (!parser->failed && part_count < 2) {
+    if (!parser->failed && part_count < (is_python ? 3u : 2u)) {
         fail_at(parser, &parser->current,
-                "an import requires at least Project.File");
+                is_python
+                    ? "a Python import requires py:Project.File"
+                    : "an import requires at least Project.File");
     }
     if (!parser->failed &&
         (!consume_type(parser, ZTOKEN_LEFT_PAREN,
@@ -2394,6 +2456,17 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     path = join_path_parts(parser, parts, part_count);
     for (index = 0; index < part_count; index++) free(parts[index]);
     if (path == NULL) return 0;
+    if (is_python) {
+        char *qualified = (char *)malloc(strlen(path) + 2);
+        if (qualified == NULL) {
+            free(path);
+            fail_at(parser, &parser->current, "out of memory");
+            return 0;
+        }
+        sprintf(qualified, "py:%s", path + 3);
+        free(path);
+        path = qualified;
+    }
     for (index = 0; index < window->import_count; index++) {
         if (strcmp(window->imports[index].path, path) == 0) {
             fail_at(parser, &parser->current, "duplicate import '%s'", path);

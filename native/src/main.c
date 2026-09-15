@@ -27,6 +27,7 @@
 #else
 #include <errno.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 static char command_failure[512];
@@ -36,6 +37,30 @@ static int make_log_directory(const char *path) {
     return CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
 #else
     return mkdir(path, 0700) == 0 || errno == EEXIST;
+#endif
+}
+
+static const char *runtime_log_os(void) {
+#ifdef _WIN32
+    return "Windows";
+#elif defined(__APPLE__)
+    return "macOS";
+#elif defined(__linux__)
+    return "Linux";
+#else
+    return "Unknown";
+#endif
+}
+
+static const char *runtime_log_arch(void) {
+#if defined(_M_ARM64) || defined(__aarch64__)
+    return "aarch64";
+#elif defined(_M_X64) || defined(__x86_64__)
+    return "x86_64";
+#elif defined(_M_IX86) || defined(__i386__)
+    return "x86";
+#else
+    return "unknown";
 #endif
 }
 
@@ -78,8 +103,37 @@ static void write_runtime_error_log(const char *app_name, const char *reason) {
 #endif
     file = fopen(path, "wb");
     if (file == NULL) return;
-    fprintf(file, "Z# runtime error\nApplication: %s\nReason: %s\n",
+    fprintf(file,
+            "Z# RUNTIME FAILURE REPORT\n"
+            "=========================\n"
+            "Report format: 1\n"
+            "Z# runtime: %d.%d.%d.%d\n"
+            "Application: %s\n"
+            "Timestamp (local): %04d-%02d-%02d %02d:%02d:%02d\n"
+            "Operating system: %s\n"
+            "Architecture: %s\n",
+            ZSHARP_VERSION_MAJOR, ZSHARP_VERSION_MINOR,
+            ZSHARP_VERSION_PATCH, ZSHARP_VERSION_REVISION,
             app_name == NULL ? "Z# application" : app_name,
+            stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
+            stamp.tm_hour, stamp.tm_min, stamp.tm_sec,
+            runtime_log_os(), runtime_log_arch());
+#ifdef _WIN32
+    fprintf(file, "Process ID: %lu\n", (unsigned long)GetCurrentProcessId());
+#else
+    fprintf(file, "Process ID: %lu\n", (unsigned long)getpid());
+#endif
+    fprintf(file,
+            "\nFAILURE\n"
+            "-------\n"
+            "%s\n"
+            "\nDIAGNOSTIC NOTES\n"
+            "----------------\n"
+            "This report deliberately excludes environment variables and user "
+            "documents to avoid collecting passwords, tokens, and unrelated "
+            "personal data.\n"
+            "If the failure came from Python, the complete Python exception and "
+            "traceback appear in the FAILURE section above.\n",
             reason == NULL || reason[0] == '\0' ? "Unknown error" : reason);
     fclose(file);
 }
