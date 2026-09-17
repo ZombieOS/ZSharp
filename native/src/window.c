@@ -302,6 +302,35 @@ static WCHAR *utf8_to_wide(const char *text) {
     return wide;
 }
 
+static void set_window_text_utf8(HWND handle, const char *text) {
+    WCHAR *wide = utf8_to_wide(text == NULL ? "" : text);
+    if (wide != NULL) {
+        SetWindowTextW(handle, wide);
+        free(wide);
+    }
+}
+
+static char *window_text_utf8(HWND handle) {
+    int wide_length = GetWindowTextLengthW(handle);
+    WCHAR *wide = (WCHAR *)malloc(((size_t)wide_length + 1) * sizeof(WCHAR));
+    char *utf8;
+    int utf8_length;
+    if (wide == NULL) return NULL;
+    GetWindowTextW(handle, wide, wide_length + 1);
+    utf8_length = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0,
+                                     NULL, NULL);
+    if (utf8_length <= 0) {
+        free(wide);
+        return NULL;
+    }
+    utf8 = (char *)malloc((size_t)utf8_length);
+    if (utf8 != NULL)
+        WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, utf8_length,
+                            NULL, NULL);
+    free(wide);
+    return utf8;
+}
+
 static HBITMAP load_image_bitmap(const char *path, int requested_width,
                                  int requested_height) {
     IWICImagingFactory *factory = NULL;
@@ -539,7 +568,6 @@ static char *filter_input_text(WindowControl *control, const char *source,
 
 static void update_input_contents(WindowControl *control) {
     ZSharpUIProperty *contents = find_property(control->element, "contents");
-    int length;
     char *text;
     if (contents == NULL || control->handle == NULL) return;
     if (control->placeholder_active) {
@@ -549,10 +577,8 @@ static void update_input_contents(WindowControl *control) {
         contents->text_value = text;
         return;
     }
-    length = GetWindowTextLengthA(control->handle);
-    text = (char *)malloc((size_t)length + 1);
+    text = window_text_utf8(control->handle);
     if (text == NULL) return;
-    GetWindowTextA(control->handle, text, length + 1);
     if (!control->filtering_input) {
         int changed = 0;
         char *filtered = filter_input_text(control, text, &changed);
@@ -563,7 +589,7 @@ static void update_input_contents(WindowControl *control) {
             SendMessageA(control->handle, EM_GETSEL,
                          (WPARAM)&selection_start, (LPARAM)&selection_end);
             control->filtering_input = 1;
-            SetWindowTextA(control->handle, filtered);
+            set_window_text_utf8(control->handle, filtered);
             control->filtering_input = 0;
             selection_start = removed > selection_start
                 ? 0 : selection_start - (DWORD)removed;
@@ -798,13 +824,14 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
             DRAWITEMSTRUCT *draw = (DRAWITEMSTRUCT *)lparam;
             WindowControl *control = find_control(state, draw->hwndItem);
             if (control != NULL && control->element->type == ZUI_TEXT) {
-                char text[2048];
+                WCHAR text[8192];
                 char relative[MAX_PATH];
                 char full_path[4096];
                 const char *remaining = NULL;
                 HGDIOBJ previous_font;
                 RECT text_area = draw->rcItem;
-                GetWindowTextA(draw->hwndItem, text, sizeof(text));
+                GetWindowTextW(draw->hwndItem, text,
+                               (int)(sizeof(text) / sizeof(text[0])));
                 if (state->background_buffer != NULL) {
                     RECT control_area;
                     GetWindowRect(control->handle, &control_area);
@@ -822,7 +849,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                 SetBkMode(draw->hDC, TRANSPARENT);
                 SetTextColor(draw->hDC, control->has_text_color
                     ? control->text_color : RGB(0, 0, 0));
-                if (inline_image_text(text, relative, sizeof(relative),
+                if (0 && inline_image_text("", relative, sizeof(relative),
                                       &remaining) &&
                     snprintf(full_path, sizeof(full_path), "%s/%s",
                              state->project_root, relative) > 0) {
@@ -848,20 +875,28 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                                   DT_LEFT | DT_VCENTER | DT_SINGLELINE |
                                   DT_NOPREFIX);
                     } else {
-                        DrawTextA(draw->hDC, text, -1, &text_area,
-                                  DT_CENTER | DT_VCENTER | DT_SINGLELINE |
-                                  DT_NOPREFIX);
+                        DrawTextW(draw->hDC, text, -1, &text_area,
+                                  DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
                     }
                 } else {
-                    DrawTextA(draw->hDC, text, -1, &text_area,
-                              DT_CENTER | DT_VCENTER | DT_SINGLELINE |
-                              DT_NOPREFIX);
+                    ZSharpUIProperty *alignment = find_property(
+                        control->element, "textAlign");
+                    UINT flags = DT_WORDBREAK | DT_NOPREFIX;
+                    if (alignment != NULL && alignment->text_value != NULL &&
+                        strcmp(alignment->text_value, "right") == 0)
+                        flags |= DT_RIGHT;
+                    else if (alignment != NULL && alignment->text_value != NULL &&
+                             strcmp(alignment->text_value, "center") == 0)
+                        flags |= DT_CENTER;
+                    else
+                        flags |= DT_LEFT;
+                    DrawTextW(draw->hDC, text, -1, &text_area, flags);
                 }
                 SelectObject(draw->hDC, previous_font);
                 return TRUE;
             }
             if (control != NULL && control->element->type == ZUI_BUTTON) {
-                char text[512];
+                WCHAR text[512];
                 char paint_error[128] = {0};
                 HGDIOBJ previous_font;
                 ZSharpUIProperty *hover_background = control->hovered
@@ -951,7 +986,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                                                               : EDGE_RAISED,
                              BF_RECT);
                 }
-                GetWindowTextA(draw->hwndItem, text, sizeof(text));
+                GetWindowTextW(draw->hwndItem, text,
+                               (int)(sizeof(text) / sizeof(text[0])));
                 previous_font = SelectObject(draw->hDC, control->font);
                 SetBkMode(draw->hDC, TRANSPARENT);
                 SetTextColor(draw->hDC,
@@ -960,7 +996,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                                       control->text_color)
                         : control->has_text_color
                             ? control->text_color : RGB(0, 0, 0));
-                DrawTextA(draw->hDC, text, -1, &draw->rcItem,
+                DrawTextW(draw->hDC, text, -1, &draw->rcItem,
                           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(draw->hDC, previous_font);
                 if (has_hover_paint) zsharp_paint_free(&hover_paint);
@@ -1124,19 +1160,19 @@ static int wrapped_text_height(WindowState *state, WindowControl *control,
     HDC context;
     HGDIOBJ previous;
     RECT bounds = {0, 0, width > 16 ? width - 16 : width, 0};
-    char *text;
+    WCHAR *text;
     int length;
     int height = fallback;
     if (width <= 0 || control->handle == NULL) return fallback;
-    length = GetWindowTextLengthA(control->handle);
-    text = (char *)malloc((size_t)length + 1);
+    length = GetWindowTextLengthW(control->handle);
+    text = (WCHAR *)malloc(((size_t)length + 1) * sizeof(WCHAR));
     if (text == NULL) return fallback;
-    GetWindowTextA(control->handle, text, length + 1);
+    GetWindowTextW(control->handle, text, length + 1);
     context = GetDC(state->window);
     if (context != NULL) {
         previous = SelectObject(context, control->font);
-        if (DrawTextA(context, text, -1, &bounds,
-                      DT_CALCRECT | DT_WORDBREAK | DT_CENTER |
+        if (DrawTextW(context, text, -1, &bounds,
+                      DT_CALCRECT | DT_WORDBREAK |
                       DT_NOPREFIX) != 0) {
             height = bounds.bottom - bounds.top + 6;
             if (height < fallback) height = fallback;
@@ -1249,16 +1285,12 @@ static void layout_controls(WindowState *state) {
             if (width < 32) width = 32;
             if (height < 16) height = 16;
         } else {
-            int word_width;
             int available_width = client_width - x - 8;
             if (width < 24) width = 24;
-            word_width = longest_word_width(state, control) + 16;
-            if (word_width > width) width = word_width;
             if (available_width < 1) available_width = 1;
             if (width > available_width) width = available_width;
             if (width < 1) width = 1;
-            if (find_property(element, "height") == NULL)
-                height = wrapped_text_height(state, control, width, height);
+            height = wrapped_text_height(state, control, width, height);
         }
         y = (int)(((double)state->layout_height / 2.0 -
             (double)measurement_pixels(find_property(element, "locationY"),
@@ -1410,6 +1442,7 @@ static int create_controls(WindowState *state, int client_width,
                      "could not create UI element '%s'", element->name);
             return 0;
         }
+        set_window_text_utf8(control->handle, display_text);
         if (color_property != NULL) {
             control->text_color =
                 parse_color(color_property->text_value, RGB(0, 0, 0));
@@ -1611,7 +1644,7 @@ static int set_window_property(void *data, const char *path,
                                  error, error_size)) return 0;
     if (element->type == ZUI_DESIGN) {
         if (strcmp(property->name, "title") == 0) {
-            SetWindowTextA(state->window, property->text_value);
+            set_window_text_utf8(state->window, property->text_value);
         } else if (strcmp(property->name, "background") == 0) {
             ZSharpPaint replacement;
             memset(&replacement, 0, sizeof(replacement));
@@ -1665,8 +1698,19 @@ static int set_window_property(void *data, const char *path,
         }
         if (strcmp(property->name, "content") == 0 ||
             strcmp(property->name, "text") == 0) {
-            SetWindowTextA(control->handle, property->text_value);
+            set_window_text_utf8(control->handle, property->text_value);
             if (element->type == ZUI_TEXT) layout_controls(state);
+        } else if (strcmp(property->name, "contents") == 0) {
+            control->placeholder_active = 0;
+            set_window_text_utf8(control->handle, property->text_value);
+            update_input_contents(control);
+            update_multiline_scrollbar(control);
+        } else if (strcmp(property->name, "focus") == 0) {
+            if (property->status_value) {
+                SetFocus(control->handle);
+            } else if (GetFocus() == control->handle) {
+                SetFocus(state->window);
+            }
         } else if (strcmp(property->name, "display") == 0) {
             if (control->is_image_input) {
                 SetWindowTextA(control->handle, property->text_value);

@@ -2073,3 +2073,49 @@ For the current release plan:
 When later generations replace older syntax, the compiler may emit migration
 warnings that name both the old form and its recommended replacement. Z1 does
 not invent warnings for generations that do not exist yet.
+# Z# 1.1.2.0 additions
+
+## JavaScript interoperability
+
+JavaScript is embedded in the ZVM; users do not need Node.js. Import a local
+JavaScript module with its project PID and call exported functions through the
+same value bridge used by other languages:
+
+```javascript
+import js:my_project.JavaScript.Utilities():
+
+text Greeting = Function.call(js:JavaScript.Utilities:greeting ["Z#"]):
+```
+
+```javascript
+export function greeting(name) {
+  return `Hello, ${name}!`;
+}
+```
+
+Arguments and return values support text, number, status/boolean, and null.
+JavaScript exceptions retain their message and stack in Z# runtime reports.
+
+## Persistent room fields
+
+Room-level `text` and `number` values persist between repeated brain calls.
+Use `text.set.Name = ...:` and `number.set:Name = ...:` to update them. Local
+values remain local to the brain call.
+
+## Dynamic window text and inputs
+
+Normal text accepts `textAlign: left:`, `center`, or `right`. Wrapped text
+recalculates its rendered height after `.content.set`, and window scroll bounds
+are recalculated when that content grows or shrinks.
+
+Text input contents can be replaced or cleared and keyboard focus can be
+returned to an input:
+
+```javascript
+Startup.Prompt.contents.set: "":
+Startup.Prompt.focus.set: alive:
+```
+
+Window text and input use UTF-8 end-to-end, including non-Latin scripts and
+emoji. Native runtime failures now include the source, room, brain, and Z# call
+chain where available.

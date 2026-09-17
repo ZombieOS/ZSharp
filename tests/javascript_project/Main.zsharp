@@ -1,0 +1,19 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import js:javascript_test.JavaScript.Utilities():
+
+ noticed brain Start[] (
+  text Message = Function.call(js:JavaScript.Utilities:greeting["Tester"]):
+  number Answer = Function.call(js:JavaScript.Utilities:answer):
+  text Unicode = Function.call(js:JavaScript.Utilities:unicode):
+  Print(Message):
+  Print(Answer):
+  if[Function.call(js:JavaScript.Utilities:available)] (
+   Print("JavaScript status alive"):
+  ) else (
+   Print("JavaScript status dead"):
+  )
+  Print(Unicode):
+ )
+)

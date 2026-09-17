@@ -87,6 +87,37 @@ if(NOT python_result EQUAL 0 OR
         "stdout: ${python_output}\nstderr: ${python_error}")
 endif()
 
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run Main.zsharp
+    WORKING_DIRECTORY "${PROJECT_ROOT}/tests/javascript_project"
+    RESULT_VARIABLE javascript_result
+    OUTPUT_VARIABLE javascript_output
+    ERROR_VARIABLE javascript_error
+)
+if(NOT javascript_result EQUAL 0 OR
+   NOT javascript_output MATCHES "Hello from JavaScript, Tester!" OR
+   NOT javascript_output MATCHES "42" OR
+   NOT javascript_output MATCHES "JavaScript status alive")
+    message(FATAL_ERROR
+        "JavaScript interoperability test failed (${javascript_result})\n"
+        "stdout: ${javascript_output}\nstderr: ${javascript_error}")
+endif()
+
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run RoomState.zsharp
+    WORKING_DIRECTORY "${PROJECT_ROOT}/tests"
+    RESULT_VARIABLE room_state_result
+    OUTPUT_VARIABLE room_state_output
+    ERROR_VARIABLE room_state_error
+)
+if(NOT room_state_result EQUAL 0 OR
+   NOT room_state_output MATCHES "AAA" OR
+   NOT room_state_output MATCHES "3")
+    message(FATAL_ERROR
+        "persistent room state test failed (${room_state_result})\n"
+        "stdout: ${room_state_output}\nstderr: ${room_state_error}")
+endif()
+
 expect_success("window settings" "${WINDOW_DIR}"
                check project.zsettings)
 expect_failure("missing project icon" "project Icon"
@@ -324,14 +355,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.0.2]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.2.1]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.1.0.2!"
+               "Update to at least 1.1.2.1!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

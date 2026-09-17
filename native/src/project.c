@@ -1129,11 +1129,14 @@ static int project_version_before(const ZSharpSettings *settings,
                                   unsigned major, unsigned minor,
                                   unsigned patch, unsigned revision);
 
-static int validate_python_call(const ZSharpProgram *program,
+static int validate_foreign_call(const ZSharpProgram *program,
                                 const ZSharpSettings *settings,
                                 const ZSharpRoom *room,
                                 const ZSharpInstruction *instruction,
-                                const char *project_root, char *error,
+                                const char *project_root,
+                                const char *language, const char *label,
+                                const char *extension, unsigned min_patch,
+                                char *error,
                                 size_t error_size) {
     char qualified[1024];
     char relative[1024];
@@ -1144,17 +1147,18 @@ static int validate_python_call(const ZSharpProgram *program,
     size_t index;
     int imported = 0;
     FILE *file;
-    if (project_version_before(settings, 1, 1, 0, 0)) {
+    if (project_version_before(settings, 1, 1, min_patch, 0)) {
         snprintf(error, error_size,
-                 "Python imports require ZSharp: [1.1.0.0]: or newer");
+                 "%s imports require ZSharp: [1.1.%u.0]: or newer",
+                 label, min_patch);
         return 0;
     }
     if (strncmp(module, settings->project_id, project_length) == 0 &&
         module[project_length] == '.') {
         local_module = module + project_length + 1;
-        snprintf(qualified, sizeof(qualified), "py:%s", module);
+        snprintf(qualified, sizeof(qualified), "%s:%s", language, module);
     } else {
-        snprintf(qualified, sizeof(qualified), "py:%s.%s",
+        snprintf(qualified, sizeof(qualified), "%s:%s.%s", language,
                  settings->project_id, module);
     }
     for (index = 0; index < room->import_count; index++) {
@@ -1170,17 +1174,17 @@ static int validate_python_call(const ZSharpProgram *program,
     }
     if (!imported) {
         snprintf(error, error_size,
-                 "Python call '%s:%s' requires import py:%s.%s()",
-                 module, instruction->call_function, settings->project_id,
-                 module);
+                 "%s call '%s:%s' requires import %s:%s.%s()", label,
+                 module, instruction->call_function, language,
+                 settings->project_id, module);
         return 0;
     }
     if (strchr(local_module, '/') != NULL || strchr(local_module, '\\') != NULL ||
         strstr(local_module, "..") != NULL) {
-        snprintf(error, error_size, "invalid Python module path '%s'", module);
+        snprintf(error, error_size, "invalid %s module path '%s'", label, module);
         return 0;
     }
-    snprintf(relative, sizeof(relative), "%s.py", local_module);
+    snprintf(relative, sizeof(relative), "%s.%s", local_module, extension);
     for (index = 0; relative[index] != '\0'; index++)
         if (relative[index] == '.') relative[index] =
 #ifdef _WIN32
@@ -1189,7 +1193,8 @@ static int validate_python_call(const ZSharpProgram *program,
             '/';
 #endif
     /* Restore the extension separator replaced by the loop. */
-    if (strlen(relative) >= 3) relative[strlen(relative) - 3] = '.';
+    if (strlen(relative) >= strlen(extension) + 1)
+        relative[strlen(relative) - strlen(extension) - 1] = '.';
     snprintf(absolute, sizeof(absolute), "%s%c%s", project_root,
 #ifdef _WIN32
              '\\',
@@ -1200,7 +1205,7 @@ static int validate_python_call(const ZSharpProgram *program,
     file = fopen(absolute, "rb");
     if (file == NULL) {
         snprintf(error, error_size,
-                 "Python module '%s' was not found at '%s'", module,
+                 "%s module '%s' was not found at '%s'", label, module,
                  absolute);
         return 0;
     }
@@ -1273,8 +1278,15 @@ static int validate_instruction(const ZSharpProgram *program,
         instruction->op == ZOP_CALL_QUALIFIED_VALUE) {
         if (instruction->operand != NULL &&
             strcmp(instruction->operand, "@py") == 0) {
-            return validate_python_call(program, settings, room, instruction,
-                                        project_root, error, error_size);
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "py", "Python", "py",
+                                         0, error, error_size);
+        }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@js") == 0) {
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "js", "JavaScript",
+                                         "js", 2, error, error_size);
         }
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
             return require_project_import(room, settings, instruction->operand,

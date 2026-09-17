@@ -9,6 +9,7 @@
 #include "window.h"
 #include "window_style.h"
 #include "terminal.h"
+#include "quickjs.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -508,6 +509,193 @@ static int execute_python_call(const ZSharpProgram *program,
     }
     free(response);
     return 1;
+}
+
+static int javascript_exception(JSContext *context,
+                                const ZSharpInstruction *instruction,
+                                char *error, size_t error_size) {
+    JSValue exception = JS_GetException(context);
+    JSValue stack = JS_GetPropertyStr(context, exception, "stack");
+    const char *message = JS_ToCString(context, exception);
+    const char *trace = JS_IsException(stack) ? NULL :
+        JS_ToCString(context, stack);
+    snprintf(error, error_size, "JavaScript call %s:%s failed:\n%s%s%s",
+             instruction->call_file, instruction->call_function,
+             message == NULL ? "JavaScript exception" : message,
+             trace == NULL ? "" : "\n", trace == NULL ? "" : trace);
+    if (trace != NULL) JS_FreeCString(context, trace);
+    if (message != NULL) JS_FreeCString(context, message);
+    JS_FreeValue(context, stack);
+    JS_FreeValue(context, exception);
+    return 0;
+}
+
+static int execute_javascript_call(const ZSharpProgram *program,
+                                   const ZSharpInstruction *instruction,
+                                   const RuntimeValue *arguments,
+                                   const char *project_root,
+                                   RuntimeHeap *heap, RuntimeValue *result,
+                                   char *error, size_t error_size) {
+    const char *module_name = instruction->call_file;
+    size_t project_length = program->project_id == NULL ? 0 :
+        strlen(program->project_id);
+    char relative[1024];
+    char path[2048];
+    FILE *file;
+    long length;
+    char *source;
+    size_t index;
+    JSRuntime *runtime = NULL;
+    JSContext *context = NULL;
+    JSValue evaluated = JS_UNDEFINED;
+    JSValue global = JS_UNDEFINED;
+    JSValue function = JS_UNDEFINED;
+    JSValue returned = JS_UNDEFINED;
+    JSValue *values = NULL;
+    int ok = 0;
+    if (project_length > 0 &&
+        strncmp(module_name, program->project_id, project_length) == 0 &&
+        module_name[project_length] == '.')
+        module_name += project_length + 1;
+    snprintf(relative, sizeof(relative), "%s", module_name);
+    for (index = 0; relative[index] != '\0'; index++)
+        if (relative[index] == '.') relative[index] =
+#ifdef _WIN32
+            '\\';
+#else
+            '/';
+#endif
+    snprintf(path, sizeof(path), "%s%c%s.js", project_root,
+#ifdef _WIN32
+             '\\',
+#else
+             '/',
+#endif
+             relative);
+    file = fopen(path, "rb");
+    if (file == NULL || fseek(file, 0, SEEK_END) != 0 ||
+        (length = ftell(file)) < 0 || fseek(file, 0, SEEK_SET) != 0) {
+        if (file != NULL) fclose(file);
+        snprintf(error, error_size, "could not read JavaScript module '%s'",
+                 path);
+        return 0;
+    }
+    source = (char *)malloc((size_t)length + 1);
+    if (source == NULL || fread(source, 1, (size_t)length, file) !=
+                              (size_t)length) {
+        fclose(file);
+        free(source);
+        snprintf(error, error_size, "could not read JavaScript module '%s'",
+                 path);
+        return 0;
+    }
+    fclose(file);
+    source[length] = '\0';
+    /* Exported declarations are evaluated in the module's private context;
+       make their bindings callable by the Z# bridge without changing JS. */
+    for (index = 0; index + 7 < (size_t)length; index++) {
+        if ((index == 0 || source[index - 1] == '\n' ||
+             source[index - 1] == '\r' || source[index - 1] == ' ' ||
+             source[index - 1] == '\t') &&
+            memcmp(source + index, "export ", 7) == 0)
+            memset(source + index, ' ', 7);
+    }
+    runtime = JS_NewRuntime();
+    if (runtime == NULL) goto cleanup;
+    JS_SetMemoryLimit(runtime, 64u * 1024u * 1024u);
+    JS_SetMaxStackSize(runtime, 1024u * 1024u);
+    context = JS_NewContext(runtime);
+    if (context == NULL) goto cleanup;
+    evaluated = JS_Eval(context, source, (size_t)length, path,
+                        JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(evaluated)) {
+        javascript_exception(context, instruction, error, error_size);
+        goto cleanup;
+    }
+    global = JS_GetGlobalObject(context);
+    function = JS_GetPropertyStr(context, global,
+                                 instruction->call_function);
+    if (!JS_IsFunction(context, function)) {
+        snprintf(error, error_size,
+                 "JavaScript module '%s' has no exported function '%s'",
+                 instruction->call_file, instruction->call_function);
+        goto cleanup;
+    }
+    if (instruction->argument_count > 0) {
+        values = (JSValue *)calloc(instruction->argument_count,
+                                   sizeof(*values));
+        if (values == NULL) goto cleanup;
+    }
+    for (index = 0; index < instruction->argument_count; index++) {
+        if (arguments[index].type == ZVALUE_TEXT)
+            values[index] = JS_NewString(context,
+                arguments[index].text == NULL ? "" : arguments[index].text);
+        else if (arguments[index].type == ZVALUE_NUMBER)
+            values[index] = JS_NewFloat64(context,
+                strtod(arguments[index].number_text, NULL));
+        else if (arguments[index].type == ZVALUE_STATUS)
+            values[index] = JS_NewBool(context, arguments[index].number != 0);
+        else if (arguments[index].type == ZVALUE_NULL)
+            values[index] = JS_NULL;
+        else {
+            snprintf(error, error_size,
+                     "JavaScript arguments support text, number, status, and null");
+            goto cleanup;
+        }
+    }
+    returned = JS_Call(context, function, global,
+                       (int)instruction->argument_count, values);
+    if (JS_IsException(returned)) {
+        javascript_exception(context, instruction, error, error_size);
+        goto cleanup;
+    }
+    memset(result, 0, sizeof(*result));
+    if (JS_IsString(returned)) {
+        const char *text = JS_ToCString(context, returned);
+        char *copy = text == NULL ? NULL :
+            zsharp_copy_text(text, strlen(text));
+        if (text != NULL) JS_FreeCString(context, text);
+        if (copy == NULL || heap_add_text(heap, copy) == NULL) goto cleanup;
+        result->type = ZVALUE_TEXT;
+        result->text = copy;
+    } else if (JS_IsBool(returned)) {
+        result->type = ZVALUE_STATUS;
+        result->number = JS_ToBool(context, returned);
+    } else if (JS_IsNumber(returned)) {
+        double number;
+        char buffer[64];
+        char *copy;
+        if (JS_ToFloat64(context, &number, returned) != 0) goto cleanup;
+        snprintf(buffer, sizeof(buffer), "%.17g", number);
+        copy = zsharp_copy_text(buffer, strlen(buffer));
+        if (copy == NULL || heap_add_text(heap, copy) == NULL) goto cleanup;
+        result->type = ZVALUE_NUMBER;
+        result->number_text = copy;
+        result->number = (int32_t)number;
+    } else if (JS_IsNull(returned) || JS_IsUndefined(returned)) {
+        result->type = ZVALUE_NULL;
+    } else {
+        snprintf(error, error_size,
+                 "JavaScript returned an unsupported object value");
+        goto cleanup;
+    }
+    ok = 1;
+cleanup:
+    if (!ok && error[0] == '\0') snprintf(error, error_size, "out of memory");
+    if (context != NULL) {
+        for (index = 0; values != NULL &&
+                        index < instruction->argument_count; index++)
+            JS_FreeValue(context, values[index]);
+        JS_FreeValue(context, returned);
+        JS_FreeValue(context, function);
+        JS_FreeValue(context, global);
+        JS_FreeValue(context, evaluated);
+        JS_FreeContext(context);
+    }
+    if (runtime != NULL) JS_FreeRuntime(runtime);
+    free(values);
+    free(source);
+    return ok;
 }
 
 static RuntimeObject *create_object_from_values(
@@ -1973,15 +2161,17 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 size_t local_index;
                 RuntimeField *field =
                     find_field(current_object, instruction->operand);
+                ZSharpVariable *variable =
+                    find_variable(room, instruction->operand);
                 for (local_index = local_count; local_index > 0;
                      local_index--) {
                     if (strcmp(locals[local_index - 1].name,
                                instruction->operand) == 0) break;
                 }
-                if (field == NULL && local_index == 0) {
+                if (field == NULL && variable == NULL && local_index == 0) {
                     snprintf(error, error_size,
-                             "the current object has no field named '%s'",
-                             instruction->operand);
+                             "room '%s' has no text named '%s'",
+                             room->name, instruction->operand);
                     ok = 0;
                     goto done;
                 }
@@ -1996,7 +2186,9 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     ok = 0;
                     goto done;
                 }
-                if ((local_index > 0 || field->type == ZVALUE_TEXT) &&
+                if ((local_index > 0 ||
+                     (field != NULL && field->type == ZVALUE_TEXT) ||
+                     (field == NULL && variable->type == ZVALUE_TEXT)) &&
                     !coerce_number_to_text(heap, &value, error, error_size)) {
                     ok = 0;
                     goto done;
@@ -2009,7 +2201,14 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                         goto done;
                     }
                     locals[local_index - 1].value = value;
-                } else if (!runtime_field_assign(field, &value, error, error_size)) {
+                } else if (field != NULL) {
+                    if (!runtime_field_assign(field, &value, error,
+                                              error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                } else if (!assign_variable_value(variable, &value, error,
+                                                  error_size)) {
                     ok = 0;
                     goto done;
                 }
@@ -3275,6 +3474,25 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     break;
                 }
                 if (instruction->operand != NULL &&
+                    strcmp(instruction->operand, "@js") == 0) {
+                    if (!execute_javascript_call(program, instruction,
+                                                 call_arguments, project_root,
+                                                 heap, &call_return, error,
+                                                 error_size)) {
+                        free(call_arguments);
+                        ok = 0;
+                        goto done;
+                    }
+                    free(call_arguments);
+                    if (instruction->op == ZOP_CALL_QUALIFIED_VALUE &&
+                        !push(stack, stack_capacity, &stack_count, call_return,
+                              error, error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                    break;
+                }
+                if (instruction->operand != NULL &&
                     instruction->operand[0] != '\0') {
                     const ZSharpProviderBinding *binding = find_provider(
                         providers, provider_count, instruction->operand);
@@ -3520,6 +3738,18 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
     }
 
 done:
+    if (!ok && error != NULL && error_size > 0) {
+        size_t used = strlen(error);
+        if (used < error_size - 1) {
+            snprintf(error + used, error_size - used,
+                     "\n  at %s.%s.%s [instruction %zu]",
+                     program->source_name == NULL ? "<source>" :
+                         program->source_name,
+                     room->name == NULL ? "<room>" : room->name,
+                     function->name == NULL ? "<brain>" : function->name,
+                     instruction_index + 1);
+        }
+    }
     free(stack);
     free(locals);
     return ok;
@@ -3801,7 +4031,7 @@ typedef struct WindowTask {
     char *function_name;
     WindowRoomState *room_state;
     int failed;
-    char error[512];
+    char error[4096];
 #ifdef _WIN32
     HANDLE thread;
 #else

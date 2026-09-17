@@ -207,6 +207,8 @@ static ZSharpUIPropertyType expected_property_type(
     } else if (element == ZUI_TEXT) {
         if (strcmp(name, "content") == 0) return ZUI_PROPERTY_TEXT;
         if (strcmp(name, "color") == 0) return ZUI_PROPERTY_COLOR;
+        if (strcmp(name, "textAlign") == 0)
+            return ZUI_PROPERTY_IDENTIFIER;
     } else if (element == ZUI_BUTTON) {
         if (strcmp(name, "text") == 0) return ZUI_PROPERTY_TEXT;
         if (strcmp(name, "textColor") == 0 ||
@@ -214,7 +216,10 @@ static ZSharpUIPropertyType expected_property_type(
     } else if (element == ZUI_IMAGE) {
         if (strcmp(name, "file") == 0) return ZUI_PROPERTY_TEXT;
     } else if (element == ZUI_TEXT_INPUT) {
-        if (strcmp(name, "display") == 0) return ZUI_PROPERTY_TEXT;
+        if (strcmp(name, "display") == 0 || strcmp(name, "contents") == 0)
+            return ZUI_PROPERTY_TEXT;
+        if (strcmp(name, "focus") == 0) return ZUI_PROPERTY_STATUS;
+        if (strcmp(name, "textAlign") == 0) return ZUI_PROPERTY_IDENTIFIER;
     }
     return 0;
 }

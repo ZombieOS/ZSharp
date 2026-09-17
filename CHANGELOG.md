@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1.0-BETA - JavaScript and dynamic-window reliability - 2026-09-16
+
+- Added embedded JavaScript interoperability without requiring Node.js.
+- Fixed persistent room-level text and number state.
+- Fixed UTF-8 rendering and dynamic text wrapping, height, and scrolling.
+- Added normal-text alignment plus programmatic input clearing and focus.
+- Expanded native Z# failure reports with call-chain context.
+
 ## 1.1.0.1 - Window text setter fix - 2026-09-15
 
 - Window text properties now accept text variables directly, such as

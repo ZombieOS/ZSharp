@@ -3,6 +3,17 @@ if(NOT DEFINED INSTALLER_BIN OR NOT DEFINED RUNTIME_BIN OR
     message(FATAL_ERROR "The Z# installer test paths were not supplied")
 endif()
 
+execute_process(
+    COMMAND "${RUNTIME_BIN}" --version
+    RESULT_VARIABLE runtime_version_result
+    OUTPUT_VARIABLE runtime_version_output
+)
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"
+       test_version "${runtime_version_output}")
+if(NOT runtime_version_result EQUAL 0 OR test_version STREQUAL "")
+    message(FATAL_ERROR "Could not read the test runtime version")
+endif()
+
 file(REMOVE_RECURSE "${TEST_ROOT}")
 file(MAKE_DIRECTORY "${TEST_ROOT}")
 file(SIZE "${RUNTIME_BIN}" runtime_size)
@@ -31,7 +42,7 @@ file(MAKE_DIRECTORY "${test_desktop}")
 file(WRITE "${manifest}"
     "{\n"
     "  \"schema\": 1,\n"
-    "  \"latestVersion\": \"1.1.0.0\",\n"
+    "  \"latestVersion\": \"${test_version}\",\n"
     "  \"download\": {\n"
     "    \"url\": \"https://example.invalid/ZVM-LATEST.zip\",\n"
     "    \"sha256\": \"${archive_sha256}\",\n"
@@ -109,12 +120,12 @@ endif()
 
 set(current_manifest "${TEST_ROOT}/current-update.js")
 file(WRITE "${current_manifest}"
-    "{\"schema\":1,\"latestVersion\":\"1.1.0.0\"}")
+    "{\"schema\":1,\"latestVersion\":\"${test_version}\"}")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             "ZSHARP_INSTALLER_INSTALL_DIR=${install_directory}"
             ZSHARP_INSTALLER_SKIP_INTEGRATION=1
-            "${installed_updater}" --check --current-version 1.1.0.0
+            "${installed_updater}" --check --current-version ${test_version}
             --manifest-file "${current_manifest}"
     RESULT_VARIABLE current_result
     OUTPUT_VARIABLE current_output
@@ -138,7 +149,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             "ZSHARP_INSTALLER_INSTALL_DIR=${install_directory}"
             ZSHARP_INSTALLER_SKIP_INTEGRATION=1
-            "${installed_updater}" --check --current-version 1.1.0.0
+            "${installed_updater}" --check --current-version ${test_version}
             --manifest-file "${older_manifest}"
     RESULT_VARIABLE older_result
     OUTPUT_VARIABLE older_output
@@ -162,7 +173,7 @@ file(WRITE "${rejected_manifest}"
     "\"path\":\"runtimes/${TEST_PLATFORM}/${runtime_name}\","
     "\"sha256\":\"${runtime_sha256}\","
     "\"size\":${runtime_size}},"
-    "\"latestVersion\":\"1.1.0.0\","
+    "\"latestVersion\":\"${test_version}\","
     "\"download\":{\"url\":\"https://example.invalid/ZVM-LATEST.zip\","
     "\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\","
     "\"size\":${archive_size}}}")
@@ -191,7 +202,7 @@ execute_process(
     OUTPUT_VARIABLE version_output
     ERROR_VARIABLE version_error
 )
-if(NOT version_result EQUAL 0 OR NOT version_output MATCHES "Z# 1.1.0.0")
+if(NOT version_result EQUAL 0 OR NOT version_output MATCHES "Z# ${test_version}")
     message(FATAL_ERROR
         "The installed ZVM did not run (${version_result})\n"
         "stdout: ${version_output}\nstderr: ${version_error}")

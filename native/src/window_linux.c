@@ -63,6 +63,7 @@ typedef struct GtkApi {
     void (*entry_set_alignment)(void *, float);
     const char *(*entry_get_text)(void *);
     void (*entry_set_text)(void *, const char *);
+    void (*widget_grab_focus)(void *);
     int (*editable_get_position)(void *);
     GtkWidget *(*text_view_new)(void);
     void *(*text_view_get_buffer)(void *);
@@ -233,6 +234,7 @@ static int gtk_api_load(GtkApi *api, char *error, size_t error_size) {
     GTK_REQUIRED(api, entry_set_alignment, api->gtk,
                  "gtk_entry_set_alignment");
     GTK_REQUIRED(api, entry_set_text, api->gtk, "gtk_entry_set_text");
+    GTK_REQUIRED(api, widget_grab_focus, api->gtk, "gtk_widget_grab_focus");
     GTK_REQUIRED(api, entry_get_text, api->gtk, "gtk_entry_get_text");
     GTK_REQUIRED(api, editable_get_position, api->gtk,
                  "gtk_editable_get_position");
@@ -1238,6 +1240,21 @@ static int set_window_property_ui(void *data, const char *path,
                 state->api.entry_set_placeholder_text(control->widget,
                                                        changed->text_value);
             }
+        } else if (element->type == ZUI_TEXT_INPUT &&
+                   strcmp(changed->name, "contents") == 0) {
+            control->placeholder_active = 0;
+            if (control->is_multiline)
+                state->api.text_buffer_set_text(control->text_buffer,
+                                                changed->text_value, -1);
+            else
+                state->api.entry_set_text(control->widget,
+                                          changed->text_value);
+            update_contents(state, control, changed->text_value);
+        } else if (element->type == ZUI_TEXT_INPUT &&
+                   strcmp(changed->name, "focus") == 0 &&
+                   changed->status_value) {
+            state->api.widget_grab_focus(control->input_widget != NULL
+                ? control->input_widget : control->widget);
         } else if (element->type == ZUI_IMAGE &&
                    strcmp(changed->name, "file") == 0) {
             int width = state->api.widget_get_allocated_width(control->widget);

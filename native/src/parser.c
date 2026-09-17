@@ -622,14 +622,17 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
             consume_name(parser, "the next Function.call target name");
     }
     if (!parser->failed && strcmp(parts[0], "py") != 0 &&
+        strcmp(parts[0], "js") != 0 &&
         part_count != 3 && part_count != 4) {
         fail_at(parser, &parser->current,
                 "Function.call requires File.Room.Function or "
                 "Project.File.Room.Function");
     }
-    if (!parser->failed && strcmp(parts[0], "py") == 0 && part_count < 3) {
+    if (!parser->failed &&
+        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0) &&
+        part_count < 3) {
         fail_at(parser, &parser->current,
-                "Python calls require py:Path.To.File:function");
+                "foreign calls require LANGUAGE:Path.To.File:function");
     }
     if (!parser->failed && match_type(parser, ZTOKEN_LEFT_BRACKET)) {
         if (parser->current.type != ZTOKEN_RIGHT_BRACKET) {
@@ -672,14 +675,15 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
         free(call_outcome);
         return 0;
     }
-    if (strcmp(parts[0], "py") == 0) {
+    if (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0) {
         size_t module_length = 0;
         char *module;
         char *cursor;
         for (index = 1; index + 1 < part_count; index++)
             module_length += strlen(parts[index]) + (index > 1 ? 1u : 0u);
         module = (char *)malloc(module_length + 1);
-        instruction->operand = zsharp_copy_text("@py", 3);
+        instruction->operand = zsharp_copy_text(
+            strcmp(parts[0], "py") == 0 ? "@py" : "@js", 3);
         instruction->call_room = zsharp_copy_text("", 0);
         if (module == NULL || instruction->operand == NULL ||
             instruction->call_room == NULL) {
@@ -1085,7 +1089,8 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
               strcmp(parts[part_count - 1], "icon") == 0 ||
               strcmp(parts[part_count - 1], "text") == 0 ||
               strcmp(parts[part_count - 1], "file") == 0 ||
-              strcmp(parts[part_count - 1], "display") == 0))) {
+              strcmp(parts[part_count - 1], "display") == 0 ||
+              strcmp(parts[part_count - 1], "contents") == 0))) {
             if (part_count == 1) {
                 fail_at(parser, &first_token,
                         "calculated window setters require an explicit element property path");
@@ -2330,13 +2335,14 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     size_t index;
     char *path;
     ZSharpImport *import;
-    int is_python = 0;
+    int foreign_language = 0;
     parts[part_count++] = consume_name(parser, "an imported project name");
-    if (!parser->failed && strcmp(parts[0], "py") == 0 &&
+    if (!parser->failed &&
+        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0) &&
         match_type(parser, ZTOKEN_COLON)) {
-        is_python = 1;
+        foreign_language = strcmp(parts[0], "py") == 0 ? 1 : 2;
         parts[part_count++] = consume_name(parser,
-                                           "the Python project name");
+                                           "the foreign project name");
     }
     while (!parser->failed && match_type(parser, ZTOKEN_DOT)) {
         if (part_count == 64) {
@@ -2357,10 +2363,10 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
         parts[part_count++] =
             consume_name(parser, "a name or '*' in the import path");
     }
-    if (!parser->failed && part_count < (is_python ? 3u : 2u)) {
+    if (!parser->failed && part_count < (foreign_language ? 3u : 2u)) {
         fail_at(parser, &parser->current,
-                is_python
-                    ? "a Python import requires py:Project.File"
+                foreign_language
+                    ? "a foreign import requires LANGUAGE:Project.File"
                     : "an import requires at least Project.File");
     }
     if (!parser->failed &&
@@ -2379,14 +2385,15 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     path = join_path_parts(parser, parts, part_count);
     for (index = 0; index < part_count; index++) free(parts[index]);
     if (path == NULL) return 0;
-    if (is_python) {
+    if (foreign_language) {
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {
             free(path);
             fail_at(parser, &parser->current, "out of memory");
             return 0;
         }
-        sprintf(qualified, "py:%s", path + 3);
+        sprintf(qualified, "%s:%s",
+                foreign_language == 1 ? "py" : "js", path + 3);
         free(path);
         path = qualified;
     }
@@ -2414,13 +2421,14 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     size_t index;
     char *path;
     ZSharpImport *import;
-    int is_python = 0;
+    int foreign_language = 0;
     parts[part_count++] = consume_name(parser, "an imported project name");
-    if (!parser->failed && strcmp(parts[0], "py") == 0 &&
+    if (!parser->failed &&
+        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0) &&
         match_type(parser, ZTOKEN_COLON)) {
-        is_python = 1;
+        foreign_language = strcmp(parts[0], "py") == 0 ? 1 : 2;
         parts[part_count++] = consume_name(parser,
-                                           "the Python project name");
+                                           "the foreign project name");
     }
     while (!parser->failed && match_type(parser, ZTOKEN_DOT)) {
         if (part_count == 64) {
@@ -2441,10 +2449,10 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
         parts[part_count++] =
             consume_name(parser, "a name or '*' in the import path");
     }
-    if (!parser->failed && part_count < (is_python ? 3u : 2u)) {
+    if (!parser->failed && part_count < (foreign_language ? 3u : 2u)) {
         fail_at(parser, &parser->current,
-                is_python
-                    ? "a Python import requires py:Project.File"
+                foreign_language
+                    ? "a foreign import requires LANGUAGE:Project.File"
                     : "an import requires at least Project.File");
     }
     if (!parser->failed &&
@@ -2463,14 +2471,15 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     path = join_path_parts(parser, parts, part_count);
     for (index = 0; index < part_count; index++) free(parts[index]);
     if (path == NULL) return 0;
-    if (is_python) {
+    if (foreign_language) {
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {
             free(path);
             fail_at(parser, &parser->current, "out of memory");
             return 0;
         }
-        sprintf(qualified, "py:%s", path + 3);
+        sprintf(qualified, "%s:%s",
+                foreign_language == 1 ? "py" : "js", path + 3);
         free(path);
         path = qualified;
     }
@@ -2822,6 +2831,9 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
         } else if (strcmp(name, "color") == 0) {
             type = ZUI_PROPERTY_COLOR;
             valid = 1;
+        } else if (strcmp(name, "textAlign") == 0) {
+            type = ZUI_PROPERTY_IDENTIFIER;
+            valid = 1;
         } else if (field_is_measurement(name)) {
             type = ZUI_PROPERTY_MEASUREMENT;
             valid = 1;
@@ -2955,6 +2967,15 @@ static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
         return require_ui_field(parser, element, "title");
     }
     if (element->type == ZUI_TEXT) {
+        ZSharpUIProperty *alignment = find_ui_property(element, "textAlign");
+        if (alignment != NULL &&
+            strcmp(alignment->text_value, "left") != 0 &&
+            strcmp(alignment->text_value, "center") != 0 &&
+            strcmp(alignment->text_value, "right") != 0) {
+            fail_at(parser, &parser->current,
+                    "textAlign must be left, center, or right");
+            return 0;
+        }
         return require_ui_field(parser, element, "content");
     }
     if (element->type == ZUI_BUTTON) {

@@ -130,6 +130,12 @@ static void send_void_id(MacApi *api, MacId object, const char *name,
         object, selector(api, name), value);
 }
 
+static int send_bool_id(MacApi *api, MacId object, const char *name,
+                        MacId value) {
+    return ((int (*)(MacId, MacSel, MacId))api->msg_send)(
+        object, api->sel_register(name), value);
+}
+
 static void send_void_bool(MacApi *api, MacId object, const char *name,
                            int value) {
     ((void (*)(MacId, MacSelector, signed char))api->message)(
@@ -817,6 +823,22 @@ static int set_window_property_ui(void *data, const char *path,
             if (control->is_image_input || responds_to(api, target, setter))
                 send_void_id(api, target, setter,
                              ns_string(api, changed->text_value));
+        } else if (element->type == ZUI_TEXT_INPUT &&
+                   strcmp(changed->name, "contents") == 0) {
+            MacId target = control->input_view == NULL
+                ? control->widget : control->input_view;
+            if (responds_to(api, target, "setString:"))
+                send_void_id(api, target, "setString:",
+                             ns_string(api, changed->text_value));
+            else
+                send_void_id(api, target, "setStringValue:",
+                             ns_string(api, changed->text_value));
+        } else if (element->type == ZUI_TEXT_INPUT &&
+                   strcmp(changed->name, "focus") == 0) {
+            MacId target = control->input_view == NULL
+                ? control->widget : control->input_view;
+            send_bool_id(api, state->window, "makeFirstResponder:",
+                         changed->status_value ? target : NULL);
         } else if (element->type == ZUI_IMAGE &&
                    strcmp(changed->name, "file") == 0) {
             char *image_path = path_join(state->project_root,

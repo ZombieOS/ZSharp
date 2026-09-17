@@ -30,7 +30,7 @@
 #include <unistd.h>
 #endif
 
-static char command_failure[512];
+static char command_failure[4096];
 
 static int make_log_directory(const char *path) {
 #ifdef _WIN32
@@ -226,7 +226,7 @@ static int parse_file(const char *path, ZSharpProgram *program) {
 static int load_settings_or_report(const char *project_root,
                                    ZSharpSettings *settings) {
     ZSharpDiagnostic diagnostic;
-    char error[512] = {0};
+    char error[4096] = {0};
     if (zsharp_settings_load(project_root, settings, &diagnostic, error,
                              sizeof(error))) {
         if (zsharp_project_validate_settings(settings, project_root, error,
@@ -285,7 +285,7 @@ static char *join_project_path(const char *root, const char *relative) {
 
 static int check_command(const char *source_path) {
     ZSharpProgram program;
-    char error[512] = {0};
+    char error[4096] = {0};
     char *project_root;
     ZSharpSettings settings;
     if (!parse_file(source_path, &program)) {
@@ -502,7 +502,7 @@ static int run_source_command(const char *source_path, int argc, char **argv,
     ZSharpLoadedProvider *loaded = NULL;
     ZSharpProviderBinding *bindings = NULL;
     size_t provider_count = 0;
-    char error[512] = {0};
+    char error[4096] = {0};
     char *project_root;
     ZSharpSettings settings;
     int ok;
@@ -572,7 +572,7 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
     ZSharpLoadedProvider *loaded = NULL;
     ZSharpProviderBinding *bindings = NULL;
     size_t provider_count = 0;
-    char error[512] = {0};
+    char error[4096] = {0};
     char *project_root;
     ZSharpSettings settings;
     int ok = zsharp_bytecode_read(bytecode_path, &program, error, sizeof(error));

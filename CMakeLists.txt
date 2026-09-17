@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.1.0.1 LANGUAGES C)
+project(zsharp VERSION 1.1.2.0 LANGUAGES C)
 
 option(ZSHARP_BUILD_EXAMPLES "Build Z# integration examples" OFF)
 option(ZSHARP_BUILD_GAME_RUNTIME
@@ -9,7 +9,19 @@ option(ZSHARP_BUNDLE_MOLTENVK
        "Bundle the official MoltenVK runtime in macOS builds" ON)
 
 include(CTest)
+include(FetchContent)
 find_package(Threads REQUIRED)
+
+set(QJS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(QJS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(QJS_BUILD_LIBC OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    QuickJS
+    URL https://github.com/quickjs-ng/quickjs/archive/refs/tags/v0.16.2.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(QuickJS)
 
 add_executable(zsharp
     native/src/achievement.c
@@ -59,6 +71,7 @@ target_include_directories(zsharp_installer PRIVATE native/src)
 target_compile_features(zsharp PRIVATE c_std_17)
 target_compile_features(zsharp_installer PRIVATE c_std_17)
 target_link_libraries(zsharp PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+target_link_libraries(zsharp PRIVATE qjs)
 
 if(ZSHARP_BUILD_GAME_RUNTIME)
     include(FetchContent)

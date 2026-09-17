@@ -1,0 +1,19 @@
+zsharp = type.script
+
+noticed room Test[] (
+ noticed text History = "":
+ noticed number Counter = 0:
+
+ noticed brain Add[] (
+  text.set.History = History + "A":
+  number.set:Counter = Counter + 1:
+ )
+
+ noticed brain Start[] (
+  Function.call(RoomState:Test:Add):
+  Function.call(RoomState:Test:Add):
+  Function.call(RoomState:Test:Add):
+  Print(History):
+  Print(Counter):
+ )
+)
