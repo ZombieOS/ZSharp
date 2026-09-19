@@ -462,6 +462,23 @@ static WindowControl *find_control(WindowState *state, HWND handle) {
     return NULL;
 }
 
+static WindowControl *find_dropdown_part(WindowState *state, HWND handle) {
+    size_t index;
+    WindowControl *direct = find_control(state, handle);
+    if (direct != NULL) return direct;
+    for (index = 0; index < state->control_count; index++) {
+        COMBOBOXINFO info;
+        WindowControl *control = &state->controls[index];
+        if (control->element->type != ZUI_DROPDOWN) continue;
+        memset(&info, 0, sizeof(info));
+        info.cbSize = sizeof(info);
+        if (GetComboBoxInfo(control->handle, &info) &&
+            (info.hwndItem == handle || info.hwndList == handle))
+            return control;
+    }
+    return NULL;
+}
+
 static void refresh_hover_controls(WindowState *state) {
     POINT cursor;
     HWND hovered;
@@ -767,6 +784,18 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                     update_input_contents(control);
                     update_multiline_scrollbar(control);
                 }
+            } else if (control->element->type == ZUI_DROPDOWN &&
+                       HIWORD(wparam) == CBN_SELCHANGE) {
+                ZSharpUIProperty *selected = find_property(
+                    control->element, "selected");
+                char *value = window_text_utf8(control->handle);
+                if (selected != NULL && value != NULL) {
+                    free(selected->text_value);
+                    selected->text_value = value;
+                    run_callback(state, control->element, "change");
+                } else {
+                    free(value);
+                }
             }
             return 0;
         }
@@ -813,6 +842,21 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
             if (control != NULL && control->background != NULL) {
                 ZSharpUIProperty *background = find_property(
                     control->element, "backgroundColor");
+                SetBkColor(context, parse_color(
+                    background == NULL ? NULL : background->text_value,
+                    RGB(255, 255, 255)));
+                return (LRESULT)control->background;
+            }
+            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        }
+        case WM_CTLCOLORLISTBOX: {
+            WindowControl *control = find_dropdown_part(state, (HWND)lparam);
+            HDC context = (HDC)wparam;
+            if (control != NULL && control->has_text_color)
+                SetTextColor(context, control->text_color);
+            if (control != NULL && control->background != NULL) {
+                ZSharpUIProperty *background = find_property(
+                    control->element, "dropdownColor");
                 SetBkColor(context, parse_color(
                     background == NULL ? NULL : background->text_value,
                     RGB(255, 255, 255)));
@@ -1268,6 +1312,10 @@ static void layout_controls(WindowState *state) {
         int height;
         int x;
         int y;
+        int offset_x;
+        int offset_y;
+        ZSharpUIProperty *anchor_x;
+        ZSharpUIProperty *anchor_y;
         element_default_size(element, &default_width, &default_height);
         width = (int)((double)measurement_pixels(
             find_property(element, "width"), state->scale, default_width) *
@@ -1275,12 +1323,25 @@ static void layout_controls(WindowState *state) {
         height = (int)((double)measurement_pixels(
             find_property(element, "height"), state->scale, default_height) *
             responsive_scale + 0.5);
+        offset_x = (int)((double)measurement_pixels(
+            find_property(element, "locationX"), state->scale, 0) *
+            responsive_scale + 0.5);
+        offset_y = (int)((double)measurement_pixels(
+            find_property(element, "locationY"), state->scale, 0) *
+            responsive_scale + 0.5);
+        anchor_x = find_property(element, "anchorX");
+        anchor_y = find_property(element, "anchorY");
         x = (int)(((double)state->layout_width / 2.0 +
             (double)measurement_pixels(find_property(element, "locationX"),
                                        state->scale, 0) -
             (double)measurement_pixels(find_property(element, "width"),
                                        state->scale, default_width) / 2.0) *
             responsive_scale + 0.5);
+        if (anchor_x != NULL && strcmp(anchor_x->text_value, "left") == 0)
+            x = offset_x;
+        else if (anchor_x != NULL &&
+                 strcmp(anchor_x->text_value, "right") == 0)
+            x = client_width - width - offset_x;
         if (element->type != ZUI_TEXT) {
             if (width < 32) width = 32;
             if (height < 16) height = 16;
@@ -1298,6 +1359,11 @@ static void layout_controls(WindowState *state) {
             (double)measurement_pixels(find_property(element, "height"),
                                        state->scale, default_height) / 2.0) *
             responsive_scale + 0.5);
+        if (anchor_y != NULL && strcmp(anchor_y->text_value, "top") == 0)
+            y = offset_y;
+        else if (anchor_y != NULL &&
+                 strcmp(anchor_y->text_value, "bottom") == 0)
+            y = client_height - height - offset_y;
         if (y + height > content_bottom) content_bottom = y + height;
         MoveWindow(control->handle, x, y - state->scroll_y,
                    width, height, TRUE);
@@ -1378,6 +1444,13 @@ static int create_controls(WindowState *state, int client_width,
             style |= SS_BITMAP | SS_CENTERIMAGE;
             if (find_property(element, "left") != NULL)
                 style |= SS_NOTIFY;
+        } else if (element->type == ZUI_DROPDOWN) {
+            ZSharpUIProperty *selected = find_property(element, "selected");
+            class_name = "COMBOBOX";
+            display_text = selected == NULL ? "" : selected->text_value;
+            color_property = find_property(element, "textColor");
+            style |= CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL |
+                     WS_TABSTOP;
         } else {
             ZSharpUIProperty *type = find_property(element, "type");
             ZSharpUIProperty *display = find_property(element, "display");
@@ -1432,7 +1505,8 @@ static int create_controls(WindowState *state, int client_width,
         control = &state->controls[control_index];
         control->element = element;
         control->handle = CreateWindowExA(
-            element->type == ZUI_TEXT_INPUT ? WS_EX_CLIENTEDGE :
+            (element->type == ZUI_TEXT_INPUT ||
+             element->type == ZUI_DROPDOWN) ? WS_EX_CLIENTEDGE :
             element->type == ZUI_TEXT ? WS_EX_TRANSPARENT : 0,
             class_name, display_text, style, x, y, width, height,
             state->window, (HMENU)(INT_PTR)(1000 + control_index),
@@ -1450,7 +1524,8 @@ static int create_controls(WindowState *state, int client_width,
         }
         {
             ZSharpUIProperty *control_background =
-                find_property(element, "backgroundColor");
+                find_property(element, element->type == ZUI_DROPDOWN
+                    ? "dropdownColor" : "backgroundColor");
             if (control_background != NULL &&
                 control_background->text_value != NULL) {
                 control->background = CreateSolidBrush(parse_color(
@@ -1473,7 +1548,31 @@ static int create_controls(WindowState *state, int client_width,
                                              &control->owns_font);
         SendMessageA(control->handle, WM_SETFONT,
                      (WPARAM)control->font, TRUE);
-        if (element->type == ZUI_TEXT_INPUT) {
+        if (element->type == ZUI_DROPDOWN) {
+            ZSharpUIProperty *options = find_property(element, "options");
+            ZSharpUIProperty *selected = find_property(element, "selected");
+            size_t option_index;
+            for (option_index = 0; options != NULL &&
+                 option_index < options->item_count; option_index++) {
+                WCHAR *item = utf8_to_wide(options->items[option_index]);
+                if (item != NULL) {
+                    SendMessageW(control->handle, CB_ADDSTRING, 0,
+                                 (LPARAM)item);
+                    free(item);
+                }
+            }
+            if (selected != NULL && selected->text_value != NULL) {
+                WCHAR *item = utf8_to_wide(selected->text_value);
+                if (item != NULL) {
+                    LRESULT found = SendMessageW(control->handle,
+                        CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)item);
+                    if (found != CB_ERR)
+                        SendMessageA(control->handle, CB_SETCURSEL,
+                                     (WPARAM)found, 0);
+                    free(item);
+                }
+            }
+        } else if (element->type == ZUI_TEXT_INPUT) {
             ZSharpUIProperty *maximum = find_property(element, "maxLength");
             if (maximum != NULL && maximum->text_value != NULL) {
                 unsigned long limit = strtoul(maximum->text_value, NULL, 10);
@@ -1705,12 +1804,29 @@ static int set_window_property(void *data, const char *path,
             set_window_text_utf8(control->handle, property->text_value);
             update_input_contents(control);
             update_multiline_scrollbar(control);
+        } else if (element->type == ZUI_DROPDOWN &&
+                   strcmp(property->name, "selected") == 0) {
+            WCHAR *item = utf8_to_wide(property->text_value);
+            LRESULT found = item == NULL ? CB_ERR : SendMessageW(
+                control->handle, CB_FINDSTRINGEXACT, (WPARAM)-1,
+                (LPARAM)item);
+            free(item);
+            if (found == CB_ERR) {
+                snprintf(error, error_size,
+                         "dropdown '%s' has no option named '%s'",
+                         element->name, property->text_value);
+                return 0;
+            }
+            SendMessageA(control->handle, CB_SETCURSEL, (WPARAM)found, 0);
         } else if (strcmp(property->name, "focus") == 0) {
             if (property->status_value) {
                 SetFocus(control->handle);
             } else if (GetFocus() == control->handle) {
                 SetFocus(state->window);
             }
+        } else if (element->type == ZUI_TEXT &&
+                   strcmp(property->name, "textAlign") == 0) {
+            redraw_control = 1;
         } else if (strcmp(property->name, "display") == 0) {
             if (control->is_image_input) {
                 SetWindowTextA(control->handle, property->text_value);
@@ -1741,6 +1857,11 @@ static int set_window_property(void *data, const char *path,
                 &replacement, RGB(240, 240, 240));
             control->has_button_color = 1;
             redraw_control = 1;
+        } else if (strcmp(property->name, "dropdownColor") == 0) {
+            if (control->background != NULL) DeleteObject(control->background);
+            control->background = CreateSolidBrush(parse_color(
+                property->text_value, RGB(255, 255, 255)));
+            redraw_control = 1;
         } else if (strcmp(property->name, "file") == 0) {
             int width;
             int height;
@@ -1762,7 +1883,9 @@ static int set_window_property(void *data, const char *path,
             SendMessageA(control->handle, STM_SETIMAGE, IMAGE_BITMAP,
                          (LPARAM)control->bitmap);
         }
-        if (property->type == ZUI_PROPERTY_MEASUREMENT)
+        if (property->type == ZUI_PROPERTY_MEASUREMENT ||
+            strcmp(property->name, "anchorX") == 0 ||
+            strcmp(property->name, "anchorY") == 0)
             layout_controls(state);
     }
     if (redraw_window) {
@@ -1840,6 +1963,19 @@ static int get_window_property_ui(WindowState *state, const char *path,
         snprintf(error, error_size, "textInput '%s' is not active",
                  element->name);
         return 0;
+    }
+    if (element->type == ZUI_DROPDOWN) {
+        contents = find_property(element, "selected");
+        if (contents == NULL || contents->text_value == NULL) {
+            snprintf(error, error_size, "dropdown '%s' has no selection",
+                     element->name);
+            return 0;
+        }
+        *value_type = ZWINDOW_READ_TEXT;
+        *text_value = zsharp_copy_text(contents->text_value,
+                                       strlen(contents->text_value));
+        if (*text_value == NULL) snprintf(error, error_size, "out of memory");
+        return *text_value != NULL;
     }
     update_input_contents(control);
     contents = find_property(element, "contents");

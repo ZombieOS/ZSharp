@@ -73,6 +73,9 @@ typedef struct ZSharpGameObject {
     float width;
     float height;
     float depth;
+    int width_explicit;
+    int height_explicit;
+    int depth_explicit;
     float rotation;
     float scale_x;
     float scale_y;

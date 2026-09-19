@@ -28,12 +28,23 @@ noticed room Actions[] (
   Main.Header1.content.set: "Updated text":
   Main.Header1.content.set: Response:
   Main.Header1.content.set: ("L" + CursorLine + ":C12"):
+  Main.Header1.content.set: "ZOSAI-1 • Astroid\n\nYou:\nA long Unicode message wraps inside the available width instead of escaping the window: café 日本語 안녕하세요 😀 ❤️\n\nZOSAI-1 - Astroid:\nAI model not ready yet.":
+  Main.Header1.textAlign.set: left:
   Main.Header1.color.set: #123456:
   Main.PlayButton.text.set: "Updated button":
   Main.PlayButton.buttonColor.set: #654321:
   Main.PlayButton.textColor.set: #FFFFFF:
   Main.PlayButton.locationX.set: -20zu:
   Main.NameInput.display.set: "Updated placeholder":
+  Main.NameInput.contents.set: "":
+  Main.NameInput.focus.set: alive:
+  Main.NameInput.focus.set: dead:
   delay(0.001s):
+ )
+
+ noticed brain ModelChanged[] (
+  text Model = Main.ModelSelector.selected:
+  Print(Model):
+  Main.ModelSelector.selected.set: "Test Model":
  )
 )

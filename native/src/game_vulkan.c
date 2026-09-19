@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "game_vulkan.h"
+#include "game_projection.h"
 
 #ifdef ZSHARP_HAS_GAME_RUNTIME
 
@@ -147,56 +148,16 @@ static int render_circle(SDL_Renderer *renderer,
                               indices, SEGMENTS * 3);
 }
 
-static int project_3d(const ZSharpGameRenderFrame *frame, float x, float y,
-                      float z, float *screen_out_x, float *screen_out_y) {
-    float depth = frame->camera_z - z;
-    float fov = frame->camera_fov <= 1.0f ? 70.0f : frame->camera_fov;
-    float focal = (ZGAME_LOGICAL_WIDTH * 0.5f) /
-                  tanf(fov * 0.5f * ZGAME_PI / 180.0f);
-    if (depth <= 0.05f) return 0;
-    *screen_out_x = ZGAME_LOGICAL_WIDTH * 0.5f +
-                    (x - frame->camera_x) * focal / depth;
-    *screen_out_y = ZGAME_LOGICAL_HEIGHT * 0.5f -
-                    (y - frame->camera_y) * focal / depth;
-    return 1;
-}
-
 static int render_cube(SDL_Renderer *renderer,
                        const ZSharpGameRenderFrame *frame,
                        const ZSharpGameRenderObject *object) {
-    float half_x = object->width * object->scale_x * 0.5f;
-    float half_y = object->height * object->scale_y * 0.5f;
-    float half_z = object->depth * object->scale_z * 0.5f;
-    float points[8][2];
-    static const int edges[12][2] = {
-        {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
-        {0,4},{1,5},{2,6},{3,7}
-    };
-    int index;
-    float coordinates[8][3] = {
-        {-half_x,-half_y,-half_z},{ half_x,-half_y,-half_z},
-        { half_x, half_y,-half_z},{-half_x, half_y,-half_z},
-        {-half_x,-half_y, half_z},{ half_x,-half_y, half_z},
-        { half_x, half_y, half_z},{-half_x, half_y, half_z}
-    };
-    float radians = object->rotation * ZGAME_PI / 180.0f;
-    for (index = 0; index < 8; index++) {
-        float x = coordinates[index][0];
-        float z = coordinates[index][2];
-        float rotated_x = x * cosf(radians) - z * sinf(radians);
-        float rotated_z = x * sinf(radians) + z * cosf(radians);
-        if (!project_3d(frame, object->x + rotated_x,
-                       object->y + coordinates[index][1],
-                       object->z + rotated_z,
-                       &points[index][0], &points[index][1])) return 1;
-    }
+    float edges[12][4];
+    size_t count = zsharp_game_project_cube(frame, object, edges);
+    size_t index;
     set_color(renderer, object->color);
-    for (index = 0; index < 12; index++)
-        if (!SDL_RenderLine(renderer,
-                            points[edges[index][0]][0],
-                            points[edges[index][0]][1],
-                            points[edges[index][1]][0],
-                            points[edges[index][1]][1])) return 0;
+    for (index = 0; index < count; index++)
+        if (!SDL_RenderLine(renderer, edges[index][0], edges[index][1],
+                            edges[index][2], edges[index][3])) return 0;
     return 1;
 }
 

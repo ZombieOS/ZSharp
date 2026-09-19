@@ -3,6 +3,7 @@ if(NOT DEFINED ZSHARP_BIN OR NOT DEFINED PROJECT_ROOT OR
    NOT DEFINED TEST_SOURCE_PACKAGE OR NOT DEFINED TEST_GAME_PACKAGE OR
    NOT DEFINED TEST_GAME_SOURCE_PACKAGE OR
    NOT DEFINED TEST_PACKAGE_PROJECT OR NOT DEFINED TEST_GAME_PROJECT OR
+   NOT DEFINED TEST_3D_GAME_PROJECT OR
    NOT DEFINED TEST_PACKAGE_CACHE OR NOT DEFINED TEST_PROJECT_REGISTRY OR
    NOT DEFINED TEST_SHORTCUT_CACHE OR NOT DEFINED TEST_DESKTOP)
     message(FATAL_ERROR "The Z# test paths were not supplied")
@@ -37,6 +38,9 @@ file(APPEND "${ICON_INVALID_PROJECT}/project.zsettings"
      "\nIcon: \"assets/missing.png\":\n")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${TEST_GAME_PROJECT}")
+file(REMOVE_RECURSE "${TEST_3D_GAME_PROJECT}")
+file(COPY "${PROJECT_ROOT}/tests/game_3d/"
+     DESTINATION "${TEST_3D_GAME_PROJECT}")
 
 function(expect_success label working_dir)
     execute_process(
@@ -71,6 +75,9 @@ function(expect_failure label expected working_dir)
     endif()
 endfunction()
 
+expect_success("native 3D game packaging" "${PROJECT_ROOT}"
+               package game "${TEST_3D_GAME_PROJECT}" Native3DRegression)
+
 execute_process(
     COMMAND "${ZSHARP_BIN}" run Main.zsharp
     WORKING_DIRECTORY "${PROJECT_ROOT}/tests/python_project"
@@ -97,11 +104,46 @@ execute_process(
 if(NOT javascript_result EQUAL 0 OR
    NOT javascript_output MATCHES "Hello from JavaScript, Tester!" OR
    NOT javascript_output MATCHES "42" OR
-   NOT javascript_output MATCHES "JavaScript status alive")
+   NOT javascript_output MATCHES "JavaScript status alive" OR
+   NOT javascript_output MATCHES "JavaScript Unicode round trip alive" OR
+   NOT javascript_output MATCHES "the word export stays intact" OR
+   NOT javascript_output MATCHES "Async bridge" OR
+   NOT javascript_output MATCHES "Default export works" OR
+   NOT javascript_output MATCHES "\\[internal helper\\]" OR
+   NOT javascript_output MATCHES "日本語" OR
+   NOT javascript_output MATCHES "42" OR
+   NOT javascript_output MATCHES "null")
     message(FATAL_ERROR
         "JavaScript interoperability test failed (${javascript_result})\n"
         "stdout: ${javascript_output}\nstderr: ${javascript_error}")
 endif()
+
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run Failure.zsharp
+    WORKING_DIRECTORY "${PROJECT_ROOT}/tests/javascript_project"
+    RESULT_VARIABLE javascript_failure_result
+    OUTPUT_VARIABLE javascript_failure_output
+    ERROR_VARIABLE javascript_failure_error
+)
+if(javascript_failure_result EQUAL 0 OR
+   NOT javascript_failure_error MATCHES "intentional JavaScript regression failure" OR
+   NOT javascript_failure_error MATCHES "Failure.Failure.Start")
+    message(FATAL_ERROR
+        "JavaScript diagnostic test failed (${javascript_failure_result})\n"
+        "stdout: ${javascript_failure_output}\nstderr: ${javascript_failure_error}")
+endif()
+
+set(old_javascript_project "${CMAKE_CURRENT_BINARY_DIR}/old-javascript-project")
+file(REMOVE_RECURSE "${old_javascript_project}")
+file(COPY "${PROJECT_ROOT}/tests/javascript_project/"
+     DESTINATION "${old_javascript_project}")
+file(READ "${old_javascript_project}/project.zsettings" old_js_settings)
+string(REPLACE "ZSharp: [1.1.1.0]:" "ZSharp: [1.1.0.0]:"
+       old_js_settings "${old_js_settings}")
+file(WRITE "${old_javascript_project}/project.zsettings" "${old_js_settings}")
+expect_failure("JavaScript version gate"
+               "JavaScript imports require ZSharp"
+               "${PROJECT_ROOT}" check "${old_javascript_project}/Main.zsharp")
 
 execute_process(
     COMMAND "${ZSHARP_BIN}" run RoomState.zsharp
@@ -355,14 +397,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.2.1]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.1.1]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.1.2.1!"
+               "Update to at least 1.1.1.1!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

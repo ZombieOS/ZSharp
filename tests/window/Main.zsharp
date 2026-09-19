@@ -6,6 +6,7 @@ noticed Window Main[] (
  import ZSharp.Window.Button():
  import ZSharp.Window.Image():
  import ZSharp.Window.TextInput():
+ import ZSharp.Window.Dropdown():
  import window_test.Handlers():
  import window_test.Mutations():
 
@@ -68,5 +69,18 @@ noticed Window Main[] (
   width: 15:
   height: 10:
   contents: []:
+ )
+
+ noticed dropdown ModelSelector[] (
+  options: ["ZOSAI-1 - Astroid", "Test Model"]:
+  selected: "ZOSAI-1 - Astroid":
+  textColor: #FFFFFF:
+  dropdownColor: #181822:
+  fontSize: 16px:
+  width: 180px:
+  height: 32px:
+  locationX: 0px:
+  locationY: -50px:
+  Change[Mutations:Actions:ModelChanged]:
  )
 )

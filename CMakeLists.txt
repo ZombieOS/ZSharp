@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.1.2.0 LANGUAGES C)
+project(zsharp VERSION 1.1.1.0 LANGUAGES C)
 
 option(ZSHARP_BUILD_EXAMPLES "Build Z# integration examples" OFF)
 option(ZSHARP_BUILD_GAME_RUNTIME
@@ -32,6 +32,7 @@ add_executable(zsharp
     native/src/hub.c
     native/src/game_runtime.c
     native/src/game_model.c
+    native/src/game_projection.c
     native/src/game_vulkan.c
     native/src/lexer.c
     native/src/main.c
@@ -183,6 +184,15 @@ include(CPack)
 
 if(BUILD_TESTING)
     add_executable(zsharp_test_zip tests/create-stored-zip.c)
+    add_executable(zsharp_test_game_projection
+        tests/game-projection-tests.c
+        native/src/game_projection.c
+    )
+    target_include_directories(zsharp_test_game_projection PRIVATE native/src)
+    target_compile_features(zsharp_test_game_projection PRIVATE c_std_17)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_game_projection PRIVATE m)
+    endif()
     target_compile_features(zsharp_test_zip PRIVATE c_std_17)
     if(MSVC)
         target_compile_options(zsharp_test_zip PRIVATE /W4 /permissive-)
@@ -197,6 +207,7 @@ if(BUILD_TESTING)
             "-DTEST_OUTPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/window/Main.zbc"
             "-DTEST_PACKAGE_PROJECT=${CMAKE_CURRENT_BINARY_DIR}/package-project"
             "-DTEST_GAME_PROJECT=${CMAKE_CURRENT_BINARY_DIR}/game-project"
+            "-DTEST_3D_GAME_PROJECT=${CMAKE_CURRENT_BINARY_DIR}/game-3d-project"
             "-DTEST_PACKAGE=${CMAKE_CURRENT_BINARY_DIR}/package-project/Packages/PackageTest.zapp"
             "-DTEST_SOURCE_PACKAGE=${CMAKE_CURRENT_BINARY_DIR}/package-project/Packages/PackageTest-unbytecoded.zapp"
             "-DTEST_GAME_PACKAGE=${CMAKE_CURRENT_BINARY_DIR}/game-project/Packages/PackageTest.zgame"
@@ -207,6 +218,8 @@ if(BUILD_TESTING)
             "-DTEST_DESKTOP=${CMAKE_CURRENT_BINARY_DIR}/test-desktop"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-syntax-tests.cmake"
     )
+    add_test(NAME zsharp_game_projection
+             COMMAND zsharp_test_game_projection)
     if(WIN32)
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
             set(ZSHARP_TEST_PLATFORM "windows-aarch64")

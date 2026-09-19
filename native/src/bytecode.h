@@ -99,7 +99,8 @@ typedef enum ZSharpUIElementType {
     ZUI_TEXT = 2,
     ZUI_BUTTON = 3,
     ZUI_IMAGE = 4,
-    ZUI_TEXT_INPUT = 5
+    ZUI_TEXT_INPUT = 5,
+    ZUI_DROPDOWN = 6
 } ZSharpUIElementType;
 
 typedef enum ZSharpUIPropertyType {

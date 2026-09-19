@@ -1,0 +1,16 @@
+zsharp = type.object
+
+noticed object DynamicCube[] (
+ shape: cube:
+ color: #00F0FF:
+ body: dynamic:
+ velocityZ: -1:
+ attributes[JSON] (
+  [
+   {
+    "id": "COLLIDER3D",
+    "active": true
+   }
+  ]
+ )
+)

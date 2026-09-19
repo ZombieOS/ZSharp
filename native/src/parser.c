@@ -1090,7 +1090,8 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
               strcmp(parts[part_count - 1], "text") == 0 ||
               strcmp(parts[part_count - 1], "file") == 0 ||
               strcmp(parts[part_count - 1], "display") == 0 ||
-              strcmp(parts[part_count - 1], "contents") == 0))) {
+              strcmp(parts[part_count - 1], "contents") == 0 ||
+              strcmp(parts[part_count - 1], "selected") == 0))) {
             if (part_count == 1) {
                 fail_at(parser, &first_token,
                         "calculated window setters require an explicit element property path");
@@ -2666,6 +2667,25 @@ static int parse_ui_text_array(Parser *parser,
                         "']' after the character list");
 }
 
+static int parse_ui_option_array(Parser *parser,
+                                 ZSharpUIProperty *property) {
+    if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
+                      "'[' before the option list")) return 0;
+    if (parser->current.type != ZTOKEN_RIGHT_BRACKET) {
+        do {
+            ZSharpToken token = parser->current;
+            char *item;
+            if (!consume_type(parser, ZTOKEN_STRING,
+                              "a quoted dropdown option")) return 0;
+            item = decode_text(parser, &token);
+            if (item == NULL || !append_ui_item(parser, property, item))
+                return 0;
+        } while (match_type(parser, ZTOKEN_COMMA));
+    }
+    return consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                        "']' after the option list");
+}
+
 static int parse_ui_empty_array(Parser *parser) {
     if (!consume_type(parser, ZTOKEN_LEFT_BRACKET,
                       "'[' before the empty runtime value")) return 0;
@@ -2802,6 +2822,13 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
     if (element->type == ZUI_BUTTON && match_word(parser, "Click")) {
         return parse_click_field(parser, element);
     }
+    if (element->type == ZUI_DROPDOWN && match_word(parser, "Change")) {
+        ZSharpUIProperty *change = add_ui_property(
+            parser, element, "change", ZUI_PROPERTY_CALLBACK);
+        return change != NULL && parse_callback_path(parser, change) &&
+               consume_type(parser, ZTOKEN_COLON,
+                            "':' after the change target");
+    }
     name = consume_name(parser, "a UI field name");
     if (name == NULL) return 0;
     if (strcmp(name, "heigh") == 0) {
@@ -2810,7 +2837,11 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
         free(name);
         return 0;
     }
-    if (element->type == ZUI_DESIGN) {
+    if (element->type != ZUI_DESIGN &&
+        (strcmp(name, "anchorX") == 0 || strcmp(name, "anchorY") == 0)) {
+        type = ZUI_PROPERTY_IDENTIFIER;
+        valid = 1;
+    } else if (element->type == ZUI_DESIGN) {
         if (strcmp(name, "title") == 0 || strcmp(name, "icon") == 0) {
             type = ZUI_PROPERTY_TEXT;
             valid = 1;
@@ -2889,13 +2920,29 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
             type = ZUI_PROPERTY_MEASUREMENT;
             valid = 1;
         }
+    } else if (element->type == ZUI_DROPDOWN) {
+        if (strcmp(name, "options") == 0) {
+            type = ZUI_PROPERTY_TEXT_ARRAY;
+            valid = 1;
+        } else if (strcmp(name, "selected") == 0) {
+            type = ZUI_PROPERTY_TEXT;
+            valid = 1;
+        } else if (strcmp(name, "textColor") == 0 ||
+                   strcmp(name, "dropdownColor") == 0) {
+            type = ZUI_PROPERTY_COLOR;
+            valid = 1;
+        } else if (field_is_measurement(name)) {
+            type = ZUI_PROPERTY_MEASUREMENT;
+            valid = 1;
+        }
     }
     if (!valid) {
         fail_at(parser, &parser->current, "unknown %s UI field '%s'",
                 element->type == ZUI_DESIGN ? "design" :
                 element->type == ZUI_TEXT ? "text" :
                 element->type == ZUI_BUTTON ? "button" :
-                element->type == ZUI_IMAGE ? "image" : "textInput",
+                element->type == ZUI_IMAGE ? "image" :
+                element->type == ZUI_DROPDOWN ? "dropdown" : "textInput",
                 name);
         free(name);
         return 0;
@@ -2920,7 +2967,9 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
         (type == ZUI_PROPERTY_IDENTIFIER_ARRAY &&
          !parse_ui_identifier_array(parser, property)) ||
         (type == ZUI_PROPERTY_TEXT_ARRAY &&
-         !parse_ui_text_array(parser, property)) ||
+         !(element->type == ZUI_DROPDOWN
+               ? parse_ui_option_array(parser, property)
+               : parse_ui_text_array(parser, property))) ||
         (type == ZUI_PROPERTY_EMPTY_ARRAY && !parse_ui_empty_array(parser))) {
         return 0;
     }
@@ -2953,7 +3002,8 @@ static int require_ui_field(Parser *parser, ZSharpUIElement *element,
             element->type == ZUI_DESIGN ? "design" :
             element->type == ZUI_TEXT ? "text" :
             element->type == ZUI_BUTTON ? "button" :
-            element->type == ZUI_IMAGE ? "image" : "textInput",
+            element->type == ZUI_IMAGE ? "image" :
+            element->type == ZUI_DROPDOWN ? "dropdown" : "textInput",
             element->name, name);
     return 0;
 }
@@ -2963,6 +3013,24 @@ static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
     ZSharpUIProperty *supported;
     ZSharpUIProperty *multiline;
     ZSharpUIProperty *wrap;
+    if (element->type != ZUI_DESIGN) {
+        ZSharpUIProperty *anchor_x = find_ui_property(element, "anchorX");
+        ZSharpUIProperty *anchor_y = find_ui_property(element, "anchorY");
+        if (anchor_x != NULL && strcmp(anchor_x->text_value, "left") != 0 &&
+            strcmp(anchor_x->text_value, "center") != 0 &&
+            strcmp(anchor_x->text_value, "right") != 0) {
+            fail_at(parser, &parser->current,
+                    "anchorX must be left, center, or right");
+            return 0;
+        }
+        if (anchor_y != NULL && strcmp(anchor_y->text_value, "top") != 0 &&
+            strcmp(anchor_y->text_value, "center") != 0 &&
+            strcmp(anchor_y->text_value, "bottom") != 0) {
+            fail_at(parser, &parser->current,
+                    "anchorY must be top, center, or bottom");
+            return 0;
+        }
+    }
     if (element->type == ZUI_DESIGN) {
         return require_ui_field(parser, element, "title");
     }
@@ -2987,6 +3055,30 @@ static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
         return require_ui_field(parser, element, "file") &&
                require_ui_field(parser, element, "width") &&
                require_ui_field(parser, element, "height");
+    }
+    if (element->type == ZUI_DROPDOWN) {
+        ZSharpUIProperty *options = find_ui_property(element, "options");
+        ZSharpUIProperty *selected = find_ui_property(element, "selected");
+        size_t index;
+        int found = 0;
+        if (!require_ui_field(parser, element, "options") ||
+            !require_ui_field(parser, element, "selected") ||
+            !require_ui_field(parser, element, "width") ||
+            !require_ui_field(parser, element, "height")) return 0;
+        if (options->item_count == 0) {
+            fail_at(parser, &parser->current,
+                    "dropdown options must contain at least one item");
+            return 0;
+        }
+        for (index = 0; index < options->item_count; index++)
+            if (strcmp(options->items[index], selected->text_value) == 0)
+                found = 1;
+        if (!found) {
+            fail_at(parser, &parser->current,
+                    "dropdown selected value must appear in options");
+            return 0;
+        }
+        return 1;
     }
     if (!require_ui_field(parser, element, "display") ||
         !require_ui_field(parser, element, "type") ||
@@ -3119,9 +3211,12 @@ static int parse_ui_element(Parser *parser, ZSharpWindow *window) {
         type = ZUI_IMAGE;
     } else if (match_word(parser, "textInput")) {
         type = ZUI_TEXT_INPUT;
+    } else if (match_word(parser, "dropdown") ||
+               match_word(parser, "select")) {
+        type = ZUI_DROPDOWN;
     } else {
         fail_at(parser, &parser->current,
-                "expected design, text, button, image, or textInput");
+                "expected design, text, button, image, textInput, or dropdown");
         return 0;
     }
     element = zsharp_window_add_element(window);

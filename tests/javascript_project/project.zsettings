@@ -2,10 +2,10 @@ zsharp = type.settings
 
 Project: "JavaScript Interop Test":
 PID: "javascript_test":
-Version: [1.1.2.0]:
+Version: [1.1.1.0]:
 Authors: ["ZombieOS"]:
 Description: "JavaScript interoperability regression test":
-ZSharp: [1.1.2.0]:
+ZSharp: [1.1.1.0]:
 
 Dependencies (
 ):

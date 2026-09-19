@@ -249,7 +249,10 @@ Supported shapes are `rectangle`, `circle`, `triangle`, `sprite`, `cube`,
 and `text`. `text` objects use a quoted `text:` field. The first sprite loader
 accepts BMP assets through `asset:`; primitive shapes need no external asset.
 `cube` is the initial 3D primitive and uses `positionZ`, `depth`, `scaleZ`, and
-the active scene camera.
+the active scene camera. A cube whose width, height, or depth is omitted uses
+`1` world unit for that dimension; 2D shapes retain their existing 64-pixel
+defaults. The camera looks toward negative Z. Cubes crossing the camera's near
+plane are clipped rather than discarded.
 
 Bodies can be `static`, `dynamic`, or `kinematic`. Dynamic bodies receive
 gravity and collision response. Kinematic bodies use velocity but do not
@@ -1630,6 +1633,39 @@ and a cursor at line 1, column 1. Line breaks count as characters, with a
 Windows CRLF pair counted as one line-break character. The four numeric fields
 are read-only and apply to text inputs; image inputs expose `contents` only.
 
+### Dropdown/select input
+
+Use a native dropdown when one value must be selected from a fixed list:
+
+```zsharp
+noticed dropdown ModelSelector[] (
+ options: ["ZOSAI-1 - Astroid", "Test Model"]:
+ selected: "ZOSAI-1 - Astroid":
+ textColor: #FFFFFF:
+ dropdownColor: #181822:
+ fontSize: 16px:
+ width: 220px:
+ height: 32px:
+ locationX: 16px:
+ locationY: 16px:
+ anchorX: right:
+ anchorY: top:
+ Change[Handlers:Models:Changed]:
+)
+```
+
+`dropdown` and `select` name the same element. `options` contains quoted
+display values, and `selected` must equal one of them. Read or change the live
+value with `Startup.ModelSelector.selected` and
+`Startup.ModelSelector.selected.set: "Test Model":`. `Change` is optional and
+uses the same imported `File:Room:Function` callback form as button clicks.
+
+Every non-design element may use `anchorX: left:`, `center`, or `right` and
+`anchorY: top:`, `center`, or `bottom`. Center is the compatibility default.
+With an edge anchor, `locationX`/`locationY` becomes the inward distance from
+that edge, allowing a top header, growing middle area, and bottom input bar to
+stay placed when a scalable window is resized.
+
 Text inputs are single-line by default. Add `multiline: alive:` to allow line
 breaks. A multiline input wraps long lines by default; use `wrap: dead:` when
 long lines should remain on one line and scroll horizontally instead. `wrap`
@@ -2073,7 +2109,7 @@ For the current release plan:
 When later generations replace older syntax, the compiler may emit migration
 warnings that name both the old form and its recommended replacement. Z1 does
 not invent warnings for generations that do not exist yet.
-# Z# 1.1.2.0 additions
+# Z# 1.1.1.0 additions
 
 ## JavaScript interoperability
 
@@ -2094,7 +2130,17 @@ export function greeting(name) {
 ```
 
 Arguments and return values support text, number, status/boolean, and null.
-JavaScript exceptions retain their message and stack in Z# runtime reports.
+Homogeneous `text[]` and `number[]` values cross the bridge as JavaScript
+arrays, and JavaScript may return arrays containing only strings or only
+numbers. Empty JavaScript arrays become empty `text[]` values. Mixed arrays,
+objects, and arrays of booleans are rejected because Z# does not have matching
+general-purpose value types.
+Named default exports and immediately-resolving `async` functions are also
+supported. JavaScript exceptions retain their message and stack in Z# runtime
+reports. Each call has a 64 MiB heap limit, a 1 MiB stack limit, and a five
+second execution guard; promises that require an external browser/Node event
+loop fail with a clear diagnostic because ZVM intentionally embeds no DOM or
+Node APIs.
 
 ## Persistent room fields
 
@@ -2115,6 +2161,11 @@ returned to an input:
 Startup.Prompt.contents.set: "":
 Startup.Prompt.focus.set: alive:
 ```
+
+Set `focus` to `dead` to release focus from that input. Multiline inputs treat
+Enter as a newline. Z# 1.1.1.0 does not yet expose a portable Shift+Enter
+modifier callback, so applications should use a Send button rather than
+overriding Enter with application-specific behavior.
 
 Window text and input use UTF-8 end-to-end, including non-Latin scripts and
 emoji. Native runtime failures now include the source, room, brain, and Z# call

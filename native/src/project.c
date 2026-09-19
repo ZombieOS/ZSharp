@@ -945,6 +945,7 @@ static int validate_file_object_member(
 
 static int is_window_input_read_name(const char *name) {
     return strcmp(name, "contents") == 0 ||
+           strcmp(name, "selected") == 0 ||
            strcmp(name, "totalcharacters") == 0 ||
            strcmp(name, "currentcolumn") == 0 ||
            strcmp(name, "totallines") == 0 ||
@@ -1000,8 +1001,14 @@ static int validate_window_input_read(
          element_index++) {
         const ZSharpUIElement *element = &target.window.elements[element_index];
         if (strcmp(element->name, element_name) != 0) continue;
-        if (element->type != ZUI_TEXT_INPUT) {
-            snprintf(error, error_size, "UI element '%s' is not a textInput",
+        if (element->type == ZUI_DROPDOWN &&
+            strcmp(field_name, "selected") == 0) {
+            zsharp_program_free(&target);
+            free(source_path);
+            return 1;
+        } else if (element->type != ZUI_TEXT_INPUT) {
+            snprintf(error, error_size,
+                     "UI element '%s' is not a textInput or dropdown",
                      element_name);
         } else if (strcmp(field_name, "contents") != 0) {
             const ZSharpUIProperty *type = NULL;
@@ -1033,7 +1040,8 @@ static int validate_window_input_read(
         free(source_path);
         return 0;
     }
-    snprintf(error, error_size, "window has no textInput named '%s'",
+    snprintf(error, error_size,
+             "window has no textInput or dropdown named '%s'",
              element_name);
     zsharp_program_free(&target);
     free(source_path);
@@ -1286,7 +1294,7 @@ static int validate_instruction(const ZSharpProgram *program,
             strcmp(instruction->operand, "@js") == 0) {
             return validate_foreign_call(program, settings, room, instruction,
                                          project_root, "js", "JavaScript",
-                                         "js", 2, error, error_size);
+                                         "js", 1, error, error_size);
         }
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
             return require_project_import(room, settings, instruction->operand,
@@ -1646,12 +1654,19 @@ static int validate_window_program(const ZSharpProgram *program,
             element->type == ZUI_TEXT ? "ZSharp.Window.Text" :
             element->type == ZUI_BUTTON ? "ZSharp.Window.Button" :
             element->type == ZUI_IMAGE ? "ZSharp.Window.Image" :
+            element->type == ZUI_DROPDOWN ? "ZSharp.Window.Dropdown" :
             "ZSharp.Window.TextInput";
         size_t property_index;
         if (!window_has_import(window, required_import)) {
             snprintf(error, error_size,
                      "window element '%s' requires import %s()",
                      element->name, required_import);
+            return 0;
+        }
+        if (element->type == ZUI_DROPDOWN &&
+            project_version_before(settings, 1, 1, 1, 0)) {
+            snprintf(error, error_size,
+                     "dropdown elements require ZSharp: [1.1.1.0]: or newer");
             return 0;
         }
         for (property_index = 0;

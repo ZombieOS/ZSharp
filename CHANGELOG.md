@@ -1,12 +1,23 @@
 # Changelog
 
-## 1.1.1.0-BETA - JavaScript and dynamic-window reliability - 2026-09-16
+## 1.1.1.0 - The JavaScript Update - 2026-09-18
 
-- Added embedded JavaScript interoperability without requiring Node.js.
+- Added embedded JavaScript interoperability without requiring Node.js,
+  including synchronous functions, immediately-resolving async functions,
+  Unicode values, text/number arrays, guarded memory/stack use, and detailed
+  JS stack traces.
 - Fixed persistent room-level text and number state.
 - Fixed UTF-8 rendering and dynamic text wrapping, height, and scrolling.
 - Added normal-text alignment plus programmatic input clearing and focus.
+- Fixed runtime text relayout and alignment consistency across Windows, Linux,
+  and macOS when chat-style content changes.
 - Expanded native Z# failure reports with call-chain context.
+- Added native dropdown/select controls with readable and mutable selections.
+- Added simple horizontal and vertical UI anchors for responsive layouts.
+- Fixed native 3D cubes disappearing into a black screen, including cubes
+  crossing the camera near plane and the documented default cube size.
+- Added 3D regression coverage for XYZ transforms, camera position/FOV,
+  Z-axis properties, dynamic/static bodies, and `COLLIDER3D` projects.
 
 ## 1.1.0.1 - Window text setter fix - 2026-09-15
 

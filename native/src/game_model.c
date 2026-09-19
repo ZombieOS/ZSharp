@@ -433,8 +433,18 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
             object->shape = ZGAME_SHAPE_TRIANGLE;
         else if (strcmp(value->text, "sprite") == 0)
             object->shape = ZGAME_SHAPE_SPRITE;
-        else if (strcmp(value->text, "cube") == 0)
-            object->shape = ZGAME_SHAPE_CUBE, parser->model->is_3d = 1;
+        else if (strcmp(value->text, "cube") == 0) {
+            object->shape = ZGAME_SHAPE_CUBE;
+            parser->model->is_3d = 1;
+            /* The 2D default is 64 pixels, while documented 3D coordinates
+               use world units with the default camera at Z=8. A cube that
+               keeps the 2D default surrounds the camera and cannot be
+               meaningfully projected. Only replace dimensions the author
+               did not explicitly provide. */
+            if (!object->width_explicit) object->width = 1.0f;
+            if (!object->height_explicit) object->height = 1.0f;
+            if (!object->depth_explicit) object->depth = 1.0f;
+        }
         else if (strcmp(value->text, "text") == 0)
             object->shape = ZGAME_SHAPE_TEXT;
         else {
@@ -485,10 +495,19 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
     NUMBER_FIELD("positionX", x);
     NUMBER_FIELD("positionY", y);
     NUMBER_FIELD_3D("positionZ", z);
-    NUMBER_FIELD("width", width);
-    NUMBER_FIELD("height", height);
-    NUMBER_FIELD_3D("depth", depth);
-    NUMBER_FIELD_3D("length", depth);
+    if (strcmp(field, "width") == 0) {
+        object->width_explicit = 1;
+        return value_number(parser, value, &object->width);
+    }
+    if (strcmp(field, "height") == 0) {
+        object->height_explicit = 1;
+        return value_number(parser, value, &object->height);
+    }
+    if (strcmp(field, "depth") == 0 || strcmp(field, "length") == 0) {
+        object->depth_explicit = 1;
+        parser->model->is_3d = 1;
+        return value_number(parser, value, &object->depth);
+    }
     NUMBER_FIELD("rotation", rotation);
     NUMBER_FIELD("scaleX", scale_x);
     NUMBER_FIELD("scaleY", scale_y);

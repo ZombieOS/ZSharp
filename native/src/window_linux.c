@@ -63,6 +63,10 @@ typedef struct GtkApi {
     void (*entry_set_alignment)(void *, float);
     const char *(*entry_get_text)(void *);
     void (*entry_set_text)(void *, const char *);
+    GtkWidget *(*combo_box_text_new)(void);
+    void (*combo_box_text_append_text)(void *, const char *);
+    char *(*combo_box_text_get_active_text)(void *);
+    void (*combo_box_set_active)(void *, int);
     void (*widget_grab_focus)(void *);
     int (*editable_get_position)(void *);
     GtkWidget *(*text_view_new)(void);
@@ -236,6 +240,14 @@ static int gtk_api_load(GtkApi *api, char *error, size_t error_size) {
     GTK_REQUIRED(api, entry_set_text, api->gtk, "gtk_entry_set_text");
     GTK_REQUIRED(api, widget_grab_focus, api->gtk, "gtk_widget_grab_focus");
     GTK_REQUIRED(api, entry_get_text, api->gtk, "gtk_entry_get_text");
+    GTK_REQUIRED(api, combo_box_text_new, api->gtk,
+                 "gtk_combo_box_text_new");
+    GTK_REQUIRED(api, combo_box_text_append_text, api->gtk,
+                 "gtk_combo_box_text_append_text");
+    GTK_REQUIRED(api, combo_box_text_get_active_text, api->gtk,
+                 "gtk_combo_box_text_get_active_text");
+    GTK_REQUIRED(api, combo_box_set_active, api->gtk,
+                 "gtk_combo_box_set_active");
     GTK_REQUIRED(api, editable_get_position, api->gtk,
                  "gtk_editable_get_position");
     GTK_REQUIRED(api, text_view_new, api->gtk, "gtk_text_view_new");
@@ -501,6 +513,7 @@ static int apply_element_zss(LinuxWindowState *state, LinuxControl *control,
         ? control->input_widget : control->widget;
     const char *selector = element->type == ZUI_TEXT ? "label" :
         element->type == ZUI_BUTTON ? "button" :
+        element->type == ZUI_DROPDOWN ? "combobox" :
         element->type == ZUI_TEXT_INPUT
             ? (control->is_multiline ? "textview" : "entry") : "*";
     ZSharpUIProperty *background = property(
@@ -743,6 +756,26 @@ static void button_clicked(GtkWidget *widget, void *data) {
     run_target(control->state, control, "left");
 }
 
+static void dropdown_changed(GtkWidget *widget, void *data) {
+    LinuxControl *control = (LinuxControl *)data;
+    LinuxWindowState *state = control->state;
+    ZSharpUIProperty *selected = property(control->element, "selected");
+    char *value = state->api.combo_box_text_get_active_text(widget);
+    if (control->filtering_input) {
+        if (value != NULL) state->api.g_free(value);
+        return;
+    }
+    if (selected != NULL && value != NULL) {
+        char *copy = zsharp_copy_text(value, strlen(value));
+        if (copy != NULL) {
+            free(selected->text_value);
+            selected->text_value = copy;
+            run_target(state, control, "change");
+        }
+    }
+    if (value != NULL) state->api.g_free(value);
+}
+
 static LinuxWindowState *control_state(LinuxControl *control) {
     return control->state;
 }
@@ -947,6 +980,9 @@ static void layout_controls(LinuxWindowState *state, int width, int height) {
         LinuxControl *control = &state->controls[index];
         ZSharpUIElement *element = control->element;
         int fallback_width, fallback_height, w, h, x, y;
+        int offset_x, offset_y;
+        ZSharpUIProperty *anchor_x = property(element, "anchorX");
+        ZSharpUIProperty *anchor_y = property(element, "anchorY");
         default_size(element, &fallback_width, &fallback_height);
         w = (int)((double)pixels(property(element, "width"), state->scale,
                                 fallback_width) * responsive_scale + 0.5);
@@ -966,6 +1002,20 @@ static void layout_controls(LinuxWindowState *state, int width, int height) {
             (double)pixels(property(element, "locationY"), state->scale, 0) -
             (double)pixels(property(element, "height"), state->scale,
                            fallback_height) / 2.0) * responsive_scale + 0.5);
+        offset_x = (int)((double)pixels(property(element, "locationX"),
+                                        state->scale, 0) * responsive_scale + 0.5);
+        offset_y = (int)((double)pixels(property(element, "locationY"),
+                                        state->scale, 0) * responsive_scale + 0.5);
+        if (anchor_x != NULL && strcmp(anchor_x->text_value, "left") == 0)
+            x = offset_x;
+        else if (anchor_x != NULL &&
+                 strcmp(anchor_x->text_value, "right") == 0)
+            x = width - w - offset_x;
+        if (anchor_y != NULL && strcmp(anchor_y->text_value, "top") == 0)
+            y = offset_y;
+        else if (anchor_y != NULL &&
+                 strcmp(anchor_y->text_value, "bottom") == 0)
+            y = height - h - offset_y;
         state->api.widget_set_size_request(
             control->widget, w,
             element->type == ZUI_TEXT && property(element, "height") == NULL
@@ -1000,6 +1050,16 @@ static void layout_controls(LinuxWindowState *state, int width, int height) {
     }
     content_bottom = content_bottom > height ? content_bottom + 16 : height;
     state->api.widget_set_size_request(state->fixed, width, content_bottom);
+}
+
+static int label_justification(const ZSharpUIElement *element) {
+    ZSharpUIProperty *alignment = property((ZSharpUIElement *)element,
+                                            "textAlign");
+    if (alignment != NULL && alignment->text_value != NULL) {
+        if (strcmp(alignment->text_value, "right") == 0) return 1;
+        if (strcmp(alignment->text_value, "center") == 0) return 2;
+    }
+    return 0;
 }
 
 static void window_allocated(GtkWidget *widget, GtkAllocation *allocation,
@@ -1075,7 +1135,7 @@ static GtkWidget *make_label(LinuxWindowState *state,
     if (widget != NULL) {
         state->api.label_set_markup(widget, markup);
         state->api.label_set_line_wrap(widget, 1);
-        state->api.label_set_justify(widget, 2);
+        state->api.label_set_justify(widget, label_justification(element));
     }
     free(markup);
     free(escaped);
@@ -1132,6 +1192,11 @@ static int update_label(LinuxWindowState *state, LinuxControl *control,
     state->api.label_set_markup(control->widget, markup);
     free(markup);
     free(escaped);
+    state->api.label_set_justify(control->widget,
+                                 label_justification(element));
+    layout_controls(state,
+        state->api.widget_get_allocated_width(state->window),
+        state->api.widget_get_allocated_height(state->window));
     return 1;
 }
 
@@ -1213,7 +1278,8 @@ static int set_window_property_ui(void *data, const char *path,
         }
         if (element->type == ZUI_TEXT &&
             (strcmp(changed->name, "content") == 0 ||
-             strcmp(changed->name, "color") == 0)) {
+             strcmp(changed->name, "color") == 0 ||
+             strcmp(changed->name, "textAlign") == 0)) {
             if (!update_label(state, control, error, error_size)) return 0;
         } else if (element->type == ZUI_BUTTON &&
                    strcmp(changed->name, "text") == 0) {
@@ -1251,10 +1317,38 @@ static int set_window_property_ui(void *data, const char *path,
                                           changed->text_value);
             update_contents(state, control, changed->text_value);
         } else if (element->type == ZUI_TEXT_INPUT &&
-                   strcmp(changed->name, "focus") == 0 &&
-                   changed->status_value) {
-            state->api.widget_grab_focus(control->input_widget != NULL
-                ? control->input_widget : control->widget);
+                   strcmp(changed->name, "focus") == 0) {
+            state->api.widget_grab_focus(changed->status_value
+                ? (control->input_widget != NULL
+                    ? control->input_widget : control->widget)
+                : state->fixed);
+        } else if (element->type == ZUI_DROPDOWN &&
+                   strcmp(changed->name, "selected") == 0) {
+            ZSharpUIProperty *options = property(element, "options");
+            size_t option_index;
+            for (option_index = 0; options != NULL &&
+                 option_index < options->item_count; option_index++)
+                if (strcmp(options->items[option_index],
+                           changed->text_value) == 0) {
+                    control->filtering_input = 1;
+                    state->api.combo_box_set_active(
+                        control->widget, (int)option_index);
+                    control->filtering_input = 0;
+                    break;
+                }
+        } else if (element->type == ZUI_DROPDOWN &&
+                   (strcmp(changed->name, "dropdownColor") == 0 ||
+                    strcmp(changed->name, "textColor") == 0)) {
+            GdkRGBA color;
+            if (parse_rgba(changed->text_value, &color)) {
+                if (strcmp(changed->name, "dropdownColor") == 0 &&
+                    state->api.widget_override_background_color != NULL)
+                    state->api.widget_override_background_color(
+                        control->widget, 0, &color);
+                else if (state->api.widget_override_color != NULL)
+                    state->api.widget_override_color(
+                        control->widget, 0, &color);
+            }
         } else if (element->type == ZUI_IMAGE &&
                    strcmp(changed->name, "file") == 0) {
             int width = state->api.widget_get_allocated_width(control->widget);
@@ -1280,6 +1374,8 @@ static int set_window_property_ui(void *data, const char *path,
                 state->api.object_unref(pixbuf);
         }
         if (changed->type == ZUI_PROPERTY_MEASUREMENT ||
+            strcmp(changed->name, "anchorX") == 0 ||
+            strcmp(changed->name, "anchorY") == 0 ||
             (element->type == ZUI_TEXT &&
              strcmp(changed->name, "content") == 0))
             layout_controls(state,
@@ -1342,6 +1438,19 @@ static int get_window_property_ui(LinuxWindowState *state, const char *path,
         snprintf(error, error_size, "textInput '%s' is not active",
                  element->name);
         return 0;
+    }
+    if (element->type == ZUI_DROPDOWN) {
+        contents = property(element, "selected");
+        if (contents == NULL || contents->text_value == NULL) {
+            snprintf(error, error_size, "dropdown '%s' has no selection",
+                     element->name);
+            return 0;
+        }
+        *value_type = ZWINDOW_READ_TEXT;
+        *text_value = zsharp_copy_text(contents->text_value,
+                                       strlen(contents->text_value));
+        if (*text_value == NULL) snprintf(error, error_size, "out of memory");
+        return *text_value != NULL;
     }
     if (!control->is_image_input) {
         if (control->is_multiline) {
@@ -1613,6 +1722,37 @@ static int create_controls(LinuxWindowState *state, int width, int height,
             if (pixbuf != NULL && state->api.object_unref != NULL)
                 state->api.object_unref(pixbuf);
             free(path);
+        } else if (element->type == ZUI_DROPDOWN) {
+            ZSharpUIProperty *options = property(element, "options");
+            ZSharpUIProperty *selected = property(element, "selected");
+            size_t option_index;
+            int selected_index = -1;
+            widget = state->api.combo_box_text_new();
+            for (option_index = 0; widget != NULL && options != NULL &&
+                 option_index < options->item_count; option_index++) {
+                state->api.combo_box_text_append_text(
+                    widget, options->items[option_index]);
+                if (selected != NULL && selected->text_value != NULL &&
+                    strcmp(selected->text_value,
+                           options->items[option_index]) == 0)
+                    selected_index = (int)option_index;
+            }
+            if (widget != NULL)
+                state->api.combo_box_set_active(widget, selected_index);
+            if (widget != NULL) {
+                GdkRGBA color;
+                if (state->api.widget_override_background_color != NULL &&
+                    property(element, "dropdownColor") != NULL &&
+                    parse_rgba(property(element, "dropdownColor")->text_value,
+                               &color))
+                    state->api.widget_override_background_color(
+                        widget, 0, &color);
+                if (state->api.widget_override_color != NULL &&
+                    property(element, "textColor") != NULL &&
+                    parse_rgba(property(element, "textColor")->text_value,
+                               &color))
+                    state->api.widget_override_color(widget, 0, &color);
+            }
         } else {
             ZSharpUIProperty *type = property(element, "type");
             ZSharpUIProperty *display = property(element, "display");
@@ -1680,6 +1820,9 @@ static int create_controls(LinuxWindowState *state, int width, int height,
                 (void *)button_clicked, control, NULL, 0);
             state->api.signal_connect_data(widget, "button-press-event",
                 (void *)button_pressed, control, NULL, 0);
+        } else if (element->type == ZUI_DROPDOWN) {
+            state->api.signal_connect_data(widget, "changed",
+                (void *)dropdown_changed, control, NULL, 0);
         } else if (element->type == ZUI_IMAGE &&
                    (property(element, "left") != NULL ||
                     property(element, "right") != NULL)) {

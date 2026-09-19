@@ -19,7 +19,7 @@ static const char *source_stem(const char *source, size_t *length) {
 }
 
 static int input_field(const char *name, ZSharpWindowInputField *field) {
-    if (strcmp(name, "contents") == 0)
+    if (strcmp(name, "contents") == 0 || strcmp(name, "selected") == 0)
         *field = ZWINDOW_INPUT_CONTENTS;
     else if (strcmp(name, "totalcharacters") == 0)
         *field = ZWINDOW_INPUT_TOTAL_CHARACTERS;
@@ -92,11 +92,25 @@ int zsharp_window_model_resolve_input(
     for (index = 0; index < program->window.element_count; index++) {
         ZSharpUIElement *element = &program->window.elements[index];
         if (strcmp(element->name, element_name) != 0) continue;
-        if (element->type != ZUI_TEXT_INPUT) {
-            snprintf(error, error_size, "UI element '%s' is not a textInput",
+        if (element->type != ZUI_TEXT_INPUT &&
+            element->type != ZUI_DROPDOWN) {
+            snprintf(error, error_size,
+                     "UI element '%s' is not a textInput or dropdown",
                      element_name);
             free(copy);
             return 0;
+        }
+        if (element->type == ZUI_DROPDOWN) {
+            if (strcmp(parts[count - 1], "selected") != 0) {
+                snprintf(error, error_size,
+                         "dropdown reads use Dropdown.selected");
+                free(copy);
+                return 0;
+            }
+            *element_output = element;
+            *field_output = ZWINDOW_INPUT_CONTENTS;
+            free(copy);
+            return 1;
         }
         if (field != ZWINDOW_INPUT_CONTENTS) {
             ZSharpUIProperty *type = NULL;
@@ -199,6 +213,9 @@ static ZSharpUIPropertyType expected_property_type(
         strcmp(name, "height") == 0 || strcmp(name, "locationX") == 0 ||
         strcmp(name, "locationY") == 0;
     if (measurement) return ZUI_PROPERTY_MEASUREMENT;
+    if (element != ZUI_DESIGN &&
+        (strcmp(name, "anchorX") == 0 || strcmp(name, "anchorY") == 0))
+        return ZUI_PROPERTY_IDENTIFIER;
     if (element == ZUI_DESIGN) {
         if (strcmp(name, "title") == 0 || strcmp(name, "icon") == 0)
             return ZUI_PROPERTY_TEXT;
@@ -220,6 +237,10 @@ static ZSharpUIPropertyType expected_property_type(
             return ZUI_PROPERTY_TEXT;
         if (strcmp(name, "focus") == 0) return ZUI_PROPERTY_STATUS;
         if (strcmp(name, "textAlign") == 0) return ZUI_PROPERTY_IDENTIFIER;
+    } else if (element == ZUI_DROPDOWN) {
+        if (strcmp(name, "selected") == 0) return ZUI_PROPERTY_TEXT;
+        if (strcmp(name, "textColor") == 0 ||
+            strcmp(name, "dropdownColor") == 0) return ZUI_PROPERTY_COLOR;
     }
     return 0;
 }
@@ -320,6 +341,27 @@ int zsharp_window_model_set(ZSharpProgram *program, const char *path,
                  property_name, type_name(expected));
         free(copy);
         return 0;
+    }
+    if (element->type == ZUI_DROPDOWN &&
+        strcmp(property_name, "selected") == 0) {
+        ZSharpUIProperty *options = NULL;
+        int found = 0;
+        size_t option_index;
+        for (option_index = 0; option_index < element->property_count;
+             option_index++)
+            if (strcmp(element->properties[option_index].name, "options") == 0)
+                options = &element->properties[option_index];
+        for (option_index = 0; options != NULL &&
+             option_index < options->item_count; option_index++)
+            if (strcmp(options->items[option_index], text_value) == 0)
+                found = 1;
+        if (!found) {
+            snprintf(error, error_size,
+                     "dropdown '%s' has no option named '%s'",
+                     element_name, text_value == NULL ? "" : text_value);
+            free(copy);
+            return 0;
+        }
     }
     if (expected == ZUI_PROPERTY_COLOR) {
         ZSharpPaint paint;

@@ -1,0 +1,18 @@
+zsharp = type.object
+
+noticed object StaticCube[] (
+ shape: cube:
+ width: 4:
+ height: 4:
+ length: 1:
+ color: #FFFFFF:
+ body: static:
+ attributes[JSON] (
+  [
+   {
+    "id": "COLLIDER3D",
+    "active": true
+   }
+  ]
+ )
+)

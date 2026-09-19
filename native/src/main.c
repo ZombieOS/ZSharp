@@ -132,8 +132,10 @@ static void write_runtime_error_log(const char *app_name, const char *reason) {
             "This report deliberately excludes environment variables and user "
             "documents to avoid collecting passwords, tokens, and unrelated "
             "personal data.\n"
-            "If the failure came from Python, the complete Python exception and "
-            "traceback appear in the FAILURE section above.\n",
+            "Python and JavaScript failures include their exception and "
+            "traceback in the FAILURE section when available. Native Z# "
+            "failures include the source, room, brain, and Z# call chain when "
+            "the runtime can identify them.\n",
             reason == NULL || reason[0] == '\0' ? "Unknown error" : reason);
     fclose(file);
 }
@@ -1137,6 +1139,8 @@ static int uninstall_package_command(const char *package_path) {
 
 int main(int argc, char **argv) {
 #ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
     if (argc == 1) {
         DWORD console_processes[2];
         DWORD count = GetConsoleProcessList(console_processes, 2);

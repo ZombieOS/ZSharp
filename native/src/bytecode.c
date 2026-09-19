@@ -1020,7 +1020,7 @@ static int read_window(FILE *file, ZSharpWindow *window) {
         if (element == NULL || !read_u8(file, &visibility) ||
             visibility > 1 || !read_u8(file, &type) ||
             type < (uint8_t)ZUI_DESIGN ||
-            type > (uint8_t)ZUI_TEXT_INPUT ||
+            type > (uint8_t)ZUI_DROPDOWN ||
             !read_string(file, &element->variant) ||
             !read_string(file, &element->name) ||
             !read_u32(file, &property_count) ||

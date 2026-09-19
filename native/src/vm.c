@@ -64,6 +64,8 @@ typedef struct RuntimeObject {
 typedef struct RuntimeHeap {
     char **texts;
     size_t text_count;
+    ZSharpVariable **arrays;
+    size_t array_count;
     RuntimeObject **objects;
     size_t object_count;
 } RuntimeHeap;
@@ -81,6 +83,9 @@ typedef struct RuntimeModuleCache {
 } RuntimeModuleCache;
 
 static char *heap_add_text(RuntimeHeap *heap, char *text);
+static ZSharpVariable *heap_add_array(RuntimeHeap *heap,
+                                      ZSharpVariable *array);
+static void free_runtime_array(ZSharpVariable *array);
 
 static int runtime_wait(const char *milliseconds, char *error,
                         size_t error_size) {
@@ -530,6 +535,77 @@ static int javascript_exception(JSContext *context,
     return 0;
 }
 
+typedef struct JavaScriptDeadline {
+    time_t expires;
+} JavaScriptDeadline;
+
+static int javascript_interrupt(JSRuntime *runtime, void *opaque) {
+    JavaScriptDeadline *deadline = (JavaScriptDeadline *)opaque;
+    (void)runtime;
+    return deadline != NULL && time(NULL) >= deadline->expires;
+}
+
+/* Keep source offsets intact so QuickJS line/column diagnostics still point
+   at the author's file. Only blank module export keywords that occur in code;
+   an `export` inside a comment, string, or template literal is data. */
+static void javascript_expose_exports(char *source, size_t length) {
+    enum { JS_CODE, JS_SINGLE, JS_DOUBLE, JS_TEMPLATE, JS_LINE_COMMENT,
+           JS_BLOCK_COMMENT } state = JS_CODE;
+    size_t index;
+    for (index = 0; index < length; index++) {
+        char current = source[index];
+        char next = index + 1 < length ? source[index + 1] : '\0';
+        if (state == JS_LINE_COMMENT) {
+            if (current == '\n' || current == '\r') state = JS_CODE;
+            continue;
+        }
+        if (state == JS_BLOCK_COMMENT) {
+            if (current == '*' && next == '/') state = JS_CODE, index++;
+            continue;
+        }
+        if (state != JS_CODE) {
+            if (current == '\\') {
+                index++;
+                continue;
+            }
+            if ((state == JS_SINGLE && current == '\'') ||
+                (state == JS_DOUBLE && current == '"') ||
+                (state == JS_TEMPLATE && current == '`')) state = JS_CODE;
+            continue;
+        }
+        if (current == '/' && next == '/') {
+            state = JS_LINE_COMMENT;
+            index++;
+            continue;
+        }
+        if (current == '/' && next == '*') {
+            state = JS_BLOCK_COMMENT;
+            index++;
+            continue;
+        }
+        if (current == '\'') { state = JS_SINGLE; continue; }
+        if (current == '"') { state = JS_DOUBLE; continue; }
+        if (current == '`') { state = JS_TEMPLATE; continue; }
+        if (index + 6 <= length && memcmp(source + index, "export", 6) == 0 &&
+            (index == 0 || !((source[index - 1] >= 'a' && source[index - 1] <= 'z') ||
+                             (source[index - 1] >= 'A' && source[index - 1] <= 'Z') ||
+                             (source[index - 1] >= '0' && source[index - 1] <= '9') ||
+                             source[index - 1] == '_' || source[index - 1] == '$')) &&
+            (index + 6 == length || !((source[index + 6] >= 'a' && source[index + 6] <= 'z') ||
+                                      (source[index + 6] >= 'A' && source[index + 6] <= 'Z') ||
+                                      (source[index + 6] >= '0' && source[index + 6] <= '9') ||
+                                      source[index + 6] == '_' || source[index + 6] == '$'))) {
+            size_t after = index + 6;
+            memset(source + index, ' ', 6);
+            while (after < length && (source[after] == ' ' || source[after] == '\t')) after++;
+            if (after + 7 <= length && memcmp(source + after, "default", 7) == 0) {
+                memset(source + after, ' ', 7);
+            }
+            index += 5;
+        }
+    }
+}
+
 static int execute_javascript_call(const ZSharpProgram *program,
                                    const ZSharpInstruction *instruction,
                                    const RuntimeValue *arguments,
@@ -552,6 +628,7 @@ static int execute_javascript_call(const ZSharpProgram *program,
     JSValue function = JS_UNDEFINED;
     JSValue returned = JS_UNDEFINED;
     JSValue *values = NULL;
+    JavaScriptDeadline deadline;
     int ok = 0;
     if (project_length > 0 &&
         strncmp(module_name, program->project_id, project_length) == 0 &&
@@ -591,19 +668,13 @@ static int execute_javascript_call(const ZSharpProgram *program,
     }
     fclose(file);
     source[length] = '\0';
-    /* Exported declarations are evaluated in the module's private context;
-       make their bindings callable by the Z# bridge without changing JS. */
-    for (index = 0; index + 7 < (size_t)length; index++) {
-        if ((index == 0 || source[index - 1] == '\n' ||
-             source[index - 1] == '\r' || source[index - 1] == ' ' ||
-             source[index - 1] == '\t') &&
-            memcmp(source + index, "export ", 7) == 0)
-            memset(source + index, ' ', 7);
-    }
+    javascript_expose_exports(source, (size_t)length);
     runtime = JS_NewRuntime();
     if (runtime == NULL) goto cleanup;
     JS_SetMemoryLimit(runtime, 64u * 1024u * 1024u);
     JS_SetMaxStackSize(runtime, 1024u * 1024u);
+    deadline.expires = time(NULL) + 5;
+    JS_SetInterruptHandler(runtime, javascript_interrupt, &deadline);
     context = JS_NewContext(runtime);
     if (context == NULL) goto cleanup;
     evaluated = JS_Eval(context, source, (size_t)length, path,
@@ -637,9 +708,32 @@ static int execute_javascript_call(const ZSharpProgram *program,
             values[index] = JS_NewBool(context, arguments[index].number != 0);
         else if (arguments[index].type == ZVALUE_NULL)
             values[index] = JS_NULL;
+        else if (arguments[index].type == ZVALUE_TEXT_ARRAY ||
+                 arguments[index].type == ZVALUE_NUMBER_ARRAY) {
+            size_t item_count = arguments[index].type == ZVALUE_TEXT_ARRAY
+                ? arguments[index].array->text_item_count
+                : arguments[index].array->number_item_count;
+            size_t item_index;
+            values[index] = JS_NewArray(context);
+            if (JS_IsException(values[index])) goto cleanup;
+            for (item_index = 0; item_index < item_count; item_index++) {
+                JSValue item = arguments[index].type == ZVALUE_TEXT_ARRAY
+                    ? JS_NewString(context,
+                        arguments[index].array->text_items[item_index])
+                    : JS_NewFloat64(context, strtod(
+                        arguments[index].array->number_items[item_index],
+                        NULL));
+                if (JS_IsException(item) || JS_SetPropertyUint32(
+                        context, values[index], (uint32_t)item_index,
+                        item) < 0) {
+                    if (JS_IsException(item)) JS_FreeValue(context, item);
+                    goto cleanup;
+                }
+            }
+        }
         else {
             snprintf(error, error_size,
-                     "JavaScript arguments support text, number, status, and null");
+                     "JavaScript arguments support text, number, status, null, and text/number arrays");
             goto cleanup;
         }
     }
@@ -648,6 +742,37 @@ static int execute_javascript_call(const ZSharpProgram *program,
     if (JS_IsException(returned)) {
         javascript_exception(context, instruction, error, error_size);
         goto cleanup;
+    }
+    if (JS_IsPromise(returned)) {
+        while (JS_PromiseState(context, returned) == JS_PROMISE_PENDING) {
+            JSContext *job_context = NULL;
+            int jobs = JS_ExecutePendingJob(runtime, &job_context);
+            if (jobs < 0) {
+                javascript_exception(job_context == NULL ? context : job_context,
+                                     instruction, error, error_size);
+                goto cleanup;
+            }
+            if (jobs == 0) {
+                snprintf(error, error_size,
+                         "JavaScript call %s:%s returned a promise that cannot resolve without an external event loop",
+                         instruction->call_file, instruction->call_function);
+                goto cleanup;
+            }
+        }
+        if (JS_PromiseState(context, returned) == JS_PROMISE_REJECTED) {
+            JSValue reason = JS_PromiseResult(context, returned);
+            const char *message = JS_ToCString(context, reason);
+            snprintf(error, error_size, "JavaScript call %s:%s rejected: %s",
+                     instruction->call_file, instruction->call_function,
+                     message == NULL ? "Promise rejected" : message);
+            if (message != NULL) JS_FreeCString(context, message);
+            JS_FreeValue(context, reason);
+            goto cleanup;
+        } else {
+            JSValue resolved = JS_PromiseResult(context, returned);
+            JS_FreeValue(context, returned);
+            returned = resolved;
+        }
     }
     memset(result, 0, sizeof(*result));
     if (JS_IsString(returned)) {
@@ -672,6 +797,87 @@ static int execute_javascript_call(const ZSharpProgram *program,
         result->type = ZVALUE_NUMBER;
         result->number_text = copy;
         result->number = (int32_t)number;
+    } else if (JS_IsArray(returned)) {
+        int64_t item_count = 0;
+        int array_type = 0;
+        ZSharpVariable *array;
+        if (JS_GetLength(context, returned, &item_count) < 0 ||
+            item_count < 0 || item_count > 100000) {
+            snprintf(error, error_size,
+                     "JavaScript returned an invalid or excessively large array");
+            goto cleanup;
+        }
+        array = (ZSharpVariable *)calloc(1, sizeof(*array));
+        if (array == NULL) goto cleanup;
+        array->name = "JavaScript result";
+        for (index = 0; index < (size_t)item_count; index++) {
+            JSValue item = JS_GetPropertyUint32(context, returned,
+                                                (uint32_t)index);
+            if (JS_IsException(item)) {
+                free_runtime_array(array);
+                javascript_exception(context, instruction, error, error_size);
+                goto cleanup;
+            }
+            if (array_type == 0)
+                array_type = JS_IsString(item) ? ZVALUE_TEXT_ARRAY
+                    : JS_IsNumber(item) ? ZVALUE_NUMBER_ARRAY : -1;
+            if ((array_type == ZVALUE_TEXT_ARRAY && !JS_IsString(item)) ||
+                (array_type == ZVALUE_NUMBER_ARRAY && !JS_IsNumber(item)) ||
+                array_type < 0) {
+                JS_FreeValue(context, item);
+                free_runtime_array(array);
+                snprintf(error, error_size,
+                         "JavaScript arrays must contain only text or only numbers");
+                goto cleanup;
+            }
+            if (array_type == ZVALUE_TEXT_ARRAY) {
+                const char *text = JS_ToCString(context, item);
+                char *copy = text == NULL ? NULL :
+                    zsharp_copy_text(text, strlen(text));
+                char **resized;
+                if (text != NULL) JS_FreeCString(context, text);
+                resized = copy == NULL ? NULL : (char **)realloc(
+                    array->text_items,
+                    (array->text_item_count + 1) * sizeof(*resized));
+                if (resized == NULL) {
+                    free(copy);
+                    JS_FreeValue(context, item);
+                    free_runtime_array(array);
+                    goto cleanup;
+                }
+                array->text_items = resized;
+                array->text_items[array->text_item_count++] = copy;
+            } else {
+                double number;
+                char buffer[64];
+                char *copy;
+                char **resized;
+                if (JS_ToFloat64(context, &number, item) != 0) {
+                    JS_FreeValue(context, item);
+                    free_runtime_array(array);
+                    goto cleanup;
+                }
+                snprintf(buffer, sizeof(buffer), "%.17g", number);
+                copy = zsharp_copy_text(buffer, strlen(buffer));
+                resized = copy == NULL ? NULL : (char **)realloc(
+                    array->number_items,
+                    (array->number_item_count + 1) * sizeof(*resized));
+                if (resized == NULL) {
+                    free(copy);
+                    JS_FreeValue(context, item);
+                    free_runtime_array(array);
+                    goto cleanup;
+                }
+                array->number_items = resized;
+                array->number_items[array->number_item_count++] = copy;
+            }
+            JS_FreeValue(context, item);
+        }
+        if (array_type == 0) array_type = ZVALUE_TEXT_ARRAY;
+        array->type = (ZSharpValueType)array_type;
+        if (heap_add_array(heap, array) == NULL) goto cleanup;
+        result->type = array->type;
+        result->array = array;
     } else if (JS_IsNull(returned) || JS_IsUndefined(returned)) {
         result->type = ZVALUE_NULL;
     } else {
@@ -715,6 +921,31 @@ static char *heap_add_text(RuntimeHeap *heap, char *text) {
     heap->texts = resized;
     heap->texts[heap->text_count++] = text;
     return text;
+}
+
+static ZSharpVariable *heap_add_array(RuntimeHeap *heap,
+                                      ZSharpVariable *array) {
+    ZSharpVariable **resized = (ZSharpVariable **)realloc(
+        heap->arrays, (heap->array_count + 1) * sizeof(*heap->arrays));
+    if (resized == NULL) {
+        free_runtime_array(array);
+        return NULL;
+    }
+    heap->arrays = resized;
+    heap->arrays[heap->array_count++] = array;
+    return array;
+}
+
+static void free_runtime_array(ZSharpVariable *array) {
+    size_t index;
+    if (array == NULL) return;
+    for (index = 0; index < array->text_item_count; index++)
+        free(array->text_items[index]);
+    for (index = 0; index < array->number_item_count; index++)
+        free(array->number_items[index]);
+    free(array->text_items);
+    free(array->number_items);
+    free(array);
 }
 
 static RuntimeObject *heap_add_object(RuntimeHeap *heap,
@@ -791,6 +1022,10 @@ static void heap_free(RuntimeHeap *heap) {
         free(heap->texts[index]);
     }
     free(heap->texts);
+    for (index = 0; index < heap->array_count; index++) {
+        free_runtime_array(heap->arrays[index]);
+    }
+    free(heap->arrays);
     for (index = 0; index < heap->object_count; index++) {
         free(heap->objects[index]->fields);
         free(heap->objects[index]);
@@ -1190,6 +1425,7 @@ static int is_window_input_read(const char *path) {
     if (field == NULL) return 0;
     field++;
     return strcmp(field, "contents") == 0 ||
+           strcmp(field, "selected") == 0 ||
            strcmp(field, "totalcharacters") == 0 ||
            strcmp(field, "currentcolumn") == 0 ||
            strcmp(field, "totallines") == 0 ||

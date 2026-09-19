@@ -1,0 +1,9 @@
+zsharp = type.script
+
+noticed room Failure[] (
+ import js:javascript_test.JavaScript.Utilities():
+
+ noticed brain Start[] (
+  Function.call(js:JavaScript.Utilities:failClearly):
+ )
+)

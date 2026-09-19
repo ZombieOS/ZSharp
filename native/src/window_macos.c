@@ -132,8 +132,8 @@ static void send_void_id(MacApi *api, MacId object, const char *name,
 
 static int send_bool_id(MacApi *api, MacId object, const char *name,
                         MacId value) {
-    return ((int (*)(MacId, MacSel, MacId))api->msg_send)(
-        object, api->sel_register(name), value);
+    return ((int (*)(MacId, MacSelector, MacId))api->message)(
+        object, selector(api, name), value);
 }
 
 static void send_void_bool(MacApi *api, MacId object, const char *name,
@@ -442,8 +442,25 @@ static void mac_action(MacId target, MacSelector command, MacId sender) {
     if (active_state == NULL) return;
     control = find_control(active_state, sender, 0);
     if (control == NULL) return;
-    if (control->is_image_input) choose_image(active_state, control);
-    else run_target(active_state, control, "left");
+    if (control->is_image_input) {
+        choose_image(active_state, control);
+    } else if (control->element->type == ZUI_DROPDOWN) {
+        ZSharpUIProperty *selected = property(control->element, "selected");
+        MacId title = send_id(&active_state->api, control->widget,
+                              "titleOfSelectedItem");
+        const char *value = title == NULL ? NULL :
+            send_utf8(&active_state->api, title);
+        if (selected != NULL && value != NULL) {
+            char *copy = zsharp_copy_text(value, strlen(value));
+            if (copy != NULL) {
+                free(selected->text_value);
+                selected->text_value = copy;
+            }
+        }
+        run_target(active_state, control, "change");
+    } else {
+        run_target(active_state, control, "left");
+    }
 }
 
 static void mac_right_action(MacId target, MacSelector command, MacId sender) {
@@ -672,6 +689,10 @@ static void layout_controls(MacWindowState *state) {
                                    fallback_width);
         double base_height = points(property(element, "height"), state->scale,
                                     fallback_height);
+        ZSharpUIProperty *anchor_x = property(element, "anchorX");
+        ZSharpUIProperty *anchor_y = property(element, "anchorY");
+        double offset_x;
+        double offset_y;
         frame.size.width = base_width * responsive_scale;
         frame.size.height = base_height * responsive_scale;
         if (element->type != ZUI_TEXT) {
@@ -697,6 +718,20 @@ static void layout_controls(MacWindowState *state) {
         frame.origin.y = (state->layout_height / 2.0 -
             points(property(element, "locationY"), state->scale, 0.0) -
             base_height / 2.0) * responsive_scale;
+        offset_x = points(property(element, "locationX"), state->scale, 0.0) *
+                   responsive_scale;
+        offset_y = points(property(element, "locationY"), state->scale, 0.0) *
+                   responsive_scale;
+        if (anchor_x != NULL && strcmp(anchor_x->text_value, "left") == 0)
+            frame.origin.x = offset_x;
+        else if (anchor_x != NULL &&
+                 strcmp(anchor_x->text_value, "right") == 0)
+            frame.origin.x = viewport.size.width - frame.size.width - offset_x;
+        if (anchor_y != NULL && strcmp(anchor_y->text_value, "top") == 0)
+            frame.origin.y = offset_y;
+        else if (anchor_y != NULL &&
+                 strcmp(anchor_y->text_value, "bottom") == 0)
+            frame.origin.y = viewport.size.height - frame.size.height - offset_y;
         send_void_rect(&state->api, control->widget, "setFrame:", frame);
         if (frame.origin.y + frame.size.height > content_bottom)
             content_bottom = frame.origin.y + frame.size.height;
@@ -799,6 +834,12 @@ static int set_window_property_ui(void *data, const char *path,
                          ns_string(api, changed->text_value));
             layout_controls(state);
         } else if (element->type == ZUI_TEXT &&
+                   strcmp(changed->name, "textAlign") == 0) {
+            send_void_integer(api, control->widget, "setAlignment:",
+                strcmp(changed->text_value, "right") == 0 ? 2 :
+                strcmp(changed->text_value, "center") == 0 ? 1 : 0);
+            layout_controls(state);
+        } else if (element->type == ZUI_TEXT &&
                    strcmp(changed->name, "color") == 0) {
             send_void_id(api, control->widget, "setTextColor:",
                          ns_color(api, changed->text_value, "#000000"));
@@ -839,6 +880,18 @@ static int set_window_property_ui(void *data, const char *path,
                 ? control->widget : control->input_view;
             send_bool_id(api, state->window, "makeFirstResponder:",
                          changed->status_value ? target : NULL);
+        } else if (element->type == ZUI_DROPDOWN &&
+                   strcmp(changed->name, "selected") == 0) {
+            send_void_id(api, control->widget, "selectItemWithTitle:",
+                         ns_string(api, changed->text_value));
+        } else if (element->type == ZUI_DROPDOWN &&
+                   strcmp(changed->name, "dropdownColor") == 0) {
+            send_void_id(api, control->widget, "setBezelColor:",
+                         ns_color(api, changed->text_value, "#F0F0F0"));
+        } else if (element->type == ZUI_DROPDOWN &&
+                   strcmp(changed->name, "textColor") == 0) {
+            send_void_id(api, control->widget, "setContentTintColor:",
+                         ns_color(api, changed->text_value, "#000000"));
         } else if (element->type == ZUI_IMAGE &&
                    strcmp(changed->name, "file") == 0) {
             char *image_path = path_join(state->project_root,
@@ -854,7 +907,9 @@ static int set_window_property_ui(void *data, const char *path,
             }
             send_void_id(api, control->widget, "setImage:", image);
         }
-        if (changed->type == ZUI_PROPERTY_MEASUREMENT)
+        if (changed->type == ZUI_PROPERTY_MEASUREMENT ||
+            strcmp(changed->name, "anchorX") == 0 ||
+            strcmp(changed->name, "anchorY") == 0)
             layout_controls(state);
     }
     send_void(api, state->window, "displayIfNeeded");
@@ -900,6 +955,19 @@ static int get_window_property_ui(MacWindowState *state, const char *path,
         snprintf(error, error_size, "textInput '%s' is not active",
                  element->name);
         return 0;
+    }
+    if (element->type == ZUI_DROPDOWN) {
+        contents = property(element, "selected");
+        if (contents == NULL || contents->text_value == NULL) {
+            snprintf(error, error_size, "dropdown '%s' has no selection",
+                     element->name);
+            return 0;
+        }
+        *value_type = ZWINDOW_READ_TEXT;
+        *text_value = zsharp_copy_text(contents->text_value,
+                                       strlen(contents->text_value));
+        if (*text_value == NULL) snprintf(error, error_size, "out of memory");
+        return *text_value != NULL;
     }
     update_input(state, control);
     contents = property(element, "contents");
@@ -1151,7 +1219,14 @@ static int create_controls(MacWindowState *state, MacId content,
                 text_size(element->variant), element->variant != NULL &&
                 (strcmp(element->variant, "title") == 0 ||
                  strcmp(element->variant, "header") == 0)));
-            send_void_integer(api, widget, "setAlignment:", 1);
+            {
+                ZSharpUIProperty *alignment = property(element, "textAlign");
+                send_void_integer(api, widget, "setAlignment:",
+                    alignment != NULL && alignment->text_value != NULL &&
+                    strcmp(alignment->text_value, "right") == 0 ? 2 :
+                    alignment != NULL && alignment->text_value != NULL &&
+                    strcmp(alignment->text_value, "center") == 0 ? 1 : 0);
+            }
             {
                 MacId cell = send_id(api, widget, "cell");
                 if (cell != NULL) {
@@ -1187,6 +1262,37 @@ static int create_controls(MacWindowState *state, MacId content,
             if (image != NULL) send_void_id(api, widget, "setImage:", image);
             send_void_integer(api, widget, "setImageScaling:", 3);
             free(path);
+        } else if (element->type == ZUI_DROPDOWN) {
+            ZSharpUIProperty *options = property(element, "options");
+            ZSharpUIProperty *selected = property(element, "selected");
+            size_t option_index;
+            widget = ((MacId (*)(MacId, MacSelector, MacRect, signed char))
+                api->message)(
+                    send_id(api, (MacId)api->get_class("NSPopUpButton"),
+                            "alloc"),
+                    selector(api, "initWithFrame:pullsDown:"), frame, 0);
+            for (option_index = 0; widget != NULL && options != NULL &&
+                 option_index < options->item_count; option_index++)
+                send_void_id(api, widget, "addItemWithTitle:",
+                             ns_string(api, options->items[option_index]));
+            if (widget != NULL && selected != NULL)
+                send_void_id(api, widget, "selectItemWithTitle:",
+                             ns_string(api, selected->text_value));
+            if (widget != NULL) {
+                send_void_id(api, widget, "setTarget:", state->target);
+                ((void (*)(MacId, MacSelector, MacSelector))api->message)(
+                    widget, selector(api, "setAction:"),
+                    selector(api, "zsharpAction:"));
+                if (property(element, "textColor") != NULL)
+                    send_void_id(api, widget, "setContentTintColor:",
+                        ns_color(api, property(element, "textColor")->text_value,
+                                 "#000000"));
+                if (property(element, "dropdownColor") != NULL)
+                    send_void_id(api, widget, "setBezelColor:",
+                        ns_color(api,
+                            property(element, "dropdownColor")->text_value,
+                            "#F0F0F0"));
+            }
         } else {
             ZSharpUIProperty *type = property(element, "type");
             ZSharpUIProperty *display = property(element, "display");

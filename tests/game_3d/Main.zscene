@@ -1,0 +1,37 @@
+zsharp = type.scene
+
+noticed scene Main[] (
+ scene Main (
+  title: "Native 3D Regression":
+  background: #08080B:
+  gravityX: 0:
+  gravityY: 0:
+  gravityZ: -1:
+  cameraX: 0:
+  cameraY: 0:
+  cameraZ: 8:
+  cameraFov: 70:
+ )
+ objects[JSON] (
+  [
+   {
+    "id": "DynamicCube",
+    "name": "Dynamic Cube",
+    "location": {
+     "x": "0",
+     "y": "0",
+     "z": "0"
+    }
+   },
+   {
+    "id": "StaticCube",
+    "name": "Static Cube",
+    "location": {
+     "x": "0",
+     "y": "0",
+     "z": "-2"
+    }
+   }
+  ]
+ )
+)

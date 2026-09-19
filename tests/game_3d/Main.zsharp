@@ -1,0 +1,13 @@
+zsharp = type.script
+
+noticed room Game[] (
+ noticed brain Start[] (
+  number Z = DynamicCube.positionZ:
+  number Velocity = DynamicCube.velocityZ:
+  if[input.key.rarrow == alive] (
+   number.set:DynamicCube.positionZ = Z + 1:
+   number.set:DynamicCube.velocityZ = Velocity + 1:
+  ) else (
+  )
+ )
+)

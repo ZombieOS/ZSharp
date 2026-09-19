@@ -1,0 +1,16 @@
+zsharp = type.settings
+
+Project: "Native 3D Regression":
+PID: "native_3d_regression":
+Version: [1.1.1.0]:
+Authors: ["Z# Tests"]:
+Description: "Cube rendering, XYZ physics, and COLLIDER3D regression fixture.":
+ZSharp: [1.1.1.0]:
+
+Dependencies (
+ zsharpgame:1.0.0.1
+):
+
+Window (
+ StartScene: "Main.zscene":
+):

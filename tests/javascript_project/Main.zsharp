@@ -3,10 +3,18 @@ zsharp = type.script
 noticed room Main[] (
  import js:javascript_test.JavaScript.Utilities():
 
+ noticed text() Values = ["internal helper", "second"]:
+
  noticed brain Start[] (
   text Message = Function.call(js:JavaScript.Utilities:greeting["Tester"]):
   number Answer = Function.call(js:JavaScript.Utilities:answer):
   text Unicode = Function.call(js:JavaScript.Utilities:unicode):
+  text ExportText = Function.call(js:JavaScript.Utilities:exportText):
+  text Async = Function.call(js:JavaScript.Utilities:asynchronous ["bridge"]):
+  text Default = Function.call(js:JavaScript.Utilities:defaultGreeting):
+  text Decorated = Function.call(js:JavaScript.Utilities:firstDecorated [Values]):
+  text FirstText = Function.call(js:JavaScript.Utilities:firstDecorated [Function.call(js:JavaScript.Utilities:textValues)]):
+  number ThirdNumber = Function.call(js:JavaScript.Utilities:thirdNumber [Function.call(js:JavaScript.Utilities:numberValues)]):
   Print(Message):
   Print(Answer):
   if[Function.call(js:JavaScript.Utilities:available)] (
@@ -15,5 +23,17 @@ noticed room Main[] (
    Print("JavaScript status dead"):
   )
   Print(Unicode):
+  if[Function.call(js:JavaScript.Utilities:unicodeRoundTrip)] (
+   Print("JavaScript Unicode round trip alive"):
+  ) else (
+   Print("JavaScript Unicode round trip dead"):
+  )
+  Print(ExportText):
+  Print(Async):
+  Print(Default):
+  Print(Decorated):
+  Print(FirstText):
+  Print(ThirdNumber):
+  Print(Function.call(js:JavaScript.Utilities:emptyValue)):
  )
 )
