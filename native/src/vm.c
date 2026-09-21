@@ -3293,6 +3293,73 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 break;
             }
+            case ZOP_MATH: {
+                double first;
+                double second = 0.0;
+                double result = 0.0;
+                char buffer[64];
+                if (!pop(stack, &stack_count, &right, error, error_size) ||
+                    right.type != ZVALUE_NUMBER) {
+                    snprintf(error, error_size,
+                             "Math functions require number arguments");
+                    ok = 0;
+                    goto done;
+                }
+                first = strtod(right.number_text, NULL);
+                if (instruction->argument_count == 2) {
+                    second = first;
+                    if (!pop(stack, &stack_count, &left, error, error_size) ||
+                        left.type != ZVALUE_NUMBER) {
+                        snprintf(error, error_size,
+                                 "Math functions require number arguments");
+                        ok = 0;
+                        goto done;
+                    }
+                    first = strtod(left.number_text, NULL);
+                }
+                switch (instruction->number_operand) {
+                    case 1: result = sin(first); break;
+                    case 2: result = cos(first); break;
+                    case 3: result = tan(first); break;
+                    case 4:
+                        if (first < 0.0) {
+                            snprintf(error, error_size,
+                                     "Math.sqrt requires a number greater than or equal to zero");
+                            ok = 0;
+                            goto done;
+                        }
+                        result = sqrt(first);
+                        break;
+                    case 5: result = fabs(first); break;
+                    case 6: result = fmin(first, second); break;
+                    case 7: result = fmax(first, second); break;
+                    case 8: result = first * 3.14159265358979323846 / 180.0; break;
+                    case 9: result = first * 180.0 / 3.14159265358979323846; break;
+                    default:
+                        snprintf(error, error_size, "unknown Math function");
+                        ok = 0;
+                        goto done;
+                }
+                if (!isfinite(result)) {
+                    snprintf(error, error_size,
+                             "Math function produced a non-finite result");
+                    ok = 0;
+                    goto done;
+                }
+                snprintf(buffer, sizeof(buffer), "%.17g", result);
+                value.type = ZVALUE_NUMBER;
+                value.number_text = heap_add_text(
+                    heap, zsharp_copy_text(buffer, strlen(buffer)));
+                if (value.number_text == NULL ||
+                    !push(stack, stack_capacity, &stack_count, value, error,
+                          error_size)) {
+                    if (error[0] == '\0')
+                        snprintf(error, error_size, "out of memory");
+                    ok = 0;
+                    goto done;
+                }
+                break;
+            }
             case ZOP_SUBTRACT:
             case ZOP_MULTIPLY:
             case ZOP_DIVIDE:

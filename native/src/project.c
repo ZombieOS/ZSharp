@@ -1501,6 +1501,14 @@ static int validate_feature_version(const ZSharpSettings *settings,
                  settings->zsharp_version[2], settings->zsharp_version[3]);
         return 0;
     }
+    if (instruction->op == ZOP_MATH &&
+        project_version_before(settings, 1, 1, 2, 2)) {
+        snprintf(error, error_size,
+                 "native Math functions require ZSharp: [1.1.2.2]: or newer; the project declares %u.%u.%u.%u",
+                 settings->zsharp_version[0], settings->zsharp_version[1],
+                 settings->zsharp_version[2], settings->zsharp_version[3]);
+        return 0;
+    }
     return 1;
 }
 

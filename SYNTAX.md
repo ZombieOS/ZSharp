@@ -2259,3 +2259,53 @@ requires `ZSharp: [1.1.2.0]:` or newer.
 `shape: cube` now renders solid faces instead of only an edge outline. Faces
 are clipped against the camera near plane, ordered by depth, and shaded so
 their orientation remains visible while preserving the object's chosen color.
+
+# Z# 1.1.2.2 additions
+
+## Native math
+
+Z# provides native scalar math expressions without requiring an imported
+language:
+
+```javascript
+number Radians = Math.radians(InputDegrees):
+number Sine = Math.sin(Radians):
+number Cosine = Math.cos(Radians):
+number Tangent = Math.tan(Radians):
+number Root = Math.sqrt(Value):
+number Positive = Math.abs(Value):
+number Smaller = Math.min(First, Second):
+number Larger = Math.max(First, Second):
+number ConvertedDegrees = Math.degrees(Radians):
+```
+
+Trigonometric functions accept radians. `Math.radians` converts degrees to
+radians, and `Math.degrees` performs the reverse conversion. `Math.sqrt`
+reports a runtime error for a negative value. All Math arguments must be
+numbers, and non-finite results are rejected. Native Math requires
+`ZSharp: [1.1.2.2]:` or newer.
+
+Camera-relative X/Z movement can be calculated from the scene yaw:
+
+```javascript
+number Yaw = Math.radians(Start.cameraRotationY):
+number ForwardX = Math.sin(Yaw):
+number ForwardZ = 0 - Math.cos(Yaw):
+number RightX = Math.cos(Yaw):
+number RightZ = Math.sin(Yaw):
+
+number MoveX = (ForwardX * ForwardInput) + (RightX * StrafeInput):
+number MoveZ = (ForwardZ * ForwardInput) + (RightZ * StrafeInput):
+number Length = Math.sqrt((MoveX * MoveX) + (MoveZ * MoveZ)):
+
+if[Length > 0] (
+ MoveX = MoveX / Length:
+ MoveZ = MoveZ / Length:
+) else (
+)
+```
+
+Normalizing the X/Z movement vector prevents diagonal movement from being
+faster than movement along one axis. Because repeating Z# division retains
+one fractional digit, the result is intentionally approximate under the
+current `number` rules.

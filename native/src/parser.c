@@ -363,6 +363,40 @@ static int parse_primary(Parser *parser, ZSharpFunction *function) {
                               "')' after the file path")) return 0;
             return emit(parser, function, operation) != NULL;
         }
+        if (zsharp_token_equals(&token, "Math") &&
+            match_type(parser, ZTOKEN_DOT)) {
+            char *method = consume_name(parser, "a Math function name");
+            int kind = method != NULL && strcmp(method, "sin") == 0 ? 1 :
+                       method != NULL && strcmp(method, "cos") == 0 ? 2 :
+                       method != NULL && strcmp(method, "tan") == 0 ? 3 :
+                       method != NULL && strcmp(method, "sqrt") == 0 ? 4 :
+                       method != NULL && strcmp(method, "abs") == 0 ? 5 :
+                       method != NULL && strcmp(method, "min") == 0 ? 6 :
+                       method != NULL && strcmp(method, "max") == 0 ? 7 :
+                       method != NULL && strcmp(method, "radians") == 0 ? 8 :
+                       method != NULL && strcmp(method, "degrees") == 0 ? 9 : 0;
+            uint32_t arguments = kind == 6 || kind == 7 ? 2u : 1u;
+            free(method);
+            if (kind == 0) {
+                fail_at(parser, &token,
+                        "Math supports sin, cos, tan, sqrt, abs, min, max, radians, or degrees");
+                return 0;
+            }
+            if (!consume_type(parser, ZTOKEN_LEFT_PAREN,
+                              "'(' after the Math function") ||
+                !parse_expression(parser, function)) return 0;
+            if (arguments == 2 &&
+                (!consume_type(parser, ZTOKEN_COMMA,
+                               "',' between Math arguments") ||
+                 !parse_expression(parser, function))) return 0;
+            if (!consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "')' after the Math arguments")) return 0;
+            instruction = emit(parser, function, ZOP_MATH);
+            if (instruction == NULL) return 0;
+            instruction->number_operand = kind;
+            instruction->argument_count = arguments;
+            return 1;
+        }
         if (zsharp_token_equals(&token, "random") &&
             match_type(parser, ZTOKEN_DOT)) {
             char *method = consume_name(parser, "number, decimal, or chance");

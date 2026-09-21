@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.2.2 - 2026-09-21
+
+- Added native `Math.sin`, `Math.cos`, `Math.tan`, `Math.sqrt`, `Math.abs`,
+  `Math.min`, `Math.max`, `Math.radians`, and `Math.degrees` expressions.
+- Added the native scalar math needed for camera-relative 3D movement and
+  diagonal movement normalization without Python, JavaScript, or Lua.
+- Added version gating, runtime validation, and regression coverage for native
+  Math expressions.
+
 ## 1.1.2.1 - 2026-09-21
 
 - Fixed native 3D camera orientation so combined pitch and yaw remain

@@ -330,6 +330,7 @@ static int write_instruction(FILE *file,
         case ZOP_JSON_LOAD:
             return write_string(file, instruction->operand);
         case ZOP_RANDOM:
+        case ZOP_MATH:
             return write_u32(file, (uint32_t)instruction->number_operand) &&
                    write_u32(file, instruction->argument_count);
         case ZOP_DELAY:
@@ -793,6 +794,7 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
         case ZOP_JSON_LOAD:
             return read_string(file, &instruction->operand);
         case ZOP_RANDOM:
+        case ZOP_MATH:
             if (!read_u32(file, &value)) return 0;
             instruction->number_operand = (int32_t)value;
             return read_u32(file, &instruction->argument_count);

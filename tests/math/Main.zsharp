@@ -1,0 +1,58 @@
+zsharp = type.script
+
+noticed room MathLogic[] (
+ noticed brain Start[] (
+  number Zero = 0:
+  number Pi = Math.radians(180):
+  number Diagonal = Math.sqrt(2):
+  number NormalizedX = 1 / Diagonal:
+  number NormalizedZ = 1 / Diagonal:
+  number Length = Math.sqrt((NormalizedX * NormalizedX) + (NormalizedZ * NormalizedZ)):
+
+  if[Math.sin(Zero) == 0] (
+   Print("sin alive"):
+  ) else (
+   Print("sin dead"):
+  )
+  if[Math.cos(Zero) == 1] (
+   Print("cos alive"):
+  ) else (
+   Print("cos dead"):
+  )
+  if[Math.tan(Zero) == 0] (
+   Print("tan alive"):
+  ) else (
+   Print("tan dead"):
+  )
+  if[Math.sqrt(81) == 9] (
+   Print("sqrt alive"):
+  ) else (
+   Print("sqrt dead"):
+  )
+  if[Math.abs(0 - 12.5) == 12.5] (
+   Print("abs alive"):
+  ) else (
+   Print("abs dead"):
+  )
+  if[Math.min(9, 4) == 4] (
+   Print("min alive"):
+  ) else (
+   Print("min dead"):
+  )
+  if[Math.max(9, 4) == 9] (
+   Print("max alive"):
+  ) else (
+   Print("max dead"):
+  )
+  if[Math.abs(Math.degrees(Pi) - 180) < 0.000001] (
+   Print("conversion alive"):
+  ) else (
+   Print("conversion dead"):
+  )
+  if[Math.abs(Length - 1) < 0.02] (
+   Print("normalization alive"):
+  ) else (
+   Print("normalization dead"):
+  )
+ )
+)

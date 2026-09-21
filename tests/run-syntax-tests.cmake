@@ -11,6 +11,7 @@ endif()
 
 set(WINDOW_DIR "${PROJECT_ROOT}/tests/window")
 set(FILE_IO_DIR "${CMAKE_CURRENT_BINARY_DIR}/file-io-project")
+set(MATH_DIR "${PROJECT_ROOT}/tests/math")
 set(ICON_INVALID_PROJECT "${CMAKE_CURRENT_BINARY_DIR}/icon-invalid-project")
 set(ENV{ZSHARP_SKIP_UPDATE_CHECK} "1")
 set(ENV{ZSHARP_PACKAGE_REGISTRY} "${TEST_PROJECT_REGISTRY}.packages")
@@ -78,6 +79,40 @@ function(expect_failure label expected working_dir)
             "${label} did not report '${expected}'\n${combined}")
     endif()
 endfunction()
+
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run Main.zsharp
+    WORKING_DIRECTORY "${MATH_DIR}"
+    RESULT_VARIABLE math_result
+    OUTPUT_VARIABLE math_output
+    ERROR_VARIABLE math_error
+)
+foreach(math_marker
+        "sin alive" "cos alive" "tan alive" "sqrt alive" "abs alive"
+        "min alive" "max alive" "conversion alive" "normalization alive")
+    if(NOT math_output MATCHES "${math_marker}")
+        message(FATAL_ERROR
+            "native Math test missed '${math_marker}' (${math_result})\n"
+            "stdout: ${math_output}\nstderr: ${math_error}")
+    endif()
+endforeach()
+if(NOT math_result EQUAL 0)
+    message(FATAL_ERROR
+        "native Math test failed (${math_result})\n"
+        "stdout: ${math_output}\nstderr: ${math_error}")
+endif()
+
+set(old_math_project "${CMAKE_CURRENT_BINARY_DIR}/old-math-project")
+file(REMOVE_RECURSE "${old_math_project}")
+file(COPY "${MATH_DIR}/" DESTINATION "${old_math_project}")
+file(READ "${old_math_project}/project.zsettings" old_math_settings)
+string(REPLACE "ZSharp: [1.1.2.2]:" "ZSharp: [1.1.2.1]:"
+       old_math_settings "${old_math_settings}")
+file(WRITE "${old_math_project}/project.zsettings"
+     "${old_math_settings}")
+expect_failure("old project native Math gate"
+               "native Math functions require ZSharp: [1.1.2.2]:"
+               "${old_math_project}" check Main.zsharp)
 
 expect_success("native 3D game packaging" "${PROJECT_ROOT}"
                package game "${TEST_3D_GAME_PROJECT}" Native3DRegression)
@@ -475,14 +510,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.2.2]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.2.3]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.1.2.2!"
+               "Update to at least 1.1.2.3!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

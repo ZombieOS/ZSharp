@@ -206,7 +206,8 @@ typedef enum ZSharpOpCode {
     ZOP_FILE_READ = 54,
     ZOP_FILE_EXISTS = 55,
     ZOP_FILE_WRITE = 56,
-    ZOP_FILE_APPEND = 57
+    ZOP_FILE_APPEND = 57,
+    ZOP_MATH = 58
 } ZSharpOpCode;
 
 typedef struct ZSharpInstruction {

@@ -1,0 +1,11 @@
+zsharp = type.settings
+
+Project: "Native Math Regression":
+PID: "native_math_regression":
+Version: [1.1.2.2]:
+Authors: ["Z# Tests"]:
+Description: "Native scalar math regression fixture.":
+ZSharp: [1.1.2.2]:
+
+Dependencies (
+):
