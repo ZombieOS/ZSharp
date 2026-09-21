@@ -90,5 +90,42 @@ int main(void) {
         fprintf(stderr, "yawed camera did not see cube on its forward axis\n");
         return 1;
     }
+
+    /* Combined pitch and backwards-facing yaw must remain independent. This
+       point is directly along the camera's local forward axis for yaw 180 and
+       pitch 30, so its tiny cube should remain centered with zero roll. */
+    cube.width = cube.height = cube.depth = 0.01f;
+    cube.x = 0.0f;
+    cube.y = 5.0f;
+    cube.z = 8.660254f;
+    frame.camera_rotation_x = 30.0f;
+    frame.camera_rotation_y = 180.0f;
+    frame.camera_rotation_z = 0.0f;
+    count = zsharp_game_project_cube(&frame, &cube, edges);
+    if (count != 12 || !finite_edges(edges, count)) {
+        fprintf(stderr, "backwards-facing pitched camera lost its forward object\n");
+        return 1;
+    }
+    {
+        float minimum_x = edges[0][0], maximum_x = edges[0][0];
+        float minimum_y = edges[0][1], maximum_y = edges[0][1];
+        size_t edge;
+        for (edge = 0; edge < count; edge++) {
+            size_t endpoint;
+            for (endpoint = 0; endpoint < 2; endpoint++) {
+                float x = edges[edge][endpoint * 2];
+                float y = edges[edge][endpoint * 2 + 1];
+                if (x < minimum_x) minimum_x = x;
+                if (x > maximum_x) maximum_x = x;
+                if (y < minimum_y) minimum_y = y;
+                if (y > maximum_y) maximum_y = y;
+            }
+        }
+        if (fabsf((minimum_x + maximum_x) * 0.5f - 640.0f) > 1.0f ||
+            fabsf((minimum_y + maximum_y) * 0.5f - 360.0f) > 1.0f) {
+            fprintf(stderr, "yaw 180 introduced pitch/roll drift\n");
+            return 1;
+        }
+    }
     return 0;
 }

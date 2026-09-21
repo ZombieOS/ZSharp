@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.2.1 - 2026-09-21
+
+- Fixed native 3D camera orientation so combined pitch and yaw remain
+  independent when rotating through the backwards-facing direction.
+- Fixed the horizon tilting or inverting near 180 degrees of yaw when
+  `cameraRotationZ` is zero.
+- Added regression coverage for a pitched first-person camera at 180 degrees
+  of yaw.
+
 ## 1.1.2.0 - The Lua Update - 2026-09-21
 
 - Added embedded Lua 5.5.1 interoperability without requiring a separate Lua

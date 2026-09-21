@@ -35,9 +35,14 @@ static void camera_space(const ZSharpGameRenderFrame *frame,
     output[0] = world[0] - frame->camera_x;
     output[1] = world[1] - frame->camera_y;
     output[2] = world[2] - frame->camera_z;
-    rotate_z(output, -frame->camera_rotation_z * ZGAME_PI / 180.0f);
-    rotate_x(output, -frame->camera_rotation_x * ZGAME_PI / 180.0f);
+    /* Apply the inverse camera transform in reverse Euler order. The camera's
+       local-to-world orientation is yaw, then pitch, then roll, so view space
+       must undo yaw before pitch and roll. Applying pitch first made it act
+       around a world-space axis; near 180 degrees of yaw that presented as an
+       unwanted roll even when cameraRotationZ was zero. */
     rotate_y(output, -frame->camera_rotation_y * ZGAME_PI / 180.0f);
+    rotate_x(output, -frame->camera_rotation_x * ZGAME_PI / 180.0f);
+    rotate_z(output, -frame->camera_rotation_z * ZGAME_PI / 180.0f);
 }
 
 static int project_camera_point(const ZSharpGameRenderFrame *frame,
