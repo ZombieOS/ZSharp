@@ -2285,6 +2285,11 @@ reports a runtime error for a negative value. All Math arguments must be
 numbers, and non-finite results are rejected. Native Math requires
 `ZSharp: [1.1.2.2]:` or newer.
 
+As of Z# 1.1.2.3, native Math results are always returned using ordinary
+decimal notation. Tiny floating-point residue produced by trigonometry near
+zero is normalized to `0`, so results never introduce unsupported scientific
+notation into later Z# expressions.
+
 Camera-relative X/Z movement can be calculated from the scene yaw:
 
 ```javascript

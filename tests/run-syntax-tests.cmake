@@ -88,7 +88,8 @@ execute_process(
     ERROR_VARIABLE math_error
 )
 foreach(math_marker
-        "sin alive" "cos alive" "tan alive" "sqrt alive" "abs alive"
+        "sin alive" "cos alive" "tan alive" "trig residue alive"
+        "camera yaw alive" "sqrt alive" "abs alive"
         "min alive" "max alive" "conversion alive" "normalization alive")
     if(NOT math_output MATCHES "${math_marker}")
         message(FATAL_ERROR
@@ -106,7 +107,7 @@ set(old_math_project "${CMAKE_CURRENT_BINARY_DIR}/old-math-project")
 file(REMOVE_RECURSE "${old_math_project}")
 file(COPY "${MATH_DIR}/" DESTINATION "${old_math_project}")
 file(READ "${old_math_project}/project.zsettings" old_math_settings)
-string(REPLACE "ZSharp: [1.1.2.2]:" "ZSharp: [1.1.2.1]:"
+string(REPLACE "ZSharp: [1.1.2.3]:" "ZSharp: [1.1.2.1]:"
        old_math_settings "${old_math_settings}")
 file(WRITE "${old_math_project}/project.zsettings"
      "${old_math_settings}")
@@ -510,14 +511,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.2.3]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.2.4]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.1.2.3!"
+               "Update to at least 1.1.2.4!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

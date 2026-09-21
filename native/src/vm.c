@@ -3297,7 +3297,8 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 double first;
                 double second = 0.0;
                 double result = 0.0;
-                char buffer[64];
+                char buffer[384];
+                char *fraction_end;
                 if (!pop(stack, &stack_count, &right, error, error_size) ||
                     right.type != ZVALUE_NUMBER) {
                     snprintf(error, error_size,
@@ -3346,7 +3347,22 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     ok = 0;
                     goto done;
                 }
-                snprintf(buffer, sizeof(buffer), "%.17g", result);
+                /* Native Math results must remain valid Z# number text.  The
+                   language deliberately rejects exponent notation, while %g
+                   naturally emits it for trig residuals such as cos(pi / 2).
+                   Collapse insignificant floating-point residue and always
+                   serialize the remaining value in ordinary decimal form. */
+                if (fabs(result) < 1e-12) result = 0.0;
+                snprintf(buffer, sizeof(buffer), "%.17f", result);
+                fraction_end = buffer + strlen(buffer);
+                while (fraction_end > buffer && fraction_end[-1] == '0')
+                    *--fraction_end = '\0';
+                if (fraction_end > buffer && fraction_end[-1] == '.')
+                    *--fraction_end = '\0';
+                if (strcmp(buffer, "-0") == 0) {
+                    buffer[0] = '0';
+                    buffer[1] = '\0';
+                }
                 value.type = ZVALUE_NUMBER;
                 value.number_text = heap_add_text(
                     heap, zsharp_copy_text(buffer, strlen(buffer)));

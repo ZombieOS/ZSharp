@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.1.2.2",
+    [string] $Version = "1.1.2.3",
 
     [string] $BaseUrl = "https://www.zsharp.zombieos.com",
 

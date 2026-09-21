@@ -24,6 +24,16 @@ noticed room MathLogic[] (
   ) else (
    Print("tan dead"):
   )
+  if[Math.cos(Math.radians(90)) == 0] (
+   Print("trig residue alive"):
+  ) else (
+   Print("trig residue dead"):
+  )
+  if[Math.sin(Math.radians(180)) == 0] (
+   Print("camera yaw alive"):
+  ) else (
+   Print("camera yaw dead"):
+  )
   if[Math.sqrt(81) == 9] (
    Print("sqrt alive"):
   ) else (

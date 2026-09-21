@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.2.3 - 2026-09-21
+
+- Fixed native Math results occasionally being serialized in scientific
+  notation, which Z# number expressions intentionally do not accept.
+- Native Math now returns ordinary decimal number text and normalizes harmless
+  floating-point trig residue near zero to `0`.
+- Added regression coverage for camera-relative movement calculations around
+  90-degree and 180-degree camera yaw.
+
 ## 1.1.2.2 - 2026-09-21
 
 - Added native `Math.sin`, `Math.cos`, `Math.tan`, `Math.sqrt`, `Math.abs`,
