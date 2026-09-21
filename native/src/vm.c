@@ -10,6 +10,9 @@
 #include "window_style.h"
 #include "terminal.h"
 #include "quickjs.h"
+#include "lua.h"
+#include "lauxlib.h"
+#include "lualib.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -514,6 +517,293 @@ static int execute_python_call(const ZSharpProgram *program,
     }
     free(response);
     return 1;
+}
+
+typedef struct LuaMemoryLimit {
+    size_t used;
+    size_t limit;
+} LuaMemoryLimit;
+
+typedef struct LuaDeadline {
+    time_t expires;
+} LuaDeadline;
+
+static void *lua_limited_alloc(void *opaque, void *pointer, size_t old_size,
+                               size_t new_size) {
+    LuaMemoryLimit *memory = (LuaMemoryLimit *)opaque;
+    void *resized;
+    if (pointer == NULL) old_size = 0;
+    if (new_size == 0) {
+        free(pointer);
+        memory->used = old_size > memory->used ? 0 : memory->used - old_size;
+        return NULL;
+    }
+    if (new_size > old_size && new_size - old_size > memory->limit - memory->used)
+        return NULL;
+    resized = realloc(pointer, new_size);
+    if (resized != NULL) {
+        memory->used = old_size > memory->used ? new_size :
+            memory->used - old_size + new_size;
+    }
+    return resized;
+}
+
+static void lua_timeout_hook(lua_State *state, lua_Debug *debug) {
+    LuaDeadline *deadline = *(LuaDeadline **)lua_getextraspace(state);
+    (void)debug;
+    if (deadline != NULL && time(NULL) >= deadline->expires)
+        luaL_error(state, "Lua execution exceeded the 5 second limit");
+}
+
+static int lua_traceback_handler(lua_State *state) {
+    const char *message = lua_tostring(state, 1);
+    luaL_traceback(state, state,
+                   message == NULL ? "Lua error" : message, 1);
+    return 1;
+}
+
+static int lua_failure(lua_State *state,
+                       const ZSharpInstruction *instruction,
+                       char *error, size_t error_size) {
+    const char *message = lua_tostring(state, -1);
+    snprintf(error, error_size, "Lua call %s:%s failed:\n%s",
+             instruction->call_file, instruction->call_function,
+             message == NULL ? "Lua error" : message);
+    lua_pop(state, 1);
+    return 0;
+}
+
+static int push_lua_argument(lua_State *state, const RuntimeValue *value,
+                             char *error, size_t error_size) {
+    size_t index;
+    if (value->type == ZVALUE_TEXT) {
+        lua_pushstring(state, value->text == NULL ? "" : value->text);
+    } else if (value->type == ZVALUE_NUMBER) {
+        lua_pushnumber(state, strtod(value->number_text == NULL ? "0" :
+                                    value->number_text, NULL));
+    } else if (value->type == ZVALUE_STATUS) {
+        lua_pushboolean(state, value->number != 0);
+    } else if (value->type == ZVALUE_NULL) {
+        lua_pushnil(state);
+    } else if (value->type == ZVALUE_TEXT_ARRAY ||
+               value->type == ZVALUE_NUMBER_ARRAY) {
+        size_t count = value->type == ZVALUE_TEXT_ARRAY
+            ? value->array->text_item_count : value->array->number_item_count;
+        lua_createtable(state, (int)count, 0);
+        for (index = 0; index < count; index++) {
+            if (value->type == ZVALUE_TEXT_ARRAY)
+                lua_pushstring(state, value->array->text_items[index]);
+            else
+                lua_pushnumber(state, strtod(
+                    value->array->number_items[index], NULL));
+            lua_rawseti(state, -2, (lua_Integer)index + 1);
+        }
+    } else {
+        snprintf(error, error_size,
+                 "Lua arguments support text, number, status, null, and text/number arrays");
+        return 0;
+    }
+    return 1;
+}
+
+static int read_lua_result(lua_State *state, RuntimeHeap *heap,
+                           RuntimeValue *result, char *error,
+                           size_t error_size) {
+    size_t index;
+    memset(result, 0, sizeof(*result));
+    if (lua_type(state, -1) == LUA_TSTRING) {
+        size_t length;
+        const char *text = lua_tolstring(state, -1, &length);
+        char *copy;
+        if (memchr(text, '\0', length) != NULL) {
+            snprintf(error, error_size,
+                     "Lua returned text containing an embedded null byte");
+            return 0;
+        }
+        copy = zsharp_copy_text(text, length);
+        if (copy == NULL || heap_add_text(heap, copy) == NULL) return 0;
+        result->type = ZVALUE_TEXT;
+        result->text = copy;
+    } else if (lua_type(state, -1) == LUA_TBOOLEAN) {
+        result->type = ZVALUE_STATUS;
+        result->number = lua_toboolean(state, -1);
+    } else if (lua_type(state, -1) == LUA_TNUMBER) {
+        char buffer[64];
+        char *copy;
+        double number = (double)lua_tonumber(state, -1);
+        snprintf(buffer, sizeof(buffer), "%.17g", number);
+        copy = zsharp_copy_text(buffer, strlen(buffer));
+        if (copy == NULL || heap_add_text(heap, copy) == NULL) return 0;
+        result->type = ZVALUE_NUMBER;
+        result->number_text = copy;
+        result->number = (int32_t)number;
+    } else if (lua_type(state, -1) == LUA_TTABLE) {
+        lua_Unsigned item_count = lua_rawlen(state, -1);
+        int array_type = 0;
+        ZSharpVariable *array;
+        if (item_count > 100000) {
+            snprintf(error, error_size,
+                     "Lua returned an excessively large array");
+            return 0;
+        }
+        array = (ZSharpVariable *)calloc(1, sizeof(*array));
+        if (array == NULL) return 0;
+        array->name = "Lua result";
+        for (index = 0; index < (size_t)item_count; index++) {
+            int type;
+            lua_rawgeti(state, -1, (lua_Integer)index + 1);
+            type = lua_type(state, -1);
+            if (array_type == 0)
+                array_type = type == LUA_TSTRING ? ZVALUE_TEXT_ARRAY :
+                             type == LUA_TNUMBER ? ZVALUE_NUMBER_ARRAY : -1;
+            if ((array_type == ZVALUE_TEXT_ARRAY && type != LUA_TSTRING) ||
+                (array_type == ZVALUE_NUMBER_ARRAY && type != LUA_TNUMBER) ||
+                array_type < 0) {
+                lua_pop(state, 1);
+                free_runtime_array(array);
+                snprintf(error, error_size,
+                         "Lua arrays must contain only text or only numbers");
+                return 0;
+            }
+            if (array_type == ZVALUE_TEXT_ARRAY) {
+                size_t length;
+                const char *text = lua_tolstring(state, -1, &length);
+                char *copy = memchr(text, '\0', length) == NULL
+                    ? zsharp_copy_text(text, length) : NULL;
+                char **resized = copy == NULL ? NULL : (char **)realloc(
+                    array->text_items,
+                    (array->text_item_count + 1) * sizeof(*resized));
+                if (resized == NULL) {
+                    free(copy); lua_pop(state, 1); free_runtime_array(array);
+                    return 0;
+                }
+                array->text_items = resized;
+                array->text_items[array->text_item_count++] = copy;
+            } else {
+                char buffer[64];
+                char *copy;
+                char **resized;
+                snprintf(buffer, sizeof(buffer), "%.17g",
+                         (double)lua_tonumber(state, -1));
+                copy = zsharp_copy_text(buffer, strlen(buffer));
+                resized = copy == NULL ? NULL : (char **)realloc(
+                    array->number_items,
+                    (array->number_item_count + 1) * sizeof(*resized));
+                if (resized == NULL) {
+                    free(copy); lua_pop(state, 1); free_runtime_array(array);
+                    return 0;
+                }
+                array->number_items = resized;
+                array->number_items[array->number_item_count++] = copy;
+            }
+            lua_pop(state, 1);
+        }
+        if (array_type == 0) array_type = ZVALUE_TEXT_ARRAY;
+        array->type = (ZSharpValueType)array_type;
+        if (heap_add_array(heap, array) == NULL) return 0;
+        result->type = array->type;
+        result->array = array;
+    } else if (lua_isnil(state, -1)) {
+        result->type = ZVALUE_NULL;
+    } else {
+        snprintf(error, error_size,
+                 "Lua returned an unsupported %s value",
+                 luaL_typename(state, -1));
+        return 0;
+    }
+    return 1;
+}
+
+static int execute_lua_call(const ZSharpProgram *program,
+                            const ZSharpInstruction *instruction,
+                            const RuntimeValue *arguments,
+                            const char *project_root, RuntimeHeap *heap,
+                            RuntimeValue *result, char *error,
+                            size_t error_size) {
+    const char *module_name = instruction->call_file;
+    size_t project_length = program->project_id == NULL ? 0 :
+        strlen(program->project_id);
+    char relative[1024], path[2048];
+    size_t index;
+    LuaMemoryLimit memory = {0, 64u * 1024u * 1024u};
+    LuaDeadline deadline;
+    lua_State *state;
+    int module_is_table = 0;
+    int error_handler;
+    int function_index;
+    int ok = 0;
+    if (project_length > 0 &&
+        strncmp(module_name, program->project_id, project_length) == 0 &&
+        module_name[project_length] == '.')
+        module_name += project_length + 1;
+    snprintf(relative, sizeof(relative), "%s", module_name);
+    for (index = 0; relative[index] != '\0'; index++)
+        if (relative[index] == '.') relative[index] =
+#ifdef _WIN32
+            '\\';
+#else
+            '/';
+#endif
+    snprintf(path, sizeof(path), "%s%c%s.lua", project_root,
+#ifdef _WIN32
+             '\\',
+#else
+             '/',
+#endif
+             relative);
+    state = lua_newstate(lua_limited_alloc, &memory, (unsigned)time(NULL));
+    if (state == NULL) {
+        snprintf(error, error_size, "could not create the Lua runtime");
+        return 0;
+    }
+    deadline.expires = time(NULL) + 5;
+    *(LuaDeadline **)lua_getextraspace(state) = &deadline;
+    lua_sethook(state, lua_timeout_hook, LUA_MASKCOUNT, 10000);
+    luaL_openlibs(state);
+    if (luaL_loadfile(state, path) != LUA_OK) {
+        lua_failure(state, instruction, error, error_size);
+        goto cleanup;
+    }
+    lua_pushcfunction(state, lua_traceback_handler);
+    lua_insert(state, -2);
+    error_handler = lua_gettop(state) - 1;
+    if (lua_pcall(state, 0, 1, error_handler) != LUA_OK) {
+        lua_failure(state, instruction, error, error_size);
+        goto cleanup;
+    }
+    lua_remove(state, error_handler);
+    module_is_table = lua_istable(state, -1);
+    if (module_is_table)
+        lua_getfield(state, -1, instruction->call_function);
+    else {
+        lua_pop(state, 1);
+        lua_getglobal(state, instruction->call_function);
+    }
+    if (!lua_isfunction(state, -1)) {
+        snprintf(error, error_size,
+                 "Lua module '%s' has no exported function '%s'",
+                 instruction->call_file, instruction->call_function);
+        goto cleanup;
+    }
+    function_index = lua_gettop(state);
+    for (index = 0; index < instruction->argument_count; index++)
+        if (!push_lua_argument(state, &arguments[index], error, error_size))
+            goto cleanup;
+    lua_pushcfunction(state, lua_traceback_handler);
+    lua_insert(state, function_index);
+    error_handler = function_index;
+    if (lua_pcall(state, (int)instruction->argument_count, 1,
+                  error_handler) != LUA_OK) {
+        lua_failure(state, instruction, error, error_size);
+        goto cleanup;
+    }
+    lua_remove(state, error_handler);
+    if (!read_lua_result(state, heap, result, error, error_size)) goto cleanup;
+    ok = 1;
+cleanup:
+    if (!ok && error[0] == '\0') snprintf(error, error_size, "out of memory");
+    lua_close(state);
+    return ok;
 }
 
 static int javascript_exception(JSContext *context,
@@ -1089,6 +1379,93 @@ static int json_project_path(const char *project_root, const char *relative,
         strstr(relative, "..") != NULL) return 0;
     return snprintf(path, path_size, "%s/%s", project_root, relative) > 0 &&
            strlen(path) < path_size;
+}
+
+static int read_project_text(const char *project_root, const char *relative,
+                             RuntimeHeap *heap, RuntimeValue *output,
+                             char *error, size_t error_size) {
+    char path[4096];
+    FILE *file;
+    long length;
+    char *contents;
+    if (!json_project_path(project_root, relative, path, sizeof(path))) {
+        snprintf(error, error_size,
+                 "File.read requires a safe project-relative path");
+        return 0;
+    }
+    file = fopen(path, "rb");
+    if (file == NULL || fseek(file, 0, SEEK_END) != 0 ||
+        (length = ftell(file)) < 0 || length > 16 * 1024 * 1024 ||
+        fseek(file, 0, SEEK_SET) != 0) {
+        if (file != NULL) fclose(file);
+        snprintf(error, error_size, "could not read file '%s'", relative);
+        return 0;
+    }
+    contents = (char *)malloc((size_t)length + 1);
+    if (contents == NULL ||
+        fread(contents, 1, (size_t)length, file) != (size_t)length) {
+        free(contents); fclose(file);
+        snprintf(error, error_size, "could not read file '%s'", relative);
+        return 0;
+    }
+    fclose(file);
+    contents[length] = '\0';
+    output->type = ZVALUE_TEXT;
+    output->text = heap_add_text(heap, contents);
+    if (output->text == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    return 1;
+}
+
+static int project_file_exists(const char *project_root, const char *relative,
+                               int *exists, char *error, size_t error_size) {
+    char path[4096];
+    FILE *file;
+    if (!json_project_path(project_root, relative, path, sizeof(path))) {
+        snprintf(error, error_size,
+                 "File.exists requires a safe project-relative path");
+        return 0;
+    }
+    file = fopen(path, "rb");
+    *exists = file != NULL;
+    if (file != NULL) fclose(file);
+    return 1;
+}
+
+static int write_project_text(const char *project_root, const char *relative,
+                              const char *contents, int append,
+                              char *error, size_t error_size) {
+    char path[4096];
+    FILE *file;
+    size_t length = strlen(contents);
+    int close_result;
+    if (!json_project_path(project_root, relative, path, sizeof(path))) {
+        snprintf(error, error_size,
+                 "File.%s requires a safe project-relative path",
+                 append ? "append" : "write");
+        return 0;
+    }
+    file = fopen(path, append ? "ab" : "wb");
+    if (file == NULL) {
+        snprintf(error, error_size, "could not %s file '%s'",
+                 append ? "append to" : "write", relative);
+        return 0;
+    }
+    if (fwrite(contents, 1, length, file) != length) {
+        fclose(file);
+        snprintf(error, error_size, "could not %s file '%s'",
+                 append ? "append to" : "write", relative);
+        return 0;
+    }
+    close_result = fclose(file);
+    if (close_result != 0) {
+        snprintf(error, error_size, "could not finish writing file '%s'",
+                 relative);
+        return 0;
+    }
+    return 1;
 }
 
 static int load_json_object(ZSharpRoom *room, const char *schema_name,
@@ -2561,6 +2938,56 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     goto done;
                 }
                 break;
+            case ZOP_FILE_READ:
+                if (!pop(stack, &stack_count, &value, error, error_size) ||
+                    value.type != ZVALUE_TEXT ||
+                    !read_project_text(project_root, value.text, heap, &value,
+                                       error, error_size) ||
+                    !push(stack, stack_capacity, &stack_count, value, error,
+                          error_size)) {
+                    if (error[0] == '\0')
+                        snprintf(error, error_size,
+                                 "File.read requires a text path");
+                    ok = 0;
+                    goto done;
+                }
+                break;
+            case ZOP_FILE_EXISTS: {
+                int exists = 0;
+                if (!pop(stack, &stack_count, &value, error, error_size) ||
+                    value.type != ZVALUE_TEXT ||
+                    !project_file_exists(project_root, value.text, &exists,
+                                         error, error_size)) {
+                    if (error[0] == '\0')
+                        snprintf(error, error_size,
+                                 "File.exists requires a text path");
+                    ok = 0;
+                    goto done;
+                }
+                value.type = ZVALUE_STATUS;
+                value.number = exists;
+                if (!push(stack, stack_capacity, &stack_count, value, error,
+                          error_size)) {
+                    ok = 0;
+                    goto done;
+                }
+                break;
+            }
+            case ZOP_FILE_WRITE:
+            case ZOP_FILE_APPEND:
+                if (!pop(stack, &stack_count, &right, error, error_size) ||
+                    !pop(stack, &stack_count, &left, error, error_size) ||
+                    left.type != ZVALUE_TEXT || right.type != ZVALUE_TEXT ||
+                    !write_project_text(project_root, left.text, right.text,
+                                        instruction->op == ZOP_FILE_APPEND,
+                                        error, error_size)) {
+                    if (error[0] == '\0')
+                        snprintf(error, error_size,
+                                 "File write operations require a text path and text contents");
+                    ok = 0;
+                    goto done;
+                }
+                break;
             case ZOP_STORE_NAME: {
                 RuntimeField *field;
                 ZSharpVariable *variable;
@@ -3715,6 +4142,25 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                                                  call_arguments, project_root,
                                                  heap, &call_return, error,
                                                  error_size)) {
+                        free(call_arguments);
+                        ok = 0;
+                        goto done;
+                    }
+                    free(call_arguments);
+                    if (instruction->op == ZOP_CALL_QUALIFIED_VALUE &&
+                        !push(stack, stack_capacity, &stack_count, call_return,
+                              error, error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                    break;
+                }
+                if (instruction->operand != NULL &&
+                    strcmp(instruction->operand, "@lua") == 0) {
+                    if (!execute_lua_call(program, instruction,
+                                          call_arguments, project_root,
+                                          heap, &call_return, error,
+                                          error_size)) {
                         free(call_arguments);
                         ok = 0;
                         goto done;

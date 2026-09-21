@@ -4,10 +4,16 @@ noticed room Game[] (
  noticed brain Start[] (
   number Z = DynamicCube.positionZ:
   number Velocity = DynamicCube.velocityZ:
+  number Pitch = Main.cameraRotationX:
+  number DeltaX = input.mouse.deltaX:
+  status Captured = input.mouse.captured:
   if[input.key.rarrow == alive] (
    number.set:DynamicCube.positionZ = Z + 1:
    number.set:DynamicCube.velocityZ = Velocity + 1:
   ) else (
   )
+  input.mouse.captured.set: alive:
+  number.set:Main.cameraRotationX = Pitch + input.mouse.deltaY:
+  number.set:DynamicCube.rotationY = DynamicCube.rotationY + DeltaX:
  )
 )

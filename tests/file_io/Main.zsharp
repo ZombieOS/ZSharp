@@ -1,0 +1,12 @@
+zsharp = type.script
+
+noticed room Files[] (
+ noticed brain Start[] (
+  File.write("Output.txt", "first"):
+  File.append("Output.txt", " second"):
+  text Contents = File.read("Output.txt"):
+  status Present = File.exists("Output.txt"):
+  Print(Contents):
+  Print(Present):
+ )
+)

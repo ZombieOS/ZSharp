@@ -21,6 +21,9 @@ typedef struct ZSharpGameRenderObject {
     float height;
     float depth;
     float rotation;
+    float rotation_x;
+    float rotation_y;
+    float rotation_z;
     float scale_x;
     float scale_y;
     float scale_z;
@@ -37,6 +40,9 @@ typedef struct ZSharpGameRenderFrame {
     float camera_x;
     float camera_y;
     float camera_z;
+    float camera_rotation_x;
+    float camera_rotation_y;
+    float camera_rotation_z;
     float camera_fov;
     const char *project_root;
     const ZSharpGameRenderObject *objects;

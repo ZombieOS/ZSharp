@@ -1,0 +1,21 @@
+zsharp = type.script
+
+noticed room LuaTest[] (
+ import zsharp_language_test.Startup():
+ import lua:zsharp_language_test.Lua.Utilities():
+
+ noticed brain Start[] (
+ )
+
+ noticed brain Run[] (
+  text Message = Function.call(lua:Lua.Utilities:greet[Startup.Name.contents]):
+  number Answer = Function.call(lua:Lua.Utilities:add[20, 22]):
+  text Ready = "dead":
+  if[Function.call(lua:Lua.Utilities:is_ready)] (
+   Ready = "alive":
+  ) else (
+  )
+  Startup.Result.content.set:
+   (Message + " Answer: " + Answer + " Ready: " + Ready):
+ )
+)

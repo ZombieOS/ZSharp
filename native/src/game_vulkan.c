@@ -151,24 +151,45 @@ static int render_circle(SDL_Renderer *renderer,
 static int render_cube(SDL_Renderer *renderer,
                        const ZSharpGameRenderFrame *frame,
                        const ZSharpGameRenderObject *object) {
-    float edges[12][4];
-    size_t count = zsharp_game_project_cube(frame, object, edges);
-    size_t index;
-    set_color(renderer, object->color);
-    for (index = 0; index < count; index++)
-        if (!SDL_RenderLine(renderer, edges[index][0], edges[index][1],
-                            edges[index][2], edges[index][3])) return 0;
+    ZSharpProjectedCubeFace faces[6];
+    size_t count = zsharp_game_project_cube_faces(frame, object, faces);
+    size_t face_index;
+    for (face_index = 0; face_index < count; face_index++) {
+        const ZSharpProjectedCubeFace *face = &faces[face_index];
+        SDL_Vertex vertices[6];
+        int indices[12];
+        SDL_FColor color = float_color_value(object->color);
+        size_t index;
+        color.r *= face->brightness;
+        color.g *= face->brightness;
+        color.b *= face->brightness;
+        memset(vertices, 0, sizeof(vertices));
+        for (index = 0; index < face->point_count; index++) {
+            vertices[index].position.x = face->points[index][0];
+            vertices[index].position.y = face->points[index][1];
+            vertices[index].color = color;
+        }
+        for (index = 0; index + 2 < face->point_count; index++) {
+            indices[index * 3] = 0;
+            indices[index * 3 + 1] = (int)index + 1;
+            indices[index * 3 + 2] = (int)index + 2;
+        }
+        if (!SDL_RenderGeometry(renderer, NULL, vertices,
+                                (int)face->point_count, indices,
+                                ((int)face->point_count - 2) * 3)) return 0;
+    }
     return 1;
 }
 
-static int compare_render_objects(const void *left, const void *right) {
-    const ZSharpGameRenderObject *a =
-        (const ZSharpGameRenderObject *)left;
-    const ZSharpGameRenderObject *b =
-        (const ZSharpGameRenderObject *)right;
-    if (a->layer != b->layer) return a->layer < b->layer ? -1 : 1;
-    if (a->z != b->z) return a->z > b->z ? -1 : 1;
-    return 0;
+static int render_before(const ZSharpGameRenderFrame *frame,
+                         const ZSharpGameRenderObject *a,
+                         const ZSharpGameRenderObject *b) {
+    float a_depth, b_depth;
+    if (a->layer != b->layer) return a->layer < b->layer;
+    if (!frame->is_3d) return a->z > b->z;
+    a_depth = zsharp_game_camera_depth(frame, a);
+    b_depth = zsharp_game_camera_depth(frame, b);
+    return a_depth > b_depth;
 }
 
 static SDL_Texture *load_sprite(ZSharpGameVulkan *renderer,
@@ -291,8 +312,19 @@ int zsharp_game_vulkan_draw(ZSharpGameVulkan *renderer, int resized,
         }
         memcpy(ordered, frame->objects,
                frame->object_count * sizeof(*ordered));
-        qsort(ordered, frame->object_count, sizeof(*ordered),
-              compare_render_objects);
+        /* qsort cannot receive the active camera, so use a small stable sort.
+           Games normally draw tens or hundreds of objects and correct
+           camera-space ordering matters more than world-Z ordering. */
+        for (index = 1; index < frame->object_count; index++) {
+            ZSharpGameRenderObject value = ordered[index];
+            size_t position = index;
+            while (position > 0 &&
+                   render_before(frame, &value, &ordered[position - 1])) {
+                ordered[position] = ordered[position - 1];
+                position--;
+            }
+            ordered[position] = value;
+        }
     }
     for (index = 0; index < frame->object_count; index++) {
         const ZSharpGameRenderObject *object = &ordered[index];

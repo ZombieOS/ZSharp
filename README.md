@@ -33,6 +33,11 @@ Python is not kept running while an app is idle. If an older updater installs
 1.1.0.0 without the new component, the runtime downloads and SHA-256 verifies
 it automatically the first time a Python function is called.
 
+Z# 1.1.1.0 embeds JavaScript without requiring Node.js. Z# 1.1.2.0 embeds Lua
+5.5.1 without requiring a separate Lua installation. Both use project-scoped
+imports and can exchange text, numbers, statuses, null values, and homogeneous
+text or number arrays with Z#.
+
 ## Current status
 
 This repository contains the first working compiler, bytecode VM, and Java

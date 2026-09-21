@@ -1,0 +1,25 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import lua:lua_test.Lua.Utilities():
+
+ noticed text() Values = ["first", "日本語", "third"]:
+
+ noticed brain Start[] (
+  text Message = Function.call(lua:Lua.Utilities:greeting["Tester"]):
+  number Answer = Function.call(lua:Lua.Utilities:answer):
+  text Decorated = Function.call(lua:Lua.Utilities:first_decorated[Values]):
+  number Third = Function.call(lua:Lua.Utilities:third_number[Function.call(lua:Lua.Utilities:number_values)]):
+  Print(Message):
+  Print(Answer):
+  if[Function.call(lua:Lua.Utilities:available)] (
+   Print("Lua status alive"):
+  ) else (
+   Print("Lua status dead"):
+  )
+  Print(Decorated):
+  Print(Third):
+  Print(Function.call(lua:Lua.Utilities:unicode)):
+  Print(Function.call(lua:Lua.Utilities:empty_value)):
+ )
+)

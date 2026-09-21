@@ -343,6 +343,26 @@ static int parse_primary(Parser *parser, ZSharpFunction *function) {
             instruction->operand = schema_name;
             return 1;
         }
+        if (zsharp_token_equals(&token, "File") &&
+            match_type(parser, ZTOKEN_DOT)) {
+            char *method = consume_name(parser, "read or exists");
+            ZSharpOpCode operation =
+                method != NULL && strcmp(method, "read") == 0 ? ZOP_FILE_READ :
+                method != NULL && strcmp(method, "exists") == 0 ? ZOP_FILE_EXISTS :
+                0;
+            free(method);
+            if (operation == 0) {
+                fail_at(parser, &token,
+                        "File expressions support read or exists");
+                return 0;
+            }
+            if (!consume_type(parser, ZTOKEN_LEFT_PAREN,
+                              "'(' after the File operation") ||
+                !parse_expression(parser, function) ||
+                !consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "')' after the file path")) return 0;
+            return emit(parser, function, operation) != NULL;
+        }
         if (zsharp_token_equals(&token, "random") &&
             match_type(parser, ZTOKEN_DOT)) {
             char *method = consume_name(parser, "number, decimal, or chance");
@@ -623,13 +643,15 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
     }
     if (!parser->failed && strcmp(parts[0], "py") != 0 &&
         strcmp(parts[0], "js") != 0 &&
+        strcmp(parts[0], "lua") != 0 &&
         part_count != 3 && part_count != 4) {
         fail_at(parser, &parser->current,
                 "Function.call requires File.Room.Function or "
                 "Project.File.Room.Function");
     }
     if (!parser->failed &&
-        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0) &&
+        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
+         strcmp(parts[0], "lua") == 0) &&
         part_count < 3) {
         fail_at(parser, &parser->current,
                 "foreign calls require LANGUAGE:Path.To.File:function");
@@ -675,7 +697,8 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
         free(call_outcome);
         return 0;
     }
-    if (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0) {
+    if (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
+        strcmp(parts[0], "lua") == 0) {
         size_t module_length = 0;
         char *module;
         char *cursor;
@@ -683,7 +706,9 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
             module_length += strlen(parts[index]) + (index > 1 ? 1u : 0u);
         module = (char *)malloc(module_length + 1);
         instruction->operand = zsharp_copy_text(
-            strcmp(parts[0], "py") == 0 ? "@py" : "@js", 3);
+            strcmp(parts[0], "py") == 0 ? "@py" :
+            strcmp(parts[0], "js") == 0 ? "@js" : "@lua",
+            strcmp(parts[0], "lua") == 0 ? 4 : 3);
         instruction->call_room = zsharp_copy_text("", 0);
         if (module == NULL || instruction->operand == NULL ||
             instruction->call_room == NULL) {
@@ -1608,6 +1633,33 @@ static int parse_statement(Parser *parser, ZSharpFunction *function) {
     if (match_word(parser, "Function")) {
         return parse_qualified_call(parser, function, 0);
     }
+    if (match_word(parser, "File")) {
+        char *method;
+        ZSharpOpCode operation;
+        if (!consume_type(parser, ZTOKEN_DOT, "'.' after File")) return 0;
+        method = consume_name(parser, "write or append");
+        operation =
+            method != NULL && strcmp(method, "write") == 0 ? ZOP_FILE_WRITE :
+            method != NULL && strcmp(method, "append") == 0 ? ZOP_FILE_APPEND :
+            0;
+        free(method);
+        if (operation == 0) {
+            fail_at(parser, &parser->current,
+                    "File statements support write or append");
+            return 0;
+        }
+        if (!consume_type(parser, ZTOKEN_LEFT_PAREN,
+                          "'(' after the File operation") ||
+            !parse_expression(parser, function) ||
+            !consume_type(parser, ZTOKEN_COMMA,
+                          "',' after the file path") ||
+            !parse_expression(parser, function) ||
+            !consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                          "')' after the file contents") ||
+            !consume_type(parser, ZTOKEN_COLON,
+                          "':' after the File operation")) return 0;
+        return emit(parser, function, operation) != NULL;
+    }
     if (match_word(parser, "number")) {
         return parse_number_statement(parser, function);
     }
@@ -2339,9 +2391,11 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     int foreign_language = 0;
     parts[part_count++] = consume_name(parser, "an imported project name");
     if (!parser->failed &&
-        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0) &&
+        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
+         strcmp(parts[0], "lua") == 0) &&
         match_type(parser, ZTOKEN_COLON)) {
-        foreign_language = strcmp(parts[0], "py") == 0 ? 1 : 2;
+        foreign_language = strcmp(parts[0], "py") == 0 ? 1 :
+                           strcmp(parts[0], "js") == 0 ? 2 : 3;
         parts[part_count++] = consume_name(parser,
                                            "the foreign project name");
     }
@@ -2387,14 +2441,16 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     for (index = 0; index < part_count; index++) free(parts[index]);
     if (path == NULL) return 0;
     if (foreign_language) {
+        const char *prefix = foreign_language == 1 ? "py" :
+                             foreign_language == 2 ? "js" : "lua";
+        size_t prefix_length = strlen(prefix);
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {
             free(path);
             fail_at(parser, &parser->current, "out of memory");
             return 0;
         }
-        sprintf(qualified, "%s:%s",
-                foreign_language == 1 ? "py" : "js", path + 3);
+        sprintf(qualified, "%s:%s", prefix, path + prefix_length + 1);
         free(path);
         path = qualified;
     }
@@ -2425,9 +2481,11 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     int foreign_language = 0;
     parts[part_count++] = consume_name(parser, "an imported project name");
     if (!parser->failed &&
-        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0) &&
+        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
+         strcmp(parts[0], "lua") == 0) &&
         match_type(parser, ZTOKEN_COLON)) {
-        foreign_language = strcmp(parts[0], "py") == 0 ? 1 : 2;
+        foreign_language = strcmp(parts[0], "py") == 0 ? 1 :
+                           strcmp(parts[0], "js") == 0 ? 2 : 3;
         parts[part_count++] = consume_name(parser,
                                            "the foreign project name");
     }
@@ -2473,14 +2531,16 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     for (index = 0; index < part_count; index++) free(parts[index]);
     if (path == NULL) return 0;
     if (foreign_language) {
+        const char *prefix = foreign_language == 1 ? "py" :
+                             foreign_language == 2 ? "js" : "lua";
+        size_t prefix_length = strlen(prefix);
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {
             free(path);
             fail_at(parser, &parser->current, "out of memory");
             return 0;
         }
-        sprintf(qualified, "%s:%s",
-                foreign_language == 1 ? "py" : "js", path + 3);
+        sprintf(qualified, "%s:%s", prefix, path + prefix_length + 1);
         free(path);
         path = qualified;
     }

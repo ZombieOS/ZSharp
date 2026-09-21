@@ -3,6 +3,8 @@ zsharp = type.script:window
 noticed Window Startup[] (
  import ZSharp.Window.*():
  import zsharp_language_test.PythonTest():
+ import zsharp_language_test.JavaScriptTest():
+ import zsharp_language_test.LuaTest():
 
  noticed design Design[] (
   title: "Z# Language Test":
@@ -13,12 +15,40 @@ noticed Window Startup[] (
  )
 
  noticed text[header] Heading[] (
-  content: "Z# Language Test - Python":
+  content: "Z# Language Test - Python • JavaScript • Lua":
   color: #FFFFFF:
-  width: 600px:
-  height: 50px:
+ width: 600px:
+ height: 50px:
   locationX: 0px:
   locationY: 125px:
+ )
+
+ noticed button RunJavaScript[] (
+  text: "Run JavaScript":
+  textColor: #FFFFFF:
+  buttonColor: #2879D0:
+  width: 180px:
+  height: 42px:
+  locationX: 0px:
+  locationY: -15px:
+  Click[
+   left: [JavaScriptTest:JavaScriptTest:Run]:
+   right: []:
+  ]:
+ )
+
+ noticed button RunLua[] (
+  text: "Run Lua":
+  textColor: #FFFFFF:
+  buttonColor: #2C2D72:
+  width: 180px:
+  height: 42px:
+  locationX: 200px:
+  locationY: -15px:
+  Click[
+   left: [LuaTest:LuaTest:Run]:
+   right: []:
+  ]:
  )
 
  noticed textInput Name[] (
@@ -33,10 +63,10 @@ noticed Window Startup[] (
  noticed button RunPython[] (
   text: "Run Python":
   textColor: #FFFFFF:
-  buttonColor: #6F42E8:
-  width: 180px:
-  height: 42px:
-  locationX: 0px:
+ buttonColor: #6F42E8:
+ width: 180px:
+ height: 42px:
+  locationX: -200px:
   locationY: -15px:
   Click[
    left: [PythonTest:PythonTest:Run]:
@@ -45,7 +75,7 @@ noticed Window Startup[] (
  )
 
  noticed text[subheader] Result[] (
-  content: "Python has not run yet.":
+  content: "Choose a language to test.":
   color: #FFFFFF:
   width: 600px:
   height: 70px:

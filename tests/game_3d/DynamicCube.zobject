@@ -4,6 +4,14 @@ noticed object DynamicCube[] (
  shape: cube:
  color: #00F0FF:
  body: dynamic:
+ rotationX: 5:
+ rotationY: 10:
+ rotationZ: 15:
+ scaleX: 1:
+ scaleY: 1:
+ scaleZ: 1:
+ velocityX: 0:
+ velocityY: 0:
  velocityZ: -1:
  attributes[JSON] (
   [

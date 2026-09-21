@@ -53,6 +53,9 @@ typedef struct ZSharpGameScene {
     float camera_x;
     float camera_y;
     float camera_z;
+    float camera_rotation_x;
+    float camera_rotation_y;
+    float camera_rotation_z;
     float camera_fov;
 } ZSharpGameScene;
 
@@ -77,12 +80,18 @@ typedef struct ZSharpGameObject {
     int height_explicit;
     int depth_explicit;
     float rotation;
+    float rotation_x;
+    float rotation_y;
+    float rotation_z;
     float scale_x;
     float scale_y;
     float scale_z;
     float velocity_x;
     float velocity_y;
     float velocity_z;
+    float motion_x;
+    float motion_y;
+    float motion_z;
     float mass;
     float gravity_scale;
     float restitution;
@@ -122,6 +131,9 @@ typedef struct ZSharpGameInput {
     int mouse_right;
     float mouse_x;
     float mouse_y;
+    float mouse_delta_x;
+    float mouse_delta_y;
+    int mouse_captured;
 } ZSharpGameInput;
 
 typedef struct ZSharpGameModel {

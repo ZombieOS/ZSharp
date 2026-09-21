@@ -1,0 +1,8 @@
+zsharp = type.settings
+
+Project: "File I/O Regression":
+PID: "file_io_regression":
+Version: [1.1.2.0]:
+Authors: ["Z# Tests"]:
+Description: "Project-relative text file I/O regression fixture.":
+ZSharp: [1.1.2.0]:

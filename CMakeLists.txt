@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.1.1.0 LANGUAGES C)
+project(zsharp VERSION 1.1.2.0 LANGUAGES C)
 
 option(ZSHARP_BUILD_EXAMPLES "Build Z# integration examples" OFF)
 option(ZSHARP_BUILD_GAME_RUNTIME
@@ -22,6 +22,38 @@ FetchContent_Declare(
     EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(QuickJS)
+
+FetchContent_Declare(
+    Lua
+    URL https://www.lua.org/ftp/lua-5.5.1.tar.gz
+    URL_HASH SHA256=1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(Lua)
+set(LUA_SOURCE_DIR "${lua_SOURCE_DIR}/src")
+add_library(zsharp_lua STATIC
+    ${LUA_SOURCE_DIR}/lapi.c ${LUA_SOURCE_DIR}/lauxlib.c
+    ${LUA_SOURCE_DIR}/lbaselib.c ${LUA_SOURCE_DIR}/lcode.c
+    ${LUA_SOURCE_DIR}/lcorolib.c ${LUA_SOURCE_DIR}/lctype.c
+    ${LUA_SOURCE_DIR}/ldblib.c ${LUA_SOURCE_DIR}/ldebug.c
+    ${LUA_SOURCE_DIR}/ldo.c ${LUA_SOURCE_DIR}/ldump.c
+    ${LUA_SOURCE_DIR}/lfunc.c ${LUA_SOURCE_DIR}/lgc.c
+    ${LUA_SOURCE_DIR}/linit.c ${LUA_SOURCE_DIR}/liolib.c
+    ${LUA_SOURCE_DIR}/llex.c ${LUA_SOURCE_DIR}/lmathlib.c
+    ${LUA_SOURCE_DIR}/lmem.c ${LUA_SOURCE_DIR}/loadlib.c
+    ${LUA_SOURCE_DIR}/lobject.c ${LUA_SOURCE_DIR}/lopcodes.c
+    ${LUA_SOURCE_DIR}/loslib.c ${LUA_SOURCE_DIR}/lparser.c
+    ${LUA_SOURCE_DIR}/lstate.c ${LUA_SOURCE_DIR}/lstring.c
+    ${LUA_SOURCE_DIR}/lstrlib.c ${LUA_SOURCE_DIR}/ltable.c
+    ${LUA_SOURCE_DIR}/ltablib.c ${LUA_SOURCE_DIR}/ltm.c
+    ${LUA_SOURCE_DIR}/lundump.c ${LUA_SOURCE_DIR}/lutf8lib.c
+    ${LUA_SOURCE_DIR}/lvm.c ${LUA_SOURCE_DIR}/lzio.c)
+target_include_directories(zsharp_lua PUBLIC ${LUA_SOURCE_DIR})
+set_target_properties(zsharp_lua PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(UNIX)
+    target_compile_definitions(zsharp_lua PRIVATE LUA_USE_POSIX LUA_USE_DLOPEN)
+    target_link_libraries(zsharp_lua PRIVATE ${CMAKE_DL_LIBS} m)
+endif()
 
 add_executable(zsharp
     native/src/achievement.c
@@ -73,6 +105,7 @@ target_compile_features(zsharp PRIVATE c_std_17)
 target_compile_features(zsharp_installer PRIVATE c_std_17)
 target_link_libraries(zsharp PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 target_link_libraries(zsharp PRIVATE qjs)
+target_link_libraries(zsharp PRIVATE zsharp_lua)
 
 if(ZSHARP_BUILD_GAME_RUNTIME)
     include(FetchContent)

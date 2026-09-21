@@ -186,6 +186,9 @@ noticed scene Main[] (
   cameraX: 0:
   cameraY: 0:
   cameraZ: 8:
+  cameraRotationX: 0:
+  cameraRotationY: 0:
+  cameraRotationZ: 0:
   cameraFov: 70:
  )
  objects[JSON] (
@@ -198,7 +201,9 @@ noticed scene Main[] (
 
 The configured `Window.StartScene` is active at launch. Without that setting,
 the first discovered scene is used for compatibility. `cameraZ` and
-`cameraFov` mainly affect 3D games. A game project must contain at least one
+`cameraFov` mainly affect 3D games. `cameraRotationX`, `cameraRotationY`, and
+`cameraRotationZ` control pitch, yaw, and roll in degrees and can be changed
+while the game is running. A game project must contain at least one
 `.zscene` file.
 
 Define a 2D object in its own `.zobject` file like this:
@@ -249,16 +254,22 @@ Supported shapes are `rectangle`, `circle`, `triangle`, `sprite`, `cube`,
 and `text`. `text` objects use a quoted `text:` field. The first sprite loader
 accepts BMP assets through `asset:`; primitive shapes need no external asset.
 `cube` is the initial 3D primitive and uses `positionZ`, `depth`, `scaleZ`, and
-the active scene camera. A cube whose width, height, or depth is omitted uses
+the active scene camera. Cubes support `rotationX`, `rotationY`, and
+`rotationZ`; the older `rotation` property remains a Y-axis rotation for cube
+compatibility and keeps its existing 2D behavior. A cube whose width, height,
+or depth is omitted uses
 `1` world unit for that dimension; 2D shapes retain their existing 64-pixel
 defaults. The camera looks toward negative Z. Cubes crossing the camera's near
 plane are clipped rather than discarded.
 
 Bodies can be `static`, `dynamic`, or `kinematic`. Dynamic bodies receive
-gravity and collision response. Kinematic bodies use velocity but do not
-receive gravity. Colliders can be `none`, `box`, or `circle`; the current
+gravity and collision response. Kinematic bodies use `velocityX`, `velocityY`,
+and `velocityZ` but do not receive gravity, making them suitable for moving
+platforms. A grounded dynamic body is carried along X and Z by a kinematic
+platform. Static bodies do not move. Colliders can be `none`, `box`, or `circle`; the current
 collision solver uses their world bounds, exposes grounded/colliding state,
-and supports `trigger: alive:` for overlap-only objects. `restitution` controls
+supports XYZ collision for `COLLIDER3D`, and supports `trigger: alive:` for
+overlap-only objects. `restitution` controls
 bounce and `friction` slows horizontal movement on a surface.
 
 Z# does not provide a pre-made player movement controller. Game scripts read
@@ -279,6 +290,9 @@ input.mouse.left
 input.mouse.right
 input.mouse.x
 input.mouse.y
+input.mouse.deltaX
+input.mouse.deltaY
+input.mouse.captured
 
 Game.scene
 Game.delta
@@ -290,6 +304,11 @@ Player.velocityY
 Player.grounded
 Player.colliding
 ```
+
+`input.mouse.deltaX` and `input.mouse.deltaY` contain the accumulated mouse
+movement for the current frame. Capture the mouse for a normal 3D camera with
+`input.mouse.captured.set: alive:` and release it with
+`input.mouse.captured.set: dead:`. Capture is never enabled automatically.
 
 Escape is only an input value (`input.key.escape`); it does not close a game
 automatically. A game may assign it to pause, a side menu, or its own quit
@@ -317,7 +336,16 @@ number.set:Player.positionX = Player.positionX + 5:
 number.set:Player.rotation = Player.rotation + Game.delta * 90:
 text.set.Player.text = "Score: " + Score:
 number.set:Main.cameraX = Player.positionX:
+number.set:Main.cameraRotationY = Main.cameraRotationY + input.mouse.deltaX:
+number.set:Player.rotationZ = Player.rotationZ + Game.delta * 90:
 ```
+
+For 3D objects, `positionX/Y/Z`, `velocityX/Y/Z`, `rotationX/Y/Z`, and
+`scaleX/Y/Z` are all readable and writable. `Player.grounded` becomes alive
+when a dynamic `COLLIDER3D` is supported from below; `Player.colliding`
+indicates any current collider contact. Python, JavaScript, and Lua may help
+with vector or camera calculations, but none is required for native 3D input,
+rendering, or physics.
 
 An object can be qualified with its scene as
 `Main.Player.positionX`. Input and timing properties are read-only, as are
@@ -2048,7 +2076,26 @@ contains undeclared keys, omits required keys, or uses a value with the wrong
 type. Schemas currently support `text`, `number`, and `status`; JSON booleans
 become Z# `alive` and `dead` values.
 
-## 26. Keyword comparison summary
+## 26. Text file I/O
+
+Z# 1.1.2.0 provides project-relative text file operations:
+
+```zsharp
+File.write("Data/Save.txt", "Level=1"):
+File.append("Data/Save.txt", "\nScore=250"):
+
+status HasSave = File.exists("Data/Save.txt"):
+text Save = File.read("Data/Save.txt"):
+```
+
+`File.write` creates or replaces a text file, while `File.append` creates it
+or adds text to its end. `File.read` returns the full file as text and
+`File.exists` returns `alive` or `dead`. Paths are relative to the project;
+absolute paths and paths containing `..` are rejected. A single read is
+limited to 16 MiB. Parent folders must already exist. These operations do not
+open native file dialogs or grant access outside the project.
+
+## 27. Keyword comparison summary
 
 | Purpose | Z# | C# | Java | C |
 |---|---|---|---|---|
@@ -2170,3 +2217,45 @@ overriding Enter with application-specific behavior.
 Window text and input use UTF-8 end-to-end, including non-Latin scripts and
 emoji. Native runtime failures now include the source, room, brain, and Z# call
 chain where available.
+
+# Z# 1.1.2.0 additions
+
+## Lua interoperability
+
+Lua 5.5.1 is embedded in the ZVM, so users do not need a separate Lua
+installation. Import a Lua module with the project PID, then call it with its
+project-relative path:
+
+```javascript
+import lua:my_project.Lua.Utilities():
+
+text Greeting = Function.call(lua:Lua.Utilities:greeting["Z#"]):
+```
+
+A Lua file can return a module table:
+
+```lua
+local utilities = {}
+
+function utilities.greeting(name)
+  return "Hello, " .. name .. "!"
+end
+
+return utilities
+```
+
+Global Lua functions are also supported when a file does not return a module
+table. Arguments and results may be text, number, status/boolean, null/nil,
+or homogeneous text and number arrays. Z# arrays use zero-based indexes while
+Lua tables use their usual one-based indexes. Empty Lua arrays become empty
+`text[]` values. Mixed tables and general Lua objects cannot cross the bridge.
+
+Lua errors retain a Lua traceback in the Z# runtime failure report. Each call
+has a 64 MiB memory limit and a five-second execution guard. Lua support
+requires `ZSharp: [1.1.2.0]:` or newer.
+
+## Solid 3D cubes
+
+`shape: cube` now renders solid faces instead of only an edge outline. Faces
+are clipped against the camera near plane, ordered by depth, and shaded so
+their orientation remains visible while preserving the object's chosen color.

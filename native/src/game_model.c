@@ -409,6 +409,18 @@ static int apply_scene_field(ModelParser *parser, ZSharpGameScene *scene,
         parser->model->is_3d = 1;
         return value_number(parser, value, &scene->camera_z);
     }
+    if (strcmp(field, "cameraRotationX") == 0) {
+        parser->model->is_3d = 1;
+        return value_number(parser, value, &scene->camera_rotation_x);
+    }
+    if (strcmp(field, "cameraRotationY") == 0) {
+        parser->model->is_3d = 1;
+        return value_number(parser, value, &scene->camera_rotation_y);
+    }
+    if (strcmp(field, "cameraRotationZ") == 0) {
+        parser->model->is_3d = 1;
+        return value_number(parser, value, &scene->camera_rotation_z);
+    }
     if (strcmp(field, "cameraFov") == 0)
         return value_number(parser, value, &scene->camera_fov);
     parser_fail(parser, &parser->current, "unknown scene field");
@@ -509,6 +521,9 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
         return value_number(parser, value, &object->depth);
     }
     NUMBER_FIELD("rotation", rotation);
+    NUMBER_FIELD_3D("rotationX", rotation_x);
+    NUMBER_FIELD_3D("rotationY", rotation_y);
+    NUMBER_FIELD_3D("rotationZ", rotation_z);
     NUMBER_FIELD("scaleX", scale_x);
     NUMBER_FIELD("scaleY", scale_y);
     NUMBER_FIELD_3D("scaleZ", scale_z);
@@ -1610,6 +1625,10 @@ static void resolve_collision(ZSharpGameObject *dynamic,
         dynamic->velocity_y = -dynamic->velocity_y * bounce;
         dynamic->velocity_x *= 1.0f - fminf(fmaxf(dynamic->friction, 0.0f),
                                              1.0f);
+        if (above) {
+            dynamic->x += other->motion_x;
+            dynamic->z += other->motion_z;
+        }
     } else {
         dynamic->z += dynamic->z < other->z ? -overlap_z : overlap_z;
         dynamic->velocity_z = -dynamic->velocity_z * bounce;
@@ -1629,15 +1648,21 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
         if (!same_active_scene(model, object)) continue;
         object->grounded = 0;
         object->colliding = 0;
+        object->motion_x = 0.0f;
+        object->motion_y = 0.0f;
+        object->motion_z = 0.0f;
         if (object->body == ZGAME_BODY_DYNAMIC) {
             object->velocity_x += scene->gravity_x * object->gravity_scale * delta;
             object->velocity_y += scene->gravity_y * object->gravity_scale * delta;
             object->velocity_z += scene->gravity_z * object->gravity_scale * delta;
         }
         if (object->body != ZGAME_BODY_STATIC) {
-            object->x += object->velocity_x * delta;
-            object->y += object->velocity_y * delta;
-            object->z += object->velocity_z * delta;
+            object->motion_x = object->velocity_x * delta;
+            object->motion_y = object->velocity_y * delta;
+            object->motion_z = object->velocity_z * delta;
+            object->x += object->motion_x;
+            object->y += object->motion_y;
+            object->z += object->motion_z;
         }
     }
     for (index = 0; index < model->object_count; index++) {
@@ -1715,7 +1740,8 @@ static int game_key_from_name(const char *name) {
 static int valid_object_field(const char *field) {
     static const char *fields[] = {
         "positionX","positionY","positionZ","width","height","depth",
-        "rotation","scaleX","scaleY","scaleZ","velocityX","velocityY",
+        "rotation","rotationX","rotationY","rotationZ",
+        "scaleX","scaleY","scaleZ","velocityX","velocityY",
         "velocityZ","mass","gravityScale","restitution","friction",
         "audioVolume","tone","texture",
         "toneDuration","layer","color",
@@ -1736,6 +1762,9 @@ static int valid_scene_field(const char *field) {
            strcmp(field, "cameraX") == 0 ||
            strcmp(field, "cameraY") == 0 ||
            strcmp(field, "cameraZ") == 0 ||
+           strcmp(field, "cameraRotationX") == 0 ||
+           strcmp(field, "cameraRotationY") == 0 ||
+           strcmp(field, "cameraRotationZ") == 0 ||
            strcmp(field, "cameraFov") == 0;
 }
 
@@ -1753,7 +1782,10 @@ int zsharp_game_model_owns_property(const ZSharpGameModel *model,
         strcmp(parts[1], "mouse") == 0)
         return strcmp(parts[2], "left") == 0 ||
                strcmp(parts[2], "right") == 0 ||
-               strcmp(parts[2], "x") == 0 || strcmp(parts[2], "y") == 0;
+               strcmp(parts[2], "x") == 0 || strcmp(parts[2], "y") == 0 ||
+               strcmp(parts[2], "deltaX") == 0 ||
+               strcmp(parts[2], "deltaY") == 0 ||
+               strcmp(parts[2], "captured") == 0;
     if (count == 2 && strcmp(parts[0], "Game") == 0)
         return strcmp(parts[1], "scene") == 0 ||
                strcmp(parts[1], "delta") == 0 ||
@@ -1815,17 +1847,21 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
     }
     if (count == 3 && strcmp(parts[0], "input") == 0 &&
         strcmp(parts[1], "mouse") == 0) {
-        if (strcmp(field, "x") == 0 || strcmp(field, "y") == 0) {
+        if (strcmp(field, "x") == 0 || strcmp(field, "y") == 0 ||
+            strcmp(field, "deltaX") == 0 || strcmp(field, "deltaY") == 0) {
             *type = ZWINDOW_READ_NUMBER;
-            return number_property(strcmp(field, "x") == 0
-                                       ? model->input.mouse_x
-                                       : model->input.mouse_y,
+            return number_property(
+                strcmp(field, "x") == 0 ? model->input.mouse_x :
+                strcmp(field, "y") == 0 ? model->input.mouse_y :
+                strcmp(field, "deltaX") == 0 ? model->input.mouse_delta_x :
+                                                model->input.mouse_delta_y,
                                    text, error, error_size);
         }
         *type = ZWINDOW_READ_STATUS;
-        return status_property(strcmp(field, "left") == 0
-                                   ? model->input.mouse_left
-                                   : model->input.mouse_right,
+        return status_property(
+            strcmp(field, "left") == 0 ? model->input.mouse_left :
+            strcmp(field, "right") == 0 ? model->input.mouse_right :
+                                           model->input.mouse_captured,
             text, error, error_size);
     }
     if (count == 2 && strcmp(parts[0], "Game") == 0) {
@@ -1856,8 +1892,11 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
             strcmp(field, "gravityZ") == 0 ? scene->gravity_z :
             strcmp(field, "cameraX") == 0 ? scene->camera_x :
             strcmp(field, "cameraY") == 0 ? scene->camera_y :
-            strcmp(field, "cameraZ") == 0 ? scene->camera_z
-                                            : scene->camera_fov,
+            strcmp(field, "cameraZ") == 0 ? scene->camera_z :
+            strcmp(field, "cameraRotationX") == 0 ? scene->camera_rotation_x :
+            strcmp(field, "cameraRotationY") == 0 ? scene->camera_rotation_y :
+            strcmp(field, "cameraRotationZ") == 0 ? scene->camera_rotation_z
+                                                    : scene->camera_fov,
             text, error, error_size);
     }
     object = find_object(model, count == 2 ? parts[0] : parts[1]);
@@ -1873,6 +1912,9 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
     GET_NUMBER("height", height)
     GET_NUMBER("depth", depth)
     GET_NUMBER("rotation", rotation)
+    GET_NUMBER("rotationX", rotation_x)
+    GET_NUMBER("rotationY", rotation_y)
+    GET_NUMBER("rotationZ", rotation_z)
     GET_NUMBER("scaleX", scale_x)
     GET_NUMBER("scaleY", scale_y)
     GET_NUMBER("scaleZ", scale_z)
@@ -1978,6 +2020,18 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
         }
         return 1;
     }
+    if (count == 3 && strcmp(parts[0], "input") == 0 &&
+        strcmp(parts[1], "mouse") == 0 &&
+        strcmp(field, "captured") == 0) {
+        if (strcmp(value, "alive") == 0) model->input.mouse_captured = 1;
+        else if (strcmp(value, "dead") == 0) model->input.mouse_captured = 0;
+        else {
+            model_error(error, error_size,
+                        "input.mouse.captured requires alive or dead");
+            return 0;
+        }
+        return 1;
+    }
     if ((count == 3 && strcmp(parts[0], "input") == 0) ||
         (count == 2 && strcmp(parts[0], "Game") == 0)) {
         model_error(error, error_size, "that engine property is read-only");
@@ -2008,6 +2062,12 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
         else if (strcmp(field, "cameraX") == 0) scene->camera_x = number;
         else if (strcmp(field, "cameraY") == 0) scene->camera_y = number;
         else if (strcmp(field, "cameraZ") == 0) scene->camera_z = number;
+        else if (strcmp(field, "cameraRotationX") == 0)
+            scene->camera_rotation_x = number;
+        else if (strcmp(field, "cameraRotationY") == 0)
+            scene->camera_rotation_y = number;
+        else if (strcmp(field, "cameraRotationZ") == 0)
+            scene->camera_rotation_z = number;
         else scene->camera_fov = number;
         return 1;
     }
@@ -2079,6 +2139,9 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
     SET_NUMBER("height", height)
     SET_NUMBER("depth", depth)
     SET_NUMBER("rotation", rotation)
+    SET_NUMBER("rotationX", rotation_x)
+    SET_NUMBER("rotationY", rotation_y)
+    SET_NUMBER("rotationZ", rotation_z)
     SET_NUMBER("scaleX", scale_x)
     SET_NUMBER("scaleY", scale_y)
     SET_NUMBER("scaleZ", scale_z)
@@ -2124,6 +2187,9 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
         target->height = source->height;
         target->depth = source->depth;
         target->rotation = source->rotation;
+        target->rotation_x = source->rotation_x;
+        target->rotation_y = source->rotation_y;
+        target->rotation_z = source->rotation_z;
         target->scale_x = source->scale_x;
         target->scale_y = source->scale_y;
         target->scale_z = source->scale_z;
@@ -2138,6 +2204,9 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
     frame->camera_x = scene == NULL ? 0.0f : scene->camera_x;
     frame->camera_y = scene == NULL ? 0.0f : scene->camera_y;
     frame->camera_z = scene == NULL ? 8.0f : scene->camera_z;
+    frame->camera_rotation_x = scene == NULL ? 0.0f : scene->camera_rotation_x;
+    frame->camera_rotation_y = scene == NULL ? 0.0f : scene->camera_rotation_y;
+    frame->camera_rotation_z = scene == NULL ? 0.0f : scene->camera_rotation_z;
     frame->camera_fov = scene == NULL ? 70.0f : scene->camera_fov;
     frame->project_root = model->project_root;
     frame->objects = *objects;

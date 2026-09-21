@@ -10,6 +10,9 @@ noticed scene Main[] (
   cameraX: 0:
   cameraY: 0:
   cameraZ: 8:
+  cameraRotationX: 0:
+  cameraRotationY: 0:
+  cameraRotationZ: 0:
   cameraFov: 70:
  )
  objects[JSON] (

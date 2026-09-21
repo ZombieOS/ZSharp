@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.1.2.0 - The Lua Update - 2026-09-21
+
+- Added embedded Lua 5.5.1 interoperability without requiring a separate Lua
+  installation, with project-scoped `lua:` imports and Z# function calls.
+- Added text, number, status, null, `text[]`, and `number[]` value conversion
+  between Z# and Lua.
+- Added guarded Lua memory and execution limits plus Lua tracebacks in native
+  Z# failure reports.
+- Changed native 3D cubes from hollow edge outlines to clipped, depth-ordered
+  solid faces with simple face shading.
+- Completed native 3D camera pitch/yaw/roll, runtime mouse delta and capture,
+  XYZ object rotation, camera-space depth ordering, `COLLIDER3D` grounding,
+  and kinematic moving-platform support while preserving 2D behavior.
+- Added safe project-relative text file reading, writing, appending, and
+  existence checks.
+- Added regression coverage for Lua imports, calls, errors, version gating,
+  and solid cube projection.
+- Expanded the shared Z# Language Test app to test Python, JavaScript, and Lua
+  from one window.
+
 ## 1.1.1.0 - The JavaScript Update - 2026-09-18
 
 - Added embedded JavaScript interoperability without requiring Node.js,

@@ -202,7 +202,11 @@ typedef enum ZSharpOpCode {
     ZOP_UI_SET_VALUE = 50,
     ZOP_RANDOM = 51,
     ZOP_JSON_LOAD = 52,
-    ZOP_STORE_LOCAL_VALUE = 53
+    ZOP_STORE_LOCAL_VALUE = 53,
+    ZOP_FILE_READ = 54,
+    ZOP_FILE_EXISTS = 55,
+    ZOP_FILE_WRITE = 56,
+    ZOP_FILE_APPEND = 57
 } ZSharpOpCode;
 
 typedef struct ZSharpInstruction {

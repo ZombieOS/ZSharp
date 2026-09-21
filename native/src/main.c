@@ -132,7 +132,7 @@ static void write_runtime_error_log(const char *app_name, const char *reason) {
             "This report deliberately excludes environment variables and user "
             "documents to avoid collecting passwords, tokens, and unrelated "
             "personal data.\n"
-            "Python and JavaScript failures include their exception and "
+            "Python, JavaScript, and Lua failures include their exception and "
             "traceback in the FAILURE section when available. Native Z# "
             "failures include the source, room, brain, and Z# call chain when "
             "the runtime can identify them.\n",

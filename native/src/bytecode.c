@@ -357,6 +357,10 @@ static int write_instruction(FILE *file,
         case ZOP_RETURN_VOID:
         case ZOP_RETURN_IF_FALSE:
         case ZOP_PUSH_NULL:
+        case ZOP_FILE_READ:
+        case ZOP_FILE_EXISTS:
+        case ZOP_FILE_WRITE:
+        case ZOP_FILE_APPEND:
             return 1;
         default:
             return 0;
@@ -817,6 +821,10 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
         case ZOP_RETURN_VOID:
         case ZOP_RETURN_IF_FALSE:
         case ZOP_PUSH_NULL:
+        case ZOP_FILE_READ:
+        case ZOP_FILE_EXISTS:
+        case ZOP_FILE_WRITE:
+        case ZOP_FILE_APPEND:
             return 1;
         default:
             return 0;

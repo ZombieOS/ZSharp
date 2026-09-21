@@ -10,6 +10,7 @@ if(NOT DEFINED ZSHARP_BIN OR NOT DEFINED PROJECT_ROOT OR
 endif()
 
 set(WINDOW_DIR "${PROJECT_ROOT}/tests/window")
+set(FILE_IO_DIR "${CMAKE_CURRENT_BINARY_DIR}/file-io-project")
 set(ICON_INVALID_PROJECT "${CMAKE_CURRENT_BINARY_DIR}/icon-invalid-project")
 set(ENV{ZSHARP_SKIP_UPDATE_CHECK} "1")
 set(ENV{ZSHARP_PACKAGE_REGISTRY} "${TEST_PROJECT_REGISTRY}.packages")
@@ -19,12 +20,15 @@ file(REMOVE "${TEST_OUTPUT}" "${TEST_OUTPUT}.mutation"
             "${TEST_GAME_PACKAGE}" "${TEST_GAME_SOURCE_PACKAGE}")
 file(REMOVE_RECURSE "${TEST_PACKAGE_CACHE}" "${TEST_SHORTCUT_CACHE}"
                     "${TEST_DESKTOP}" "${TEST_PACKAGE_PROJECT}"
-                    "${TEST_GAME_PROJECT}" "${ICON_INVALID_PROJECT}")
+                    "${TEST_GAME_PROJECT}" "${ICON_INVALID_PROJECT}"
+                    "${FILE_IO_DIR}")
 file(REMOVE "${TEST_PROJECT_REGISTRY}")
 file(REMOVE "${TEST_PROJECT_REGISTRY}.packages")
 file(REMOVE "${TEST_PROJECT_REGISTRY}.playtime")
 file(MAKE_DIRECTORY "${TEST_PACKAGE_PROJECT}")
 file(MAKE_DIRECTORY "${TEST_GAME_PROJECT}")
+file(MAKE_DIRECTORY "${FILE_IO_DIR}")
+file(COPY "${PROJECT_ROOT}/tests/file_io/" DESTINATION "${FILE_IO_DIR}")
 file(COPY "${PROJECT_ROOT}/tests/package/"
      DESTINATION "${TEST_PACKAGE_PROJECT}")
 file(MAKE_DIRECTORY "${TEST_PACKAGE_PROJECT}/assets")
@@ -133,6 +137,51 @@ if(javascript_failure_result EQUAL 0 OR
         "stdout: ${javascript_failure_output}\nstderr: ${javascript_failure_error}")
 endif()
 
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run Main.zsharp
+    WORKING_DIRECTORY "${PROJECT_ROOT}/tests/lua_project"
+    RESULT_VARIABLE lua_result
+    OUTPUT_VARIABLE lua_output
+    ERROR_VARIABLE lua_error
+)
+if(NOT lua_result EQUAL 0 OR
+   NOT lua_output MATCHES "Hello from Lua, Tester!" OR
+   NOT lua_output MATCHES "42" OR
+   NOT lua_output MATCHES "Lua status alive" OR
+   NOT lua_output MATCHES "\\[first\\]" OR
+   NOT lua_output MATCHES "日本語" OR
+   NOT lua_output MATCHES "null")
+    message(FATAL_ERROR
+        "Lua interoperability test failed (${lua_result})\n"
+        "stdout: ${lua_output}\nstderr: ${lua_error}")
+endif()
+
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run Failure.zsharp
+    WORKING_DIRECTORY "${PROJECT_ROOT}/tests/lua_project"
+    RESULT_VARIABLE lua_failure_result
+    OUTPUT_VARIABLE lua_failure_output
+    ERROR_VARIABLE lua_failure_error
+)
+if(lua_failure_result EQUAL 0 OR
+   NOT lua_failure_error MATCHES "intentional Lua regression failure" OR
+   NOT lua_failure_error MATCHES "Failure.Failure.Start")
+    message(FATAL_ERROR
+        "Lua diagnostic test failed (${lua_failure_result})\n"
+        "stdout: ${lua_failure_output}\nstderr: ${lua_failure_error}")
+endif()
+
+set(old_lua_project "${CMAKE_CURRENT_BINARY_DIR}/old-lua-project")
+file(REMOVE_RECURSE "${old_lua_project}")
+file(COPY "${PROJECT_ROOT}/tests/lua_project/"
+     DESTINATION "${old_lua_project}")
+file(READ "${old_lua_project}/project.zsettings" old_lua_settings)
+string(REPLACE "ZSharp: [1.1.2.0]:" "ZSharp: [1.1.1.0]:"
+       old_lua_settings "${old_lua_settings}")
+file(WRITE "${old_lua_project}/project.zsettings" "${old_lua_settings}")
+expect_failure("Lua version gate" "Lua imports require ZSharp"
+               "${PROJECT_ROOT}" check "${old_lua_project}/Main.zsharp")
+
 set(old_javascript_project "${CMAKE_CURRENT_BINARY_DIR}/old-javascript-project")
 file(REMOVE_RECURSE "${old_javascript_project}")
 file(COPY "${PROJECT_ROOT}/tests/javascript_project/"
@@ -162,6 +211,35 @@ endif()
 
 expect_success("window settings" "${WINDOW_DIR}"
                check project.zsettings)
+expect_success("file I/O settings" "${FILE_IO_DIR}"
+               check project.zsettings)
+expect_success("file I/O source" "${FILE_IO_DIR}"
+               check Main.zsharp)
+set(old_file_io_project "${CMAKE_CURRENT_BINARY_DIR}/old-file-io-project")
+file(REMOVE_RECURSE "${old_file_io_project}")
+file(COPY "${PROJECT_ROOT}/tests/file_io/"
+     DESTINATION "${old_file_io_project}")
+file(READ "${old_file_io_project}/project.zsettings" old_file_io_settings)
+string(REPLACE "ZSharp: [1.1.2.0]:" "ZSharp: [1.1.1.0]:"
+       old_file_io_settings "${old_file_io_settings}")
+file(WRITE "${old_file_io_project}/project.zsettings"
+     "${old_file_io_settings}")
+expect_failure("file I/O version gate" "File I/O requires ZSharp"
+               "${PROJECT_ROOT}" check "${old_file_io_project}/Main.zsharp")
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run Main.zsharp
+    WORKING_DIRECTORY "${FILE_IO_DIR}"
+    RESULT_VARIABLE file_io_result
+    OUTPUT_VARIABLE file_io_output
+    ERROR_VARIABLE file_io_error
+)
+if(NOT file_io_result EQUAL 0 OR
+   NOT file_io_output MATCHES "first second" OR
+   NOT file_io_output MATCHES "alive")
+    message(FATAL_ERROR
+        "file I/O runtime test failed (${file_io_result})\n"
+        "stdout: ${file_io_output}\nstderr: ${file_io_error}")
+endif()
 expect_failure("missing project icon" "project Icon"
                "${ICON_INVALID_PROJECT}" check project.zsettings)
 expect_failure("settings cannot run directly"
@@ -397,14 +475,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.1.1]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.2.1]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.1.1.1!"
+               "Update to at least 1.1.2.1!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

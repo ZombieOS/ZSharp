@@ -1296,6 +1296,12 @@ static int validate_instruction(const ZSharpProgram *program,
                                          project_root, "js", "JavaScript",
                                          "js", 1, error, error_size);
         }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@lua") == 0) {
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "lua", "Lua",
+                                         "lua", 2, error, error_size);
+        }
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
             return require_project_import(room, settings, instruction->operand,
                                           instruction->call_file, error,
@@ -1480,6 +1486,17 @@ static int validate_feature_version(const ZSharpSettings *settings,
         project_version_before(settings, 1, 0, 2, 4)) {
         snprintf(error, error_size,
                  "this syntax requires ZSharp: [1.0.2.4]: or newer; the project declares %u.%u.%u.%u",
+                 settings->zsharp_version[0], settings->zsharp_version[1],
+                 settings->zsharp_version[2], settings->zsharp_version[3]);
+        return 0;
+    }
+    if ((instruction->op == ZOP_FILE_READ ||
+         instruction->op == ZOP_FILE_EXISTS ||
+         instruction->op == ZOP_FILE_WRITE ||
+         instruction->op == ZOP_FILE_APPEND) &&
+        project_version_before(settings, 1, 1, 2, 0)) {
+        snprintf(error, error_size,
+                 "File I/O requires ZSharp: [1.1.2.0]: or newer; the project declares %u.%u.%u.%u",
                  settings->zsharp_version[0], settings->zsharp_version[1],
                  settings->zsharp_version[2], settings->zsharp_version[3]);
         return 0;

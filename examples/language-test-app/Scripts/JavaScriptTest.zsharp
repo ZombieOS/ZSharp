@@ -1,0 +1,21 @@
+zsharp = type.script
+
+noticed room JavaScriptTest[] (
+ import zsharp_language_test.Startup():
+ import js:zsharp_language_test.JavaScript.Utilities():
+
+ noticed brain Start[] (
+ )
+
+ noticed brain Run[] (
+  text Message = Function.call(js:JavaScript.Utilities:greet[Startup.Name.contents]):
+  number Answer = Function.call(js:JavaScript.Utilities:add[20, 22]):
+  text Ready = "dead":
+  if[Function.call(js:JavaScript.Utilities:isReady)] (
+   Ready = "alive":
+  ) else (
+  )
+  Startup.Result.content.set:
+   (Message + " Answer: " + Answer + " Ready: " + Ready):
+ )
+)

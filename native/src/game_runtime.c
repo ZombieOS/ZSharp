@@ -32,6 +32,7 @@ typedef struct ZSharpGameState {
     Sint16 *achievement_samples;
     int achievement_sample_bytes;
     char *window_icon_path;
+    int mouse_capture_dirty;
     int cancelled;
 } ZSharpGameState;
 
@@ -205,6 +206,9 @@ static int game_set_property(void *state, const char *path,
     SDL_LockMutex(game->model_mutex);
     ok = zsharp_game_model_set_property(&game->model, path, value_type, value,
                                         error, error_size);
+    if (ok && path != NULL &&
+        strcmp(path, "input.mouse.captured") == 0)
+        game->mouse_capture_dirty = 1;
     SDL_UnlockMutex(game->model_mutex);
     return ok;
 }
@@ -577,6 +581,10 @@ int zsharp_game_run(const char *title, const char *project_root,
         double delta;
         ZSharpGameRenderFrame frame;
         ZSharpGameRenderObject *objects = NULL;
+        SDL_LockMutex(game.model_mutex);
+        game.model.input.mouse_delta_x = 0.0f;
+        game.model.input.mouse_delta_y = 0.0f;
+        SDL_UnlockMutex(game.model_mutex);
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT ||
                 event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
@@ -596,6 +604,8 @@ int zsharp_game_run(const char *title, const char *project_root,
                     height > 0 ? 360.0f - event.motion.y * 720.0f /
                                               (float)height
                                : 0.0f;
+                game.model.input.mouse_delta_x += event.motion.xrel;
+                game.model.input.mouse_delta_y += event.motion.yrel;
                 SDL_UnlockMutex(game.model_mutex);
             } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                        event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
@@ -607,6 +617,21 @@ int zsharp_game_run(const char *title, const char *project_root,
                     game.model.input.mouse_right = pressed;
                 SDL_UnlockMutex(game.model_mutex);
             }
+        }
+        SDL_LockMutex(game.model_mutex);
+        if (game.mouse_capture_dirty) {
+            int captured = game.model.input.mouse_captured;
+            game.mouse_capture_dirty = 0;
+            SDL_UnlockMutex(game.model_mutex);
+            if (!SDL_SetWindowRelativeMouseMode(game.window, captured)) {
+                fprintf(stderr, "game input warning: could not %s mouse capture: %s\n",
+                        captured ? "enable" : "release", SDL_GetError());
+                SDL_LockMutex(game.model_mutex);
+                game.model.input.mouse_captured = !captured;
+                SDL_UnlockMutex(game.model_mutex);
+            }
+        } else {
+            SDL_UnlockMutex(game.model_mutex);
         }
         now = SDL_GetTicks();
         delta = (double)(now - previous) / 1000.0;
