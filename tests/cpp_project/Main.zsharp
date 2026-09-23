@@ -1,0 +1,17 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import cpp:cpp_test.Cpp.Utilities():
+
+ noticed brain Start[] (
+  text Greeting = Function.call(cpp:Cpp.Utilities:greeting["Tester"]):
+  number Total = Function.call(cpp:Cpp.Utilities:add[20, 22]):
+  Print(Greeting):
+  Print(Total):
+  if[Function.call(cpp:Cpp.Utilities:ready)] (
+   Print("C++ status alive"):
+  ) else (
+   Print("C++ status dead"):
+  )
+ )
+)

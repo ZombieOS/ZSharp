@@ -27,6 +27,7 @@
 #else
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -282,6 +283,102 @@ static char *join_project_path(const char *root, const char *relative) {
 #endif
     }
     memcpy(result + root_length, relative, relative_length + 1);
+    return result;
+}
+
+static const char *runtime_platform_id(void) {
+#if defined(_WIN32) && (defined(_M_ARM64) || defined(__aarch64__))
+    return "windows-aarch64";
+#elif defined(_WIN32)
+    return "windows-x86_64";
+#elif defined(__APPLE__) && defined(__aarch64__)
+    return "macos-aarch64";
+#elif defined(__APPLE__)
+    return "macos-x86_64";
+#elif defined(__linux__) && defined(__aarch64__)
+    return "linux-aarch64";
+#else
+    return "linux-x86_64";
+#endif
+}
+
+static int run_native_startup(const char *path, int argc, char **argv,
+                              int first_option) {
+    char *directory = settings_parent_directory(path);
+    int result = 1;
+    if (directory == NULL) {
+        remember_failure("out of memory");
+        return 1;
+    }
+#ifdef _WIN32
+    STARTUPINFOA startup_info;
+    PROCESS_INFORMATION process_info;
+    size_t length = strlen(path) + 3;
+    int index;
+    char *command;
+    for (index = first_option; index < argc; index++)
+        length += strlen(argv[index]) + 4;
+    command = (char *)malloc(length + 1);
+    if (command == NULL) {
+        free(directory);
+        remember_failure("out of memory");
+        return 1;
+    }
+    sprintf(command, "\"%s\"", path);
+    for (index = first_option; index < argc; index++) {
+        strcat(command, " \"");
+        strcat(command, argv[index]);
+        strcat(command, "\"");
+    }
+    memset(&startup_info, 0, sizeof(startup_info));
+    memset(&process_info, 0, sizeof(process_info));
+    startup_info.cb = sizeof(startup_info);
+    if (!CreateProcessA(path, command, NULL, NULL, FALSE, 0, NULL, directory,
+                        &startup_info, &process_info)) {
+        snprintf(command_failure, sizeof(command_failure),
+                 "Could not start native application (Windows error %lu).",
+                 (unsigned long)GetLastError());
+    } else {
+        DWORD exit_code = 1;
+        WaitForSingleObject(process_info.hProcess, INFINITE);
+        GetExitCodeProcess(process_info.hProcess, &exit_code);
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        result = (int)exit_code;
+    }
+    free(command);
+#else
+    pid_t child;
+    char **child_argv;
+    int option_count = argc - first_option;
+    int index;
+    chmod(path, 0700);
+    child_argv = (char **)calloc((size_t)option_count + 2, sizeof(char *));
+    if (child_argv == NULL) {
+        free(directory);
+        remember_failure("out of memory");
+        return 1;
+    }
+    child_argv[0] = (char *)path;
+    for (index = 0; index < option_count; index++)
+        child_argv[index + 1] = argv[first_option + index];
+    child = fork();
+    if (child == 0) {
+        if (chdir(directory) != 0) _exit(126);
+        execv(path, child_argv);
+        _exit(127);
+    } else if (child < 0) {
+        snprintf(command_failure, sizeof(command_failure),
+                 "Could not start native application: %s.", strerror(errno));
+    } else {
+        int status;
+        if (waitpid(child, &status, 0) >= 0) {
+            result = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        }
+    }
+    free(child_argv);
+#endif
+    free(directory);
     return result;
 }
 
@@ -903,9 +1000,10 @@ static int open_package_command(const char *package_path, int argc,
     char error[512] = {0};
     char *root = NULL;
     char *startup = NULL;
-    char *startup_bytecode;
+    char *startup_bytecode = NULL;
     char *app_name;
     ZSharpPackageKind package_kind;
+    int native_startup = 0;
     int new_install = 0;
     int result;
     time_t play_started;
@@ -953,26 +1051,41 @@ static int open_package_command(const char *package_path, int argc,
         return 1;
     }
     if (package_kind == ZSHARP_PACKAGE_APP &&
-        (!settings.has_window || settings.window_startup == NULL)) {
-        fprintf(stderr, "package error: package has no Window Startup entry\n");
-        show_app_failure(app_name, "The package has no Window Startup entry.");
+        ((!settings.has_window || settings.window_startup == NULL) &&
+         settings.native_target_count == 0)) {
+        fprintf(stderr, "package error: package has no startup entry\n");
+        show_app_failure(app_name,
+                         "The package has no Window Startup or Native entry.");
         zsharp_settings_free(&settings);
         zsharp_package_info_free(&info);
         free(root);
         free(app_name);
         return 1;
     }
-    if (package_kind == ZSHARP_PACKAGE_GAME)
+    if (package_kind == ZSHARP_PACKAGE_GAME) {
         startup = find_game_startup_path(root, error, sizeof(error));
-    else
+    } else if (settings.native_target_count > 0) {
+        const ZSharpNativeTarget *target = zsharp_settings_native_target(
+            &settings, runtime_platform_id());
+        native_startup = 1;
+        if (target == NULL) {
+            snprintf(error, sizeof(error),
+                     "This native application has no build for %s.",
+                     runtime_platform_id());
+        } else {
+            startup = join_project_path(root, target->start);
+        }
+    } else {
         startup = join_project_path(root, settings.window_startup);
-    startup_bytecode = join_project_path(
-        root, ZSHARP_PACKAGE_STARTUP_BYTECODE);
+    }
+    if (!native_startup)
+        startup_bytecode = join_project_path(
+            root, ZSHARP_PACKAGE_STARTUP_BYTECODE);
     printf("opening %s '%s' (%s %u.%u.%u.%u)\n",
            info.kind == ZSHARP_PACKAGE_GAME ? "game" : "app",
            info.project_name, info.project_id, info.version[0], info.version[1],
            info.version[2], info.version[3]);
-    if (startup == NULL || startup_bytecode == NULL) {
+    if (startup == NULL || (!native_startup && startup_bytecode == NULL)) {
         fprintf(stderr, "package error: %s\n",
                 error[0] == '\0' ? "out of memory" : error);
         show_app_failure(app_name,
@@ -1016,7 +1129,10 @@ static int open_package_command(const char *package_path, int argc,
             fprintf(stderr, "terminal warning: %s\n", terminal_error);
     }
     play_started = time(NULL);
-    if (file_exists(startup_bytecode)) {
+    if (native_startup) {
+        puts("running native startup");
+        result = run_native_startup(startup, argc, argv, first_option);
+    } else if (file_exists(startup_bytecode)) {
         puts("running bytecoded startup");
         result = run_bytecode_command(startup_bytecode, argc, argv,
                                       first_option,

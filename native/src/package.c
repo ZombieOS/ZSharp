@@ -920,9 +920,10 @@ int zsharp_package_create(const char *project_path, const char *output_path,
         return 0;
     }
     if (kind == ZSHARP_PACKAGE_APP &&
-        (!settings.has_window || settings.window_startup == NULL)) {
+        ((!settings.has_window || settings.window_startup == NULL) &&
+         settings.native_target_count == 0)) {
         package_error(error, error_size,
-                      "app packages require a Window Startup entry");
+                      "app packages require a Window Startup entry or Native target");
         zsharp_settings_free(&settings);
         free(root);
         return 0;
@@ -937,12 +938,12 @@ int zsharp_package_create(const char *project_path, const char *output_path,
         if (!validate_game_objects(&files, &settings, root, game_startup, error,
                                    error_size)) goto done;
         startup_relative = game_startup;
-    } else {
+    } else if (settings.native_target_count == 0) {
         startup_relative = settings.window_startup;
     }
-    if (!append_startup_bytecode(&files, &settings, root, startup_relative,
-                                 kind == ZSHARP_PACKAGE_GAME,
-                                 output_path,
+    if (startup_relative != NULL &&
+        !append_startup_bytecode(&files, &settings, root, startup_relative,
+                                 kind == ZSHARP_PACKAGE_GAME, output_path,
                                  &bytecode_temporary, error, error_size))
         goto done;
     qsort(files.items, files.count, sizeof(*files.items), compare_files);
@@ -1077,9 +1078,10 @@ static int create_source_zip(const char *project_path,
         goto done;
     }
     if (kind == ZSHARP_PACKAGE_APP &&
-        (!settings.has_window || settings.window_startup == NULL)) {
+        ((!settings.has_window || settings.window_startup == NULL) &&
+         settings.native_target_count == 0)) {
         package_error(error, error_size,
-                      "app packages require a Window Startup entry");
+                      "app packages require a Window Startup entry or Native target");
         goto done;
     }
     if (!collect_files(root, "", &files, error, error_size) ||

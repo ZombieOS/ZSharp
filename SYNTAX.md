@@ -3,7 +3,7 @@
 This guide explains how to write Z# and compares its concepts with C#, Java,
 and C. The official source extension is `.zsharp`.
 
-Z# 1.0.2.1 implements the Z1 compiler and virtual machine plus the specialized
+Z# 1.1.3.0 implements the Z1 compiler and virtual machine plus the specialized
 window, scene, and object files in this guide. Window syntax is accepted,
 validated, stored in bytecode, and rendered by native Windows, Linux, and macOS
 `zsharpwindow` backends. `.zapp` and `.zgame` packaging is implemented.
@@ -55,6 +55,46 @@ and cannot leave the project. If `Icon` is omitted, the Hub downloads and
 caches the official Z# logo from `https://www.zsharp.zombieos.com/zsharp.png`.
 The same project icon is used for Desktop shortcuts created by Z#; a window's
 design icon remains the fallback for older projects without `Icon`.
+
+### Application startup
+
+A native Z# window application declares its startup window in settings:
+
+```zsharp
+Window (
+ Startup: "Windows/Startup.zsharp":
+ Uninstall: "Windows/Uninstall.zsharp":
+):
+```
+
+`Startup` is required when a `.zapp` uses native Z# windows. `Uninstall` is
+optional; omit it when the application does not need a custom uninstall UI.
+
+An application backed by an existing native executable may use platform
+targets instead of a Z# startup window:
+
+```zsharp
+Native[JSON] (
+ [
+  {
+   "platform": "windows-x86_64",
+   "start": "Engine/ZSharpEngine.exe"
+  },
+  {
+   "platform": "linux-x86_64",
+   "start": "Engine/zsharp-engine"
+  }
+ ]
+):
+```
+
+Supported target IDs are `windows-x86_64`, `windows-aarch64`,
+`linux-x86_64`, `linux-aarch64`, `macos-x86_64`, and `macos-aarch64`. Paths
+are project-relative and must name existing files. ZVM selects the current
+platform, starts the executable with its own directory as the working
+directory, forwards launch arguments, waits for it to exit, and records its
+playtime. A package with no matching target reports the missing platform
+instead of attempting to run a different build.
 
 The supported file headers are:
 
@@ -2253,6 +2293,50 @@ Lua tables use their usual one-based indexes. Empty Lua arrays become empty
 Lua errors retain a Lua traceback in the Z# runtime failure report. Each call
 has a 64 MiB memory limit and a five-second execution guard. Lua support
 requires `ZSharp: [1.1.2.0]:` or newer.
+
+# Z# 1.1.3.0 additions
+
+## C++ interoperability
+
+C++ modules use the same project-qualified import and short same-project call
+syntax as the other embedded-language bridges:
+
+```zsharp
+import cpp:my_project.Cpp.Utilities():
+
+text Greeting = Function.call(cpp:Cpp.Utilities:greeting["Z#"]):
+number Total = Function.call(cpp:Cpp.Utilities:add[20, 22]):
+```
+
+The import corresponds to `Cpp/Utilities.cpp`. Its compiled bridge must sit
+beside it as `Cpp/Utilities.zcpp.dll` on Windows,
+`Cpp/Utilities.zcpp.so` on Linux, or `Cpp/Utilities.zcpp.dylib` on macOS.
+Applications distribute that compiled module inside their package, so users
+do not need a C++ compiler or development tools.
+
+Include the installed `zsharp_cpp.h` header and export one bridge entry:
+
+```cpp
+#include <cstring>
+#include "zsharp_cpp.h"
+
+extern "C" ZSHARP_CPP_EXPORT int zsharp_cpp_call_v1(
+    uint32_t abi, const char *function,
+    const ZSharpCppValue *arguments, size_t argument_count,
+    ZSharpCppValue *result, char *error, size_t error_size) {
+    if (abi != ZSHARP_CPP_ABI_VERSION) return 0;
+    if (std::strcmp(function, "answer") == 0 && argument_count == 0) {
+        result->type = ZSHARP_CPP_NUMBER;
+        result->number = 42;
+        return 1;
+    }
+    return 0;
+}
+```
+
+Bridge arguments and results support text, number, status, and null. Returned
+text is copied by ZVM before the module is unloaded. C++ calls require
+`ZSharp: [1.1.3.0]:` or newer.
 
 ## Solid 3D cubes
 

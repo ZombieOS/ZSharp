@@ -678,6 +678,7 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
     if (!parser->failed && strcmp(parts[0], "py") != 0 &&
         strcmp(parts[0], "js") != 0 &&
         strcmp(parts[0], "lua") != 0 &&
+        strcmp(parts[0], "cpp") != 0 &&
         part_count != 3 && part_count != 4) {
         fail_at(parser, &parser->current,
                 "Function.call requires File.Room.Function or "
@@ -685,7 +686,7 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
     }
     if (!parser->failed &&
         (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-         strcmp(parts[0], "lua") == 0) &&
+         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0) &&
         part_count < 3) {
         fail_at(parser, &parser->current,
                 "foreign calls require LANGUAGE:Path.To.File:function");
@@ -732,7 +733,7 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
         return 0;
     }
     if (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-        strcmp(parts[0], "lua") == 0) {
+        strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0) {
         size_t module_length = 0;
         char *module;
         char *cursor;
@@ -741,8 +742,10 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
         module = (char *)malloc(module_length + 1);
         instruction->operand = zsharp_copy_text(
             strcmp(parts[0], "py") == 0 ? "@py" :
-            strcmp(parts[0], "js") == 0 ? "@js" : "@lua",
-            strcmp(parts[0], "lua") == 0 ? 4 : 3);
+            strcmp(parts[0], "js") == 0 ? "@js" :
+            strcmp(parts[0], "lua") == 0 ? "@lua" : "@cpp",
+            (strcmp(parts[0], "lua") == 0 ||
+             strcmp(parts[0], "cpp") == 0) ? 4 : 3);
         instruction->call_room = zsharp_copy_text("", 0);
         if (module == NULL || instruction->operand == NULL ||
             instruction->call_room == NULL) {
@@ -2426,10 +2429,11 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     parts[part_count++] = consume_name(parser, "an imported project name");
     if (!parser->failed &&
         (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-         strcmp(parts[0], "lua") == 0) &&
+         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0) &&
         match_type(parser, ZTOKEN_COLON)) {
         foreign_language = strcmp(parts[0], "py") == 0 ? 1 :
-                           strcmp(parts[0], "js") == 0 ? 2 : 3;
+                           strcmp(parts[0], "js") == 0 ? 2 :
+                           strcmp(parts[0], "lua") == 0 ? 3 : 4;
         parts[part_count++] = consume_name(parser,
                                            "the foreign project name");
     }
@@ -2476,7 +2480,8 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     if (path == NULL) return 0;
     if (foreign_language) {
         const char *prefix = foreign_language == 1 ? "py" :
-                             foreign_language == 2 ? "js" : "lua";
+                             foreign_language == 2 ? "js" :
+                             foreign_language == 3 ? "lua" : "cpp";
         size_t prefix_length = strlen(prefix);
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {
@@ -2516,10 +2521,11 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     parts[part_count++] = consume_name(parser, "an imported project name");
     if (!parser->failed &&
         (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-         strcmp(parts[0], "lua") == 0) &&
+         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0) &&
         match_type(parser, ZTOKEN_COLON)) {
         foreign_language = strcmp(parts[0], "py") == 0 ? 1 :
-                           strcmp(parts[0], "js") == 0 ? 2 : 3;
+                           strcmp(parts[0], "js") == 0 ? 2 :
+                           strcmp(parts[0], "lua") == 0 ? 3 : 4;
         parts[part_count++] = consume_name(parser,
                                            "the foreign project name");
     }
@@ -2566,7 +2572,8 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     if (path == NULL) return 0;
     if (foreign_language) {
         const char *prefix = foreign_language == 1 ? "py" :
-                             foreign_language == 2 ? "js" : "lua";
+                             foreign_language == 2 ? "js" :
+                             foreign_language == 3 ? "lua" : "cpp";
         size_t prefix_length = strlen(prefix);
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {

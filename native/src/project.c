@@ -1302,6 +1302,12 @@ static int validate_instruction(const ZSharpProgram *program,
                                          project_root, "lua", "Lua",
                                          "lua", 2, error, error_size);
         }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@cpp") == 0) {
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "cpp", "C++",
+                                         "cpp", 3, error, error_size);
+        }
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
             return require_project_import(room, settings, instruction->operand,
                                           instruction->call_file, error,
@@ -1870,6 +1876,19 @@ int zsharp_project_validate_settings(const ZSharpSettings *settings,
             snprintf(error, error_size,
                      "Splash image '%s' requires zsharpgame and an existing project file",
                      settings->splashes[index].path);
+            return 0;
+        }
+    }
+    for (index = 0; index < settings->native_target_count; index++) {
+        char *native_path = join_path(
+            project_root, settings->native_targets[index].start);
+        int valid = native_path != NULL && path_is_file(native_path);
+        free(native_path);
+        if (!valid) {
+            snprintf(error, error_size,
+                     "Native start '%s' for %s is not an existing project file",
+                     settings->native_targets[index].start,
+                     settings->native_targets[index].platform);
             return 0;
         }
     }

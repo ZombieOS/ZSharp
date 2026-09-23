@@ -974,8 +974,17 @@ static void layout_controls(LinuxWindowState *state, int width, int height) {
     int content_bottom = 0;
     double responsive_scale = state->layout_width > 0
         ? (double)width / (double)state->layout_width : 1.0;
-    if (responsive_scale > 1.0) responsive_scale = 1.0;
+    int origin_x;
+    int origin_y;
+    if (state->layout_height > 0) {
+        double height_scale = (double)height / (double)state->layout_height;
+        if (height_scale < responsive_scale) responsive_scale = height_scale;
+    }
     if (responsive_scale < 0.05) responsive_scale = 0.05;
+    origin_x = (int)((width - state->layout_width * responsive_scale) /
+                     2.0 + 0.5);
+    origin_y = (int)((height - state->layout_height * responsive_scale) /
+                     2.0 + 0.5);
     for (index = 0; index < state->control_count; index++) {
         LinuxControl *control = &state->controls[index];
         ZSharpUIElement *element = control->element;
@@ -994,11 +1003,11 @@ static void layout_controls(LinuxWindowState *state, int width, int height) {
         } else if (w < 24) {
             w = 24;
         }
-        x = (int)(((double)state->layout_width / 2.0 +
+        x = origin_x + (int)(((double)state->layout_width / 2.0 +
             (double)pixels(property(element, "locationX"), state->scale, 0) -
             (double)pixels(property(element, "width"), state->scale,
                            fallback_width) / 2.0) * responsive_scale + 0.5);
-        y = (int)(((double)state->layout_height / 2.0 -
+        y = origin_y + (int)(((double)state->layout_height / 2.0 -
             (double)pixels(property(element, "locationY"), state->scale, 0) -
             (double)pixels(property(element, "height"), state->scale,
                            fallback_height) / 2.0) * responsive_scale + 0.5);

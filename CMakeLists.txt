@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.1.2.3 LANGUAGES C)
+project(zsharp VERSION 1.1.3.0 LANGUAGES C)
 
 option(ZSHARP_BUILD_EXAMPLES "Build Z# integration examples" OFF)
 option(ZSHARP_BUILD_GAME_RUNTIME
@@ -184,6 +184,7 @@ install(TARGETS zsharp zsharp_installer RUNTIME DESTINATION bin)
 install(FILES native/python/zsharp_bridge.py DESTINATION bin/python)
 install(FILES
     native/include/zsharp.h
+    native/include/zsharp_cpp.h
     native/include/zsharp_provider.h
     DESTINATION include
 )
@@ -216,6 +217,24 @@ set(CPACK_GENERATOR "ZIP")
 include(CPack)
 
 if(BUILD_TESTING)
+    enable_language(CXX)
+    set(ZSHARP_CPP_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/cpp-project")
+    file(REMOVE_RECURSE "${ZSHARP_CPP_TEST_DIR}")
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp_project/"
+         DESTINATION "${ZSHARP_CPP_TEST_DIR}")
+    add_library(zsharp_test_cpp_module SHARED
+        tests/cpp_project/Cpp/Utilities.cpp)
+    target_include_directories(zsharp_test_cpp_module PRIVATE native/include)
+    target_compile_features(zsharp_test_cpp_module PRIVATE cxx_std_17)
+    set_target_properties(zsharp_test_cpp_module PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "Utilities.zcpp"
+        RUNTIME_OUTPUT_DIRECTORY "${ZSHARP_CPP_TEST_DIR}/Cpp"
+        LIBRARY_OUTPUT_DIRECTORY "${ZSHARP_CPP_TEST_DIR}/Cpp"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${ZSHARP_CPP_TEST_DIR}/Cpp"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${ZSHARP_CPP_TEST_DIR}/Cpp"
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${ZSHARP_CPP_TEST_DIR}/Cpp"
+        LIBRARY_OUTPUT_DIRECTORY_DEBUG "${ZSHARP_CPP_TEST_DIR}/Cpp")
     add_executable(zsharp_test_zip tests/create-stored-zip.c)
     add_executable(zsharp_test_game_projection
         tests/game-projection-tests.c
@@ -249,6 +268,7 @@ if(BUILD_TESTING)
             "-DTEST_PROJECT_REGISTRY=${CMAKE_CURRENT_BINARY_DIR}/projects.registry"
             "-DTEST_SHORTCUT_CACHE=${CMAKE_CURRENT_BINARY_DIR}/shortcut-cache"
             "-DTEST_DESKTOP=${CMAKE_CURRENT_BINARY_DIR}/test-desktop"
+            "-DTEST_CPP_PROJECT=${ZSHARP_CPP_TEST_DIR}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-syntax-tests.cmake"
     )
     add_test(NAME zsharp_game_projection

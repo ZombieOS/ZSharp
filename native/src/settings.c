@@ -199,6 +199,53 @@ static int append_splash(SettingsParser *parser, ZSharpSettings *settings,
     return 1;
 }
 
+static int valid_native_platform(const char *platform) {
+    static const char *const platforms[] = {
+        "windows-x86_64", "windows-aarch64", "linux-x86_64",
+        "linux-aarch64", "macos-x86_64", "macos-aarch64"};
+    size_t index;
+    for (index = 0; index < sizeof(platforms) / sizeof(platforms[0]); index++)
+        if (strcmp(platform, platforms[index]) == 0) return 1;
+    return 0;
+}
+
+static int append_native_target(SettingsParser *parser,
+                                ZSharpSettings *settings, char *platform,
+                                char *start) {
+    ZSharpNativeTarget *resized;
+    size_t index;
+    if (!valid_native_platform(platform)) {
+        settings_fail(parser, &parser->current,
+                      "unsupported Native platform '%s'", platform);
+        free(platform);
+        free(start);
+        return 0;
+    }
+    for (index = 0; index < settings->native_target_count; index++) {
+        if (strcmp(settings->native_targets[index].platform, platform) == 0) {
+            settings_fail(parser, &parser->current,
+                          "duplicate Native platform '%s'", platform);
+            free(platform);
+            free(start);
+            return 0;
+        }
+    }
+    resized = (ZSharpNativeTarget *)realloc(
+        settings->native_targets,
+        (settings->native_target_count + 1) * sizeof(*resized));
+    if (resized == NULL) {
+        free(platform);
+        free(start);
+        settings_fail(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    settings->native_targets = resized;
+    resized[settings->native_target_count].platform = platform;
+    resized[settings->native_target_count].start = start;
+    settings->native_target_count++;
+    return 1;
+}
+
 static int settings_version(SettingsParser *parser, uint32_t version[4],
                             int bracketed) {
     size_t index;
@@ -482,6 +529,11 @@ void zsharp_settings_free(ZSharpSettings *settings) {
     free(settings->window_startup);
     free(settings->window_uninstall);
     free(settings->game_start_scene);
+    for (index = 0; index < settings->native_target_count; index++) {
+        free(settings->native_targets[index].platform);
+        free(settings->native_targets[index].start);
+    }
+    free(settings->native_targets);
     for (index = 0; index < settings->splash_count; index++)
         free(settings->splashes[index].path);
     free(settings->splashes);
@@ -727,10 +779,75 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
             settings_consume_type(&parser, ZTOKEN_RIGHT_PAREN,
                                   "')' after Window settings");
             settings_match_type(&parser, ZTOKEN_COLON);
-            if (!parser.failed && (window_seen & 4u) == 0 && window_seen != 3u) {
+            if (!parser.failed && (window_seen & 4u) == 0 &&
+                (window_seen & 1u) == 0) {
                 settings_fail(&parser, &parser.current,
-                              "Window must define Startup and Uninstall, or a StartScene");
+                              "Window must define Startup or a StartScene");
             }
+        } else if (settings_match_word(&parser, "Native")) {
+            if ((seen & 1024u) != 0) {
+                settings_fail(&parser, &parser.current,
+                              "duplicate Native setting");
+                break;
+            }
+            seen |= 1024u;
+            settings_consume_type(&parser, ZTOKEN_LEFT_BRACKET,
+                                  "'[' after Native");
+            settings_consume_word(&parser, "JSON");
+            settings_consume_type(&parser, ZTOKEN_RIGHT_BRACKET,
+                                  "']' after Native JSON");
+            settings_consume_type(&parser, ZTOKEN_LEFT_PAREN,
+                                  "'(' before Native data");
+            settings_consume_type(&parser, ZTOKEN_LEFT_BRACKET,
+                                  "'[' before the Native array");
+            while (!parser.failed &&
+                   parser.current.type != ZTOKEN_RIGHT_BRACKET) {
+                char *platform = NULL;
+                char *start = NULL;
+                settings_consume_type(&parser, ZTOKEN_LEFT_BRACE,
+                                      "'{' before a Native entry");
+                if (settings_consume_json_key(&parser, "platform")) {
+                    settings_consume_type(&parser, ZTOKEN_COLON,
+                                          "':' after Native platform");
+                    platform = settings_consume_text(
+                        &parser, "a quoted Native platform");
+                } else {
+                    settings_fail(&parser, &parser.current,
+                                  "expected Native field 'platform'");
+                }
+                settings_consume_type(&parser, ZTOKEN_COMMA,
+                                      "',' after Native platform");
+                if (settings_consume_json_key(&parser, "start")) {
+                    settings_consume_type(&parser, ZTOKEN_COLON,
+                                          "':' after Native start");
+                    start = settings_consume_text(
+                        &parser, "a quoted Native startup path");
+                    if (start != NULL)
+                        validate_project_path(&parser, "Native start", start,
+                                              NULL);
+                } else {
+                    settings_fail(&parser, &parser.current,
+                                  "expected Native field 'start'");
+                }
+                settings_consume_type(&parser, ZTOKEN_RIGHT_BRACE,
+                                      "'}' after a Native entry");
+                if (!parser.failed &&
+                    !append_native_target(&parser, settings, platform, start))
+                    break;
+                if (parser.failed) {
+                    free(platform);
+                    free(start);
+                }
+                if (!settings_match_type(&parser, ZTOKEN_COMMA)) break;
+            }
+            settings_consume_type(&parser, ZTOKEN_RIGHT_BRACKET,
+                                  "']' after the Native array");
+            settings_consume_type(&parser, ZTOKEN_RIGHT_PAREN,
+                                  "')' after Native data");
+            settings_match_type(&parser, ZTOKEN_COLON);
+            if (!parser.failed && settings->native_target_count == 0)
+                settings_fail(&parser, &parser.current,
+                              "Native must define at least one target");
         } else if (settings_match_word(&parser, "Splash")) {
             if ((seen & 512u) != 0) {
                 settings_fail(&parser, &parser.current,
@@ -907,6 +1024,16 @@ const ZSharpDependency *zsharp_settings_find_dependency(
         if (strcmp(settings->dependencies[index].project_id, project_id) == 0) {
             return &settings->dependencies[index];
         }
+    }
+    return NULL;
+}
+
+const ZSharpNativeTarget *zsharp_settings_native_target(
+    const ZSharpSettings *settings, const char *platform) {
+    size_t index;
+    for (index = 0; index < settings->native_target_count; index++) {
+        if (strcmp(settings->native_targets[index].platform, platform) == 0)
+            return &settings->native_targets[index];
     }
     return NULL;
 }

@@ -20,6 +20,11 @@ typedef struct ZSharpSplash {
     double duration_seconds;
 } ZSharpSplash;
 
+typedef struct ZSharpNativeTarget {
+    char *platform;
+    char *start;
+} ZSharpNativeTarget;
+
 typedef struct ZSharpSettings {
     char *project_name;
     char *project_id;
@@ -37,6 +42,8 @@ typedef struct ZSharpSettings {
     char *game_start_scene;
     ZSharpSplash *splashes;
     size_t splash_count;
+    ZSharpNativeTarget *native_targets;
+    size_t native_target_count;
 } ZSharpSettings;
 
 void zsharp_settings_init(ZSharpSettings *settings);
@@ -56,5 +63,8 @@ int zsharp_settings_load(const char *project_root, ZSharpSettings *settings,
 
 const ZSharpDependency *zsharp_settings_find_dependency(
     const ZSharpSettings *settings, const char *project_id);
+
+const ZSharpNativeTarget *zsharp_settings_native_target(
+    const ZSharpSettings *settings, const char *platform);
 
 #endif

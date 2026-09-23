@@ -1,6 +1,7 @@
 #include "vm.h"
 
 #include "zsharp.h"
+#include "zsharp_cpp.h"
 #include "decimal.h"
 #include "game_runtime.h"
 #include "hash.h"
@@ -26,6 +27,7 @@
 #include <windows.h>
 #include <process.h>
 #else
+#include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
 #include <time.h>
@@ -36,6 +38,33 @@
 #endif
 
 #define ZSHARP_MAX_CALL_DEPTH 256
+
+#ifdef _WIN32
+static int run_bridge_command_hidden(const char *command) {
+    STARTUPINFOA startup = {0};
+    PROCESS_INFORMATION process = {0};
+    char *mutable_command;
+    DWORD exit_code = 1;
+    size_t length = strlen(command) + 16;
+    mutable_command = (char *)malloc(length);
+    if (mutable_command == NULL) return -1;
+    snprintf(mutable_command, length, "cmd.exe /c %s", command);
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    if (!CreateProcessA(NULL, mutable_command, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &startup, &process)) {
+        free(mutable_command);
+        return -1;
+    }
+    free(mutable_command);
+    WaitForSingleObject(process.hProcess, INFINITE);
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return (int)exit_code;
+}
+#endif
 
 typedef struct RuntimeValue {
     ZSharpValueType type;
@@ -332,7 +361,12 @@ static int python_runtime_paths(char *python, size_t python_size,
                 !bootstrap_python_archive(executable, archive, error,
                                           error_size)) return 0;
             if (!runtime_file_exists(development_bridge) &&
-                runtime_file_exists(archive) && system(command) != 0) {
+                runtime_file_exists(archive) &&
+#ifdef _WIN32
+                run_bridge_command_hidden(command) != 0) {
+#else
+                system(command) != 0) {
+#endif
                 snprintf(error, error_size,
                          "could not unpack the bundled Python runtime");
                 return 0;
@@ -442,7 +476,11 @@ static int execute_python_call(const ZSharpProgram *program,
 #endif
              python, bridge, module, instruction->call_function,
              input_path, output_path);
+#ifdef _WIN32
+    process_result = run_bridge_command_hidden(command);
+#else
     process_result = system(command);
+#endif
     file = fopen(output_path, "rb");
     remove(input_path);
     if (file == NULL) {
@@ -517,6 +555,162 @@ static int execute_python_call(const ZSharpProgram *program,
     }
     free(response);
     return 1;
+}
+
+static int execute_cpp_call(const ZSharpProgram *program,
+                            const ZSharpInstruction *instruction,
+                            const RuntimeValue *arguments,
+                            const char *project_root, RuntimeHeap *heap,
+                            RuntimeValue *result, char *error,
+                            size_t error_size) {
+    char relative[1024];
+    char library_path[2048];
+    const char *module_name = instruction->call_file;
+    size_t project_length = program->project_id == NULL ? 0
+        : strlen(program->project_id);
+    size_t index;
+    void *library;
+    ZSharpCppCallV1 entry;
+    ZSharpCppValue *cpp_arguments = NULL;
+    ZSharpCppValue cpp_result;
+    char cpp_error[1024] = {0};
+    int ok = 0;
+    if (project_length > 0 &&
+        strncmp(module_name, program->project_id, project_length) == 0 &&
+        module_name[project_length] == '.')
+        module_name += project_length + 1;
+    snprintf(relative, sizeof(relative), "%s", module_name);
+    for (index = 0; relative[index] != '\0'; index++)
+        if (relative[index] == '.') relative[index] =
+#ifdef _WIN32
+            '\\';
+#else
+            '/';
+#endif
+#ifdef _WIN32
+    snprintf(library_path, sizeof(library_path), "%s\\%s.zcpp.dll",
+             project_root, relative);
+#elif defined(__APPLE__)
+    snprintf(library_path, sizeof(library_path), "%s/%s.zcpp.dylib",
+             project_root, relative);
+#else
+    snprintf(library_path, sizeof(library_path), "%s/%s.zcpp.so",
+             project_root, relative);
+#endif
+#ifdef _WIN32
+    library = (void *)LoadLibraryA(library_path);
+#else
+    library = dlopen(library_path, RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (library == NULL) {
+        snprintf(error, error_size,
+                 "C++ module '%s' is not compiled for this platform (%s)",
+                 instruction->call_file, library_path);
+        return 0;
+    }
+#ifdef _WIN32
+    entry = (ZSharpCppCallV1)(void *)GetProcAddress(
+        (HMODULE)library, ZSHARP_CPP_ENTRY_NAME);
+#else
+    entry = (ZSharpCppCallV1)dlsym(library, ZSHARP_CPP_ENTRY_NAME);
+#endif
+    if (entry == NULL) {
+        snprintf(error, error_size,
+                 "C++ module '%s' does not export %s",
+                 instruction->call_file, ZSHARP_CPP_ENTRY_NAME);
+        goto cleanup;
+    }
+    if (instruction->argument_count > 0) {
+        cpp_arguments = (ZSharpCppValue *)calloc(
+            instruction->argument_count, sizeof(*cpp_arguments));
+        if (cpp_arguments == NULL) {
+            snprintf(error, error_size, "out of memory");
+            goto cleanup;
+        }
+    }
+    for (index = 0; index < instruction->argument_count; index++) {
+        if (arguments[index].type == ZVALUE_TEXT) {
+            cpp_arguments[index].type = ZSHARP_CPP_TEXT;
+            cpp_arguments[index].text = arguments[index].text;
+        } else if (arguments[index].type == ZVALUE_NUMBER) {
+            cpp_arguments[index].type = ZSHARP_CPP_NUMBER;
+            cpp_arguments[index].number = strtod(arguments[index].number_text,
+                                                  NULL);
+        } else if (arguments[index].type == ZVALUE_STATUS) {
+            cpp_arguments[index].type = ZSHARP_CPP_STATUS;
+            cpp_arguments[index].number = arguments[index].number != 0;
+        } else if (arguments[index].type == ZVALUE_NULL) {
+            cpp_arguments[index].type = ZSHARP_CPP_NULL;
+        } else {
+            snprintf(error, error_size,
+                     "C++ arguments support text, number, status, and null");
+            goto cleanup;
+        }
+    }
+    memset(&cpp_result, 0, sizeof(cpp_result));
+    if (!entry(ZSHARP_CPP_ABI_VERSION, instruction->call_function,
+               cpp_arguments, instruction->argument_count, &cpp_result,
+               cpp_error, sizeof(cpp_error))) {
+        snprintf(error, error_size, "C++ call %s:%s failed: %s",
+                 instruction->call_file, instruction->call_function,
+                 cpp_error[0] == '\0' ? "native function failed" : cpp_error);
+        goto cleanup;
+    }
+    memset(result, 0, sizeof(*result));
+    if (cpp_result.type == ZSHARP_CPP_TEXT) {
+        char *copy = zsharp_copy_text(cpp_result.text == NULL ? "" :
+                                     cpp_result.text,
+                                     strlen(cpp_result.text == NULL ? "" :
+                                            cpp_result.text));
+        if (copy == NULL || heap_add_text(heap, copy) == NULL) {
+            snprintf(error, error_size, "out of memory");
+            goto cleanup;
+        }
+        result->type = ZVALUE_TEXT;
+        result->text = copy;
+    } else if (cpp_result.type == ZSHARP_CPP_NUMBER) {
+        char buffer[512];
+        char *end;
+        char *copy;
+        if (!isfinite(cpp_result.number)) {
+            snprintf(error, error_size,
+                     "C++ returned a non-finite number");
+            goto cleanup;
+        }
+        snprintf(buffer, sizeof(buffer), "%.17f", cpp_result.number);
+        end = buffer + strlen(buffer) - 1;
+        while (end > buffer && *end == '0') *end-- = '\0';
+        if (*end == '.') *end = '\0';
+        if (strcmp(buffer, "-0") == 0) {
+            buffer[0] = '0';
+            buffer[1] = '\0';
+        }
+        copy = zsharp_copy_text(buffer, strlen(buffer));
+        if (copy == NULL || heap_add_text(heap, copy) == NULL) {
+            snprintf(error, error_size, "out of memory");
+            goto cleanup;
+        }
+        result->type = ZVALUE_NUMBER;
+        result->number_text = copy;
+        result->number = (int32_t)cpp_result.number;
+    } else if (cpp_result.type == ZSHARP_CPP_STATUS) {
+        result->type = ZVALUE_STATUS;
+        result->number = cpp_result.number != 0.0;
+    } else if (cpp_result.type == ZSHARP_CPP_NULL) {
+        result->type = ZVALUE_NULL;
+    } else {
+        snprintf(error, error_size, "C++ returned an unsupported value type");
+        goto cleanup;
+    }
+    ok = 1;
+cleanup:
+    free(cpp_arguments);
+#ifdef _WIN32
+    FreeLibrary((HMODULE)library);
+#else
+    dlclose(library);
+#endif
+    return ok;
 }
 
 typedef struct LuaMemoryLimit {
@@ -4241,6 +4435,25 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 if (instruction->operand != NULL &&
                     strcmp(instruction->operand, "@lua") == 0) {
                     if (!execute_lua_call(program, instruction,
+                                          call_arguments, project_root,
+                                          heap, &call_return, error,
+                                          error_size)) {
+                        free(call_arguments);
+                        ok = 0;
+                        goto done;
+                    }
+                    free(call_arguments);
+                    if (instruction->op == ZOP_CALL_QUALIFIED_VALUE &&
+                        !push(stack, stack_capacity, &stack_count, call_return,
+                              error, error_size)) {
+                        ok = 0;
+                        goto done;
+                    }
+                    break;
+                }
+                if (instruction->operand != NULL &&
+                    strcmp(instruction->operand, "@cpp") == 0) {
+                    if (!execute_cpp_call(program, instruction,
                                           call_arguments, project_root,
                                           heap, &call_return, error,
                                           error_size)) {

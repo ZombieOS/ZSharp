@@ -5,7 +5,8 @@ if(NOT DEFINED ZSHARP_BIN OR NOT DEFINED PROJECT_ROOT OR
    NOT DEFINED TEST_PACKAGE_PROJECT OR NOT DEFINED TEST_GAME_PROJECT OR
    NOT DEFINED TEST_3D_GAME_PROJECT OR
    NOT DEFINED TEST_PACKAGE_CACHE OR NOT DEFINED TEST_PROJECT_REGISTRY OR
-   NOT DEFINED TEST_SHORTCUT_CACHE OR NOT DEFINED TEST_DESKTOP)
+   NOT DEFINED TEST_SHORTCUT_CACHE OR NOT DEFINED TEST_DESKTOP OR
+   NOT DEFINED TEST_CPP_PROJECT)
     message(FATAL_ERROR "The Z# test paths were not supplied")
 endif()
 
@@ -79,6 +80,76 @@ function(expect_failure label expected working_dir)
             "${label} did not report '${expected}'\n${combined}")
     endif()
 endfunction()
+
+execute_process(
+    COMMAND "${ZSHARP_BIN}" run Main.zsharp
+    WORKING_DIRECTORY "${TEST_CPP_PROJECT}"
+    RESULT_VARIABLE cpp_result
+    OUTPUT_VARIABLE cpp_output
+    ERROR_VARIABLE cpp_error)
+if(NOT cpp_result EQUAL 0 OR
+   NOT cpp_output MATCHES "Hello from C\\+\\+, Tester!" OR
+   NOT cpp_output MATCHES "42" OR
+   NOT cpp_output MATCHES "C\\+\\+ status alive")
+    message(FATAL_ERROR
+        "C++ interoperability test failed (${cpp_result})\n"
+        "stdout: ${cpp_output}\nstderr: ${cpp_error}")
+endif()
+
+set(optional_uninstall_project
+    "${CMAKE_CURRENT_BINARY_DIR}/optional-uninstall-project")
+file(REMOVE_RECURSE "${optional_uninstall_project}")
+file(COPY "${PROJECT_ROOT}/tests/package/"
+     DESTINATION "${optional_uninstall_project}")
+file(READ "${optional_uninstall_project}/project.zsettings"
+     optional_uninstall_settings)
+string(REPLACE " Uninstall: \"Main.zsharp\":\n" ""
+       optional_uninstall_settings "${optional_uninstall_settings}")
+file(WRITE "${optional_uninstall_project}/project.zsettings"
+     "${optional_uninstall_settings}")
+expect_success("optional uninstall window packaging" "${PROJECT_ROOT}"
+               package app "${optional_uninstall_project}" OptionalUninstall)
+set(missing_startup_project
+    "${CMAKE_CURRENT_BINARY_DIR}/missing-startup-project")
+file(REMOVE_RECURSE "${missing_startup_project}")
+file(COPY "${PROJECT_ROOT}/tests/package/"
+     DESTINATION "${missing_startup_project}")
+file(READ "${missing_startup_project}/project.zsettings"
+     missing_startup_settings)
+string(REPLACE " Startup: \"Main.zsharp\":\n" ""
+       missing_startup_settings "${missing_startup_settings}")
+file(WRITE "${missing_startup_project}/project.zsettings"
+     "${missing_startup_settings}")
+expect_failure("required startup window" "Window must define Startup"
+               "${PROJECT_ROOT}" package app
+               "${missing_startup_project}" MissingStartup)
+
+set(native_app_project "${CMAKE_CURRENT_BINARY_DIR}/native-app-project")
+file(REMOVE_RECURSE "${native_app_project}")
+file(MAKE_DIRECTORY "${native_app_project}/Engine")
+file(COPY_FILE "${ZSHARP_BIN}" "${native_app_project}/Engine/native.exe")
+file(WRITE "${native_app_project}/project.zsettings"
+"zsharp = type.settings\n\nProject: \"Native App\":\nPID: \"native_app\":\nVersion: [1.1.3.0]:\nAuthors: [\"Z# Tests\"]:\nDescription: \"Native startup test.\":\nZSharp: [1.1.3.0]:\n\nDependencies (\n):\n\nNative[JSON] (\n [\n  {\n   \"platform\": \"windows-x86_64\",\n   \"start\": \"Engine/native.exe\"\n  }\n ]\n):\n")
+expect_success("native startup packaging" "${PROJECT_ROOT}"
+               package app "${native_app_project}" NativeApp)
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+            ZSHARP_SKIP_DESKTOP_INTEGRATION=1
+            "ZSHARP_PACKAGE_CACHE=${TEST_PACKAGE_CACHE}"
+            "ZSHARP_PACKAGE_REGISTRY=${TEST_PROJECT_REGISTRY}.native.packages"
+            "ZSHARP_PLAY_STATS_REGISTRY=${TEST_PROJECT_REGISTRY}.native.playtime"
+            "${ZSHARP_BIN}"
+            "${native_app_project}/Packages/NativeApp.zapp" --version
+    WORKING_DIRECTORY "${PROJECT_ROOT}"
+    RESULT_VARIABLE native_app_result
+    OUTPUT_VARIABLE native_app_output
+    ERROR_VARIABLE native_app_error)
+if(NOT native_app_result EQUAL 0 OR
+   NOT native_app_output MATCHES "Z# 1.1.3.0")
+    message(FATAL_ERROR
+        "native startup launch failed (${native_app_result})\n"
+        "stdout: ${native_app_output}\nstderr: ${native_app_error}")
+endif()
 
 execute_process(
     COMMAND "${ZSHARP_BIN}" run Main.zsharp
@@ -511,14 +582,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.2.4]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.3.1]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.1.2.4!"
+               "Update to at least 1.1.3.1!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

@@ -64,6 +64,7 @@ typedef struct WindowState {
     int screen_height;
     int layout_width;
     int layout_height;
+    double rendered_scale;
     int scroll_y;
     int content_height;
     int vertical_scroll_visible;
@@ -1168,7 +1169,7 @@ static HFONT create_element_font(const ZSharpUIElement *element,
     int font_weight;
     const char *face;
     if (element->type != ZUI_TEXT && size == NULL && family == NULL &&
-        weight == NULL) {
+        weight == NULL && fabs(scale - 1.0) < 0.01) {
         *owned = 0;
         return (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     }
@@ -1294,6 +1295,8 @@ static void layout_controls(WindowState *state) {
     int content_bottom = 0;
     int initial_scroll = state->scroll_y;
     int needs_scroll;
+    int origin_x;
+    int origin_y;
     double responsive_scale;
     SCROLLINFO scroll;
     GetClientRect(state->window, &area);
@@ -1301,8 +1304,31 @@ static void layout_controls(WindowState *state) {
     client_height = area.bottom - area.top;
     responsive_scale = state->layout_width > 0
         ? (double)client_width / (double)state->layout_width : 1.0;
-    if (responsive_scale > 1.0) responsive_scale = 1.0;
+    if (state->layout_height > 0) {
+        double height_scale = (double)client_height /
+                              (double)state->layout_height;
+        if (height_scale < responsive_scale) responsive_scale = height_scale;
+    }
     if (responsive_scale < 0.05) responsive_scale = 0.05;
+    origin_x = (int)((client_width - state->layout_width * responsive_scale) /
+                     2.0 + 0.5);
+    origin_y = (int)((client_height - state->layout_height * responsive_scale) /
+                     2.0 + 0.5);
+    if (fabs(state->rendered_scale - responsive_scale) > 0.01) {
+        for (index = 0; index < state->control_count; index++) {
+            WindowControl *control = &state->controls[index];
+            int owns_font = 0;
+            HFONT font = create_element_font(control->element,
+                state->scale * responsive_scale, &owns_font);
+            if (font != NULL) {
+                SendMessageA(control->handle, WM_SETFONT, (WPARAM)font, FALSE);
+                if (control->owns_font) DeleteObject(control->font);
+                control->font = font;
+                control->owns_font = owns_font;
+            }
+        }
+        state->rendered_scale = responsive_scale;
+    }
     for (index = 0; index < state->control_count; index++) {
         WindowControl *control = &state->controls[index];
         ZSharpUIElement *element = control->element;
@@ -1331,7 +1357,7 @@ static void layout_controls(WindowState *state) {
             responsive_scale + 0.5);
         anchor_x = find_property(element, "anchorX");
         anchor_y = find_property(element, "anchorY");
-        x = (int)(((double)state->layout_width / 2.0 +
+        x = origin_x + (int)(((double)state->layout_width / 2.0 +
             (double)measurement_pixels(find_property(element, "locationX"),
                                        state->scale, 0) -
             (double)measurement_pixels(find_property(element, "width"),
@@ -1353,7 +1379,7 @@ static void layout_controls(WindowState *state) {
             if (width < 1) width = 1;
             height = wrapped_text_height(state, control, width, height);
         }
-        y = (int)(((double)state->layout_height / 2.0 -
+        y = origin_y + (int)(((double)state->layout_height / 2.0 -
             (double)measurement_pixels(find_property(element, "locationY"),
                                        state->scale, 0) -
             (double)measurement_pixels(find_property(element, "height"),
@@ -2156,6 +2182,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.screen_height = screen_height;
     state.layout_width = client_width;
     state.layout_height = client_height;
+    state.rendered_scale = 1.0;
     state.ui_thread_id = GetCurrentThreadId();
     state.runtime.state = &state;
     state.runtime.set_property = runtime_set_window_property;

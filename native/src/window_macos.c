@@ -677,8 +677,17 @@ static void layout_controls(MacWindowState *state) {
     double content_bottom = 0.0;
     double responsive_scale = state->layout_width > 0.0
         ? viewport.size.width / state->layout_width : 1.0;
-    if (responsive_scale > 1.0) responsive_scale = 1.0;
+    double origin_x;
+    double origin_y;
+    if (state->layout_height > 0.0) {
+        double height_scale = viewport.size.height / state->layout_height;
+        if (height_scale < responsive_scale) responsive_scale = height_scale;
+    }
     if (responsive_scale < 0.05) responsive_scale = 0.05;
+    origin_x = (viewport.size.width - state->layout_width * responsive_scale) /
+               2.0;
+    origin_y = (viewport.size.height - state->layout_height * responsive_scale) /
+               2.0;
     for (index = 0; index < state->control_count; index++) {
         MacControl *control = &state->controls[index];
         ZSharpUIElement *element = control->element;
@@ -712,10 +721,10 @@ static void layout_controls(MacWindowState *state) {
                     frame.size.height = base_height * responsive_scale;
             }
         }
-        frame.origin.x = (state->layout_width / 2.0 +
+        frame.origin.x = origin_x + (state->layout_width / 2.0 +
             points(property(element, "locationX"), state->scale, 0.0) -
             base_width / 2.0) * responsive_scale;
-        frame.origin.y = (state->layout_height / 2.0 -
+        frame.origin.y = origin_y + (state->layout_height / 2.0 -
             points(property(element, "locationY"), state->scale, 0.0) -
             base_height / 2.0) * responsive_scale;
         offset_x = points(property(element, "locationX"), state->scale, 0.0) *

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.3.0 - 2026-09-23
+
+- Added C++ interoperability through portable compiled bridge modules.
+- Added platform-specific native executable startup targets for `.zapp`
+  projects, allowing projects such as modified native editors and engines to
+  launch through Z# Hub.
+- Made custom uninstall windows optional while continuing to require a startup
+  window for applications that use native Z# windows.
+- Added clear errors when a native application has no build for the current
+  operating system and architecture.
+
 ## 1.1.2.3 - 2026-09-21
 
 - Fixed native Math results occasionally being serialized in scientific
