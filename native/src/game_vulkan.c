@@ -148,7 +148,12 @@ static int render_circle(SDL_Renderer *renderer,
                               indices, SEGMENTS * 3);
 }
 
-static int render_cube(SDL_Renderer *renderer,
+static SDL_Texture *load_sprite(ZSharpGameVulkan *renderer,
+                                const ZSharpGameRenderFrame *frame,
+                                const char *relative, char *error,
+                                size_t error_size);
+
+static int render_cube(SDL_Renderer *renderer, SDL_Texture *texture,
                        const ZSharpGameRenderFrame *frame,
                        const ZSharpGameRenderObject *object) {
     ZSharpProjectedCubeFace faces[6];
@@ -168,13 +173,15 @@ static int render_cube(SDL_Renderer *renderer,
             vertices[index].position.x = face->points[index][0];
             vertices[index].position.y = face->points[index][1];
             vertices[index].color = color;
+            vertices[index].tex_coord.x = face->texcoords[index][0];
+            vertices[index].tex_coord.y = face->texcoords[index][1];
         }
         for (index = 0; index + 2 < face->point_count; index++) {
             indices[index * 3] = 0;
             indices[index * 3 + 1] = (int)index + 1;
             indices[index * 3 + 2] = (int)index + 2;
         }
-        if (!SDL_RenderGeometry(renderer, NULL, vertices,
+        if (!SDL_RenderGeometry(renderer, texture, vertices,
                                 (int)face->point_count, indices,
                                 ((int)face->point_count - 2) * 3)) return 0;
     }
@@ -205,7 +212,7 @@ static SDL_Texture *load_sprite(ZSharpGameVulkan *renderer,
     if (relative == NULL || relative[0] == '\0' ||
         frame->project_root == NULL) {
         renderer_error(error, error_size,
-                       "sprite objects require an asset path");
+                       "textured objects require an asset path");
         return NULL;
     }
     root_length = strlen(frame->project_root);
@@ -331,7 +338,13 @@ int zsharp_game_vulkan_draw(ZSharpGameVulkan *renderer, int resized,
         int ok = 1;
         if (!object->visible) continue;
         if (object->shape == ZGAME_SHAPE_CUBE) {
-            ok = render_cube(renderer->renderer, frame, object);
+            SDL_Texture *texture = NULL;
+            if (object->asset_path != NULL && object->asset_path[0] != '\0') {
+                texture = load_sprite(renderer, frame, object->asset_path,
+                                      error, error_size);
+                if (texture == NULL) goto failed;
+            }
+            ok = render_cube(renderer->renderer, texture, frame, object);
         } else if (object->shape == ZGAME_SHAPE_CIRCLE) {
             ok = render_circle(renderer->renderer, object,
                                frame->camera_x, frame->camera_y);

@@ -1,0 +1,11 @@
+zsharp = type.settings
+
+Project: "Android VM Smoke Test":
+PID: "android_vm_smoke_test":
+Version: [1.1.4.0]:
+Authors: ["Z# Tests"]:
+Description: "Checks the script used by the Android JNI VM bridge.":
+ZSharp: [1.1.4.0]:
+
+Dependencies (
+):

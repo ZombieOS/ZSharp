@@ -14,6 +14,7 @@ size_t zsharp_game_project_cube(
 
 typedef struct ZSharpProjectedCubeFace {
     float points[6][2];
+    float texcoords[6][2];
     size_t point_count;
     float depth;
     float brightness;

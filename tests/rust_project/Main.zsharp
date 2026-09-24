@@ -1,0 +1,17 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import rust:rust_test.Rust.Utilities():
+
+ noticed brain Start[] (
+  text Greeting = Function.call(rust:Rust.Utilities:greeting["Tester"]):
+  number Total = Function.call(rust:Rust.Utilities:add[20, 22]):
+  Print(Greeting):
+  Print(Total):
+  if[Function.call(rust:Rust.Utilities:ready)] (
+   Print("Rust status alive"):
+  ) else (
+   Print("Rust status dead"):
+  )
+ )
+)

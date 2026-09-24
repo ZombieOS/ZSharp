@@ -11,6 +11,68 @@ permissions:
   contents: read
 
 jobs:
+  android-core:
+    name: Android arm64 language-core compile (not an APK)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        shell: bash
+        run: sdkmanager --install 'ndk;27.0.12077973'
+      - name: Cross-compile the portable language core
+        shell: bash
+        run: |
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          cmake -S . -B build-android-core \
+            -DCMAKE_TOOLCHAIN_FILE="$sdk_root/ndk/27.0.12077973/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DZSHARP_CORE_ONLY=ON
+          cmake --build build-android-core --target zsharp_language_core --parallel
+          test -s build-android-core/native/core/libzsharp_language_core.a
+      - name: Upload Android core test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zsharp-android-arm64-core-test-only
+          path: build-android-core/native/core/libzsharp_language_core.a
+          if-no-files-found: error
+
+  rust-interop:
+    name: Rust interoperability smoke test
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Verify Rust toolchain
+        shell: pwsh
+        run: rustc --version
+      - name: Configure Rust interoperability test
+        shell: pwsh
+        run: cmake -S . -B build-rust -DBUILD_TESTING=ON -DZSHARP_BUILD_GAME_RUNTIME=OFF
+      - name: Build Rust bridge and ZVM
+        shell: pwsh
+        run: cmake --build build-rust --config Release --target zsharp zsharp_test_rust_module --parallel
+      - name: Execute Rust module through ZVM
+        shell: pwsh
+        run: |
+          Push-Location build-rust/rust-project
+          try {
+            $output = & ../Release/zsharp.exe run Main.zsharp 2>&1
+            if ($LASTEXITCODE -ne 0 -or
+                ($output -join "`n") -notmatch 'Hello from Rust, Tester!' -or
+                ($output -join "`n") -notmatch 'Rust status alive') {
+              throw "Rust interop smoke test failed: $output"
+            }
+          } finally {
+            Pop-Location
+          }
+
   build:
     name: ${{ matrix.platform }}
     strategy:

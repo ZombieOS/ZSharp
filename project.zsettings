@@ -2,10 +2,10 @@ zsharp = type.settings
 
 Project: "Z#":
 PID: "zsharp":
-Version: [1.1.3.0]:
+Version: [1.1.4.0]:
 Authors: ["ZombieOS"]:
 Description: "The Z# programming language and bytecode toolchain.":
-ZSharp: [1.1.3.0]:
+ZSharp: [1.1.4.0]:
 
 Dependencies (
 ):

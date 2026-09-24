@@ -1,0 +1,10 @@
+zsharp = type.object
+
+noticed object Cube[] (
+ shape: cube:
+ width: 10:
+ height: 10:
+ length: 10:
+ color: #FFFFFF:
+ body: static:
+)

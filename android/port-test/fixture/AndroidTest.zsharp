@@ -1,0 +1,7 @@
+zsharp = type.script
+
+noticed room AndroidTest[] (
+ noticed brain Start[] (
+  Print("Android Z# VM ready"):
+ )
+)

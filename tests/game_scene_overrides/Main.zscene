@@ -1,0 +1,28 @@
+zsharp = type.scene
+
+noticed scene Main[] (
+ scene Main (
+  title: "Scene Override Test":
+  background: #08080B:
+  cameraZ: 30:
+ )
+ objects[JSON] (
+  [
+   {
+    "id": "Cube",
+    "name": "Blue Cube",
+    "location": {"x": "-10", "y": "0", "z": "0"},
+    "width": "12",
+    "height": "8",
+    "length": "6",
+    "color": "#3366FF"
+   },
+   {
+    "id": "Cube",
+    "name": "Black Cube",
+    "location": {"x": "10", "y": "0", "z": "0"},
+    "color": "#000000"
+   }
+  ]
+ )
+)

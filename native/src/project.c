@@ -1308,6 +1308,12 @@ static int validate_instruction(const ZSharpProgram *program,
                                          project_root, "cpp", "C++",
                                          "cpp", 3, error, error_size);
         }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@rust") == 0) {
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "rust", "Rust",
+                                         "rs", 4, error, error_size);
+        }
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
             return require_project_import(room, settings, instruction->operand,
                                           instruction->call_file, error,

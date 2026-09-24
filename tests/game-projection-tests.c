@@ -12,6 +12,18 @@ static int finite_edges(float edges[12][4], size_t count) {
     return 1;
 }
 
+static int valid_face_uvs(const ZSharpProjectedCubeFace faces[6],
+                          size_t count) {
+    size_t face, vertex, axis;
+    for (face = 0; face < count; face++)
+        for (vertex = 0; vertex < faces[face].point_count; vertex++)
+            for (axis = 0; axis < 2; axis++) {
+                float uv = faces[face].texcoords[vertex][axis];
+                if (!isfinite(uv) || uv < -0.001f || uv > 1.001f) return 0;
+            }
+    return 1;
+}
+
 int main(void) {
     ZSharpGameRenderFrame frame;
     ZSharpGameRenderObject cube;
@@ -31,7 +43,7 @@ int main(void) {
         return 1;
     }
     count = zsharp_game_project_cube_faces(&frame, &cube, faces);
-    if (count != 6) {
+    if (count != 6 || !valid_face_uvs(faces, count)) {
         fprintf(stderr, "default documented cube produced %zu solid faces\n",
                 count);
         return 1;
@@ -46,7 +58,7 @@ int main(void) {
         return 1;
     }
     count = zsharp_game_project_cube_faces(&frame, &cube, faces);
-    if (count == 0) {
+    if (count == 0 || !valid_face_uvs(faces, count)) {
         fprintf(stderr, "near-plane cube produced no solid faces\n");
         return 1;
     }

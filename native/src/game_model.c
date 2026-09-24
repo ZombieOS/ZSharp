@@ -789,6 +789,47 @@ static int json_location_number(ModelParser *parser, float *value) {
     return ok;
 }
 
+static int parse_scene_object_override(ModelParser *parser,
+                                       ZSharpGameObject *object) {
+    char *field = json_text(parser, "scene object field name");
+    int ok = 0;
+    if (field == NULL) return 0;
+    if (!parser_expect_type(parser, ZTOKEN_COLON,
+                            "expected ':' after scene object field")) {
+        free(field);
+        return 0;
+    }
+    if (strcmp(field, "width") == 0) {
+        ok = json_location_number(parser, &object->width);
+    } else if (strcmp(field, "height") == 0) {
+        ok = json_location_number(parser, &object->height);
+    } else if (strcmp(field, "length") == 0 ||
+               strcmp(field, "depth") == 0) {
+        ok = json_location_number(parser, &object->depth);
+    } else if (strcmp(field, "color") == 0) {
+        char *color = json_text(parser, "object color");
+        if (color != NULL) {
+            ModelValue value;
+            value.type = MODEL_COLOR;
+            value.text = color;
+            ok = value_color(parser, &value, &object->color);
+            free(color);
+        }
+    } else if (strcmp(field, "texture") == 0) {
+        char *texture = json_text(parser, "object texture path");
+        if (texture != NULL) {
+            ok = replace_text(&object->asset_path, texture);
+            if (!ok) parser_fail(parser, &parser->current, "out of memory");
+            free(texture);
+        }
+    } else {
+        parser_fail(parser, &parser->current,
+                    "unknown scene object override (expected width, height, length, color, or texture)");
+    }
+    free(field);
+    return ok;
+}
+
 static int parse_scene_objects(ModelParser *parser, const char *scene_name) {
     if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
                             "expected '[' after objects") ||
@@ -805,6 +846,7 @@ static int parse_scene_objects(ModelParser *parser, const char *scene_name) {
         float x = 0.0f, y = 0.0f, z = 0.0f;
         int has_z = 0;
         const ZSharpGameObject *definition;
+        ZSharpGameObject *placed;
         if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
                                 "expected '{' before a scene object") ||
             !json_key(parser, "id") || (id = json_text(parser, "object id")) == NULL ||
@@ -834,9 +876,7 @@ static int parse_scene_objects(ModelParser *parser, const char *scene_name) {
             has_z = 1;
         }
         if (!parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
-                                "expected '}' after location") ||
-            !parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
-                                "expected '}' after the scene object")) {
+                                "expected '}' after location")) {
             free(id);
             free(display_name);
             return 0;
@@ -849,12 +889,18 @@ static int parse_scene_objects(ModelParser *parser, const char *scene_name) {
             free(display_name);
             return 0;
         }
-        if (place_object(parser, definition, scene_name, display_name,
-                         x, y, z, has_z) == NULL) {
+        placed = place_object(parser, definition, scene_name, display_name,
+                              x, y, z, has_z);
+        if (placed == NULL) {
             free(id);
             return 0;
         }
         free(id);
+        while (parser_match_type(parser, ZTOKEN_COMMA)) {
+            if (!parse_scene_object_override(parser, placed)) return 0;
+        }
+        if (!parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                                "expected '}' after the scene object")) return 0;
         if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
     }
     return parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,

@@ -3,7 +3,7 @@
 This guide explains how to write Z# and compares its concepts with C#, Java,
 and C. The official source extension is `.zsharp`.
 
-Z# 1.1.3.0 implements the Z1 compiler and virtual machine plus the specialized
+Z# 1.1.4.0 implements the Z1 compiler and virtual machine plus the specialized
 window, scene, and object files in this guide. Window syntax is accepted,
 validated, stored in bytecode, and rendered by native Windows, Linux, and macOS
 `zsharpwindow` backends. `.zapp` and `.zgame` packaging is implemented.
@@ -285,7 +285,37 @@ noticed object Player[] (
 The object declaration's ID is referenced by `id` in a scene's `objects[JSON]`
 array. `name` is that placed instance's display name, while `location` owns its
 X/Y position and optional 3D Z position. This lets an object definition remain
-independent from the scene that places it. `attributes[JSON]` accepts official
+independent from the scene that places it. Starting in 1.1.4.0, a scene
+placement may add optional `width`, `height`, `length` (or `depth`), `color`,
+and `texture` fields after `location`. They override only that instance; omitted
+fields inherit the `.zobject` defaults. Size values must be positive, colors
+use quoted `"#RRGGBB"` text in the JSON, and texture paths are quoted safe
+project-relative paths. For example, both placements below reuse `Cube.zobject`:
+
+```json
+[
+  {
+    "id": "Cube",
+    "name": "Blue Cube",
+    "location": { "x": "-10", "y": "0", "z": "0" },
+    "width": "12",
+    "height": "8",
+    "length": "6",
+    "color": "#3366FF"
+  },
+  {
+    "id": "Cube",
+    "name": "Black Cube",
+    "location": { "x": "10", "y": "0", "z": "0" },
+    "color": "#000000"
+  }
+]
+```
+
+The scene-level `texture` override uses the existing sprite/image asset path.
+In 1.1.4.0, cubes also map a PNG or BMP texture onto each face; `color`
+multiplies the texture, so use `#FFFFFF` for its unmodified colors.
+`attributes[JSON]` accepts official
 IDs such as `COLLIDER2D` and `COLLIDER3D`, plus project-defined IDs prefixed
 with `CUSTOM:`. Each attribute has an `active` boolean. Object textures use
 `texture: "path/to/texture.png":`; a 3D object's third size is `length:`.
@@ -2337,6 +2367,57 @@ extern "C" ZSHARP_CPP_EXPORT int zsharp_cpp_call_v1(
 Bridge arguments and results support text, number, status, and null. Returned
 text is copied by ZVM before the module is unloaded. C++ calls require
 `ZSharp: [1.1.3.0]:` or newer.
+
+## Rust interoperability
+
+Rust modules use project-qualified imports and short same-project calls:
+
+```zsharp
+import rust:my_project.Rust.Utilities():
+
+text Greeting = Function.call(rust:Rust.Utilities:greeting["Z#"]):
+number Total = Function.call(rust:Rust.Utilities:add[20, 22]):
+```
+
+The import corresponds to `Rust/Utilities.rs`. Build it as a Rust `cdylib`
+with the bridge entry `zsharp_rust_call_v1`, then place the compiled library
+beside the source as `Rust/Utilities.zrust.dll` on Windows,
+`Rust/Utilities.zrust.so` on Linux, or `Rust/Utilities.zrust.dylib` on macOS.
+Package the module for each supported platform; the user's device does not
+need Rust or Cargo installed. Rust source alone cannot be called by the ZVM.
+For example, from the project root on Windows (with `zsharp_ffi.rs` copied
+beside the Rust source):
+
+```powershell
+rustc --edition 2021 --crate-type cdylib Rust/Utilities.rs -o Rust/Utilities.zrust.dll
+```
+
+The installed `share/zsharp/rust/zsharp_ffi.rs` file defines the bridge's
+`#[repr(C)]` value layout and constants. A module exports this function:
+
+```rust
+#[no_mangle]
+pub unsafe extern "C" fn zsharp_rust_call_v1(
+    abi_version: u32,
+    function: *const std::ffi::c_char,
+    arguments: *const ZSharpRustValue,
+    argument_count: usize,
+    result: *mut ZSharpRustValue,
+    error: *mut std::ffi::c_char,
+    error_size: usize,
+) -> i32 {
+    // Return 1 for success, 0 after writing an error message for failure.
+    0
+}
+```
+
+Include the value definitions from `zsharp_ffi.rs` in the Rust module. The
+module must check the ABI version before reading arguments. Arguments and
+results support text, number, status, and null. Returned text must remain
+valid until the ZVM copies it, immediately after the call. The full example
+is in `tests/rust_project/Rust/Utilities.rs`. Rust calls require
+`ZSharp: [1.1.4.0]:` or newer. As with C++, the native desktop bridge is not
+the Android VM-executed module format planned for a later release.
 
 ## Solid 3D cubes
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.4.0 - unreleased
+
+- Added Rust interoperability using project-qualified imports and same-project
+  function calls. Rust modules use a small C-compatible bridge and ship as
+  platform-specific compiled libraries in desktop packages.
+- Added Rust script creation and highlighting to the Z# editor source.
+- Android playback is deferred to 1.1.5.0; this release does not include an
+  Android app or runtime.
+
+- Added per-placement width, height, length/depth, color, and texture
+  overrides in scene `objects[JSON]` entries. A single `.zobject` definition
+  can now be reused with different appearances and sizes.
+- Added PNG/BMP texture mapping to native 3D cube faces. Instance colors
+  multiply texture colors; use white for the original image colors.
+- Updated the Godot-based Z# editor previews and placement controls for
+  instance appearance overrides, and added a multi-language New Script action.
+
 ## 1.1.3.0 - 2026-09-23
 
 - Added C++ interoperability through portable compiled bridge modules.

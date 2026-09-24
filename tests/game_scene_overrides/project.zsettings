@@ -1,0 +1,16 @@
+zsharp = type.settings
+
+Project: "Scene Appearance Overrides":
+PID: "scene_appearance_overrides":
+Version: [1.1.4.0]:
+Authors: ["Z# Tests"]:
+Description: "One object definition with multiple scene appearances.":
+ZSharp: [1.1.4.0]:
+
+Dependencies (
+ zsharpgame:1.0.0.1
+):
+
+Window (
+ StartScene: "Main.zscene":
+):

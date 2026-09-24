@@ -155,7 +155,7 @@ size_t zsharp_game_project_cube_faces(
     if (frame == NULL || object == NULL || output == NULL) return 0;
     cube_camera_points(frame, object, points);
     for (face = 0; face < 6; face++) {
-        float input[6][3], clipped[6][3];
+        float input[6][5], clipped[6][5];
         size_t input_count = 4, clipped_count = 0, index;
         float depth_total = 0.0f;
         ZSharpProjectedCubeFace *result;
@@ -164,6 +164,8 @@ size_t zsharp_game_project_cube_faces(
             input[index][0] = points[vertex][0];
             input[index][1] = points[vertex][1];
             input[index][2] = points[vertex][2];
+            input[index][3] = (index == 1 || index == 2) ? 1.0f : 0.0f;
+            input[index][4] = index >= 2 ? 1.0f : 0.0f;
         }
         for (index = 0; index < input_count; index++) {
             const float *current = input[index];
@@ -173,17 +175,17 @@ size_t zsharp_game_project_cube_faces(
             if (current_inside != previous_inside) {
                 float amount = (-ZGAME_NEAR_DEPTH - previous[2]) /
                                (current[2] - previous[2]);
-                clipped[clipped_count][0] = previous[0] +
-                    (current[0] - previous[0]) * amount;
-                clipped[clipped_count][1] = previous[1] +
-                    (current[1] - previous[1]) * amount;
+                int component;
+                for (component = 0; component < 5; component++)
+                    clipped[clipped_count][component] = previous[component] +
+                        (current[component] - previous[component]) * amount;
                 clipped[clipped_count][2] = -ZGAME_NEAR_DEPTH;
                 clipped_count++;
             }
             if (current_inside) {
-                clipped[clipped_count][0] = current[0];
-                clipped[clipped_count][1] = current[1];
-                clipped[clipped_count][2] = current[2];
+                int component;
+                for (component = 0; component < 5; component++)
+                    clipped[clipped_count][component] = current[component];
                 clipped_count++;
             }
         }
@@ -195,6 +197,8 @@ size_t zsharp_game_project_cube_faces(
             if (!project_camera_point(frame, clipped[index], result->points[index])) {
                 clipped_count = 0; break;
             }
+            result->texcoords[index][0] = clipped[index][3];
+            result->texcoords[index][1] = clipped[index][4];
             depth_total += -clipped[index][2];
         }
         if (clipped_count < 3) continue;

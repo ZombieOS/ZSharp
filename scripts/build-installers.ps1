@@ -3,9 +3,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.1.3.0",
+    [string] $Version = "1.1.4.0",
 
     [string] $BaseUrl = "https://www.zsharp.zombieos.com",
+
+    [string] $ArchiveUrl = "",
 
     [string] $PublishingRoot = "",
 
@@ -279,7 +281,11 @@ Pop-Location
 $archiveChecksum =
     (Get-FileHash -Algorithm SHA256 -LiteralPath $latestArchive).Hash.ToLowerInvariant()
 $archiveSize = (Get-Item -LiteralPath $latestArchive).Length
-$archiveUrl = "$BaseUrl/assets/download/$latestArchiveName"
+$archiveUrl = if ([string]::IsNullOrWhiteSpace($ArchiveUrl)) {
+    "$BaseUrl/assets/download/$latestArchiveName"
+} else {
+    $ArchiveUrl
+}
 $manifest = [ordered]@{
     schema = 1
     latestVersion = $Version

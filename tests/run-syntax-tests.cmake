@@ -81,6 +81,16 @@ function(expect_failure label expected working_dir)
     endif()
 endfunction()
 
+set(SCENE_OVERRIDE_PROJECT "${CMAKE_CURRENT_BINARY_DIR}/scene-overrides-project")
+file(REMOVE_RECURSE "${SCENE_OVERRIDE_PROJECT}")
+file(MAKE_DIRECTORY "${SCENE_OVERRIDE_PROJECT}")
+foreach(source project.zsettings Cube.zobject Main.zscene Main.zsharp)
+    file(COPY_FILE "${PROJECT_ROOT}/tests/game_scene_overrides/${source}"
+         "${SCENE_OVERRIDE_PROJECT}/${source}")
+endforeach()
+expect_success("scene instance appearance overrides" "${PROJECT_ROOT}"
+               package game "${SCENE_OVERRIDE_PROJECT}" SceneOverridesTest)
+
 execute_process(
     COMMAND "${ZSHARP_BIN}" run Main.zsharp
     WORKING_DIRECTORY "${TEST_CPP_PROJECT}"
@@ -94,6 +104,35 @@ if(NOT cpp_result EQUAL 0 OR
     message(FATAL_ERROR
         "C++ interoperability test failed (${cpp_result})\n"
         "stdout: ${cpp_output}\nstderr: ${cpp_error}")
+endif()
+
+if(DEFINED TEST_RUST_PROJECT AND NOT TEST_RUST_PROJECT STREQUAL "")
+    execute_process(
+        COMMAND "${ZSHARP_BIN}" run Main.zsharp
+        WORKING_DIRECTORY "${TEST_RUST_PROJECT}"
+        RESULT_VARIABLE rust_result
+        OUTPUT_VARIABLE rust_output
+        ERROR_VARIABLE rust_error)
+    if(NOT rust_result EQUAL 0 OR
+       NOT rust_output MATCHES "Hello from Rust, Tester!" OR
+       NOT rust_output MATCHES "42" OR
+       NOT rust_output MATCHES "Rust status alive")
+        message(FATAL_ERROR
+            "Rust interoperability test failed (${rust_result})\n"
+            "stdout: ${rust_output}\nstderr: ${rust_error}")
+    endif()
+    set(rust_legacy_project
+        "${CMAKE_CURRENT_BINARY_DIR}/rust-legacy-project")
+    file(REMOVE_RECURSE "${rust_legacy_project}")
+    file(COPY "${TEST_RUST_PROJECT}/"
+         DESTINATION "${rust_legacy_project}")
+    file(READ "${rust_legacy_project}/project.zsettings" rust_legacy_settings)
+    string(REPLACE "ZSharp: [1.1.4.0]:" "ZSharp: [1.1.3.0]:"
+           rust_legacy_settings "${rust_legacy_settings}")
+    file(WRITE "${rust_legacy_project}/project.zsettings"
+         "${rust_legacy_settings}")
+    expect_failure("Rust version gate" "Rust imports require ZSharp: [1.1.4.0]"
+                   "${rust_legacy_project}" check Main.zsharp)
 endif()
 
 set(optional_uninstall_project
@@ -129,7 +168,7 @@ file(REMOVE_RECURSE "${native_app_project}")
 file(MAKE_DIRECTORY "${native_app_project}/Engine")
 file(COPY_FILE "${ZSHARP_BIN}" "${native_app_project}/Engine/native.exe")
 file(WRITE "${native_app_project}/project.zsettings"
-"zsharp = type.settings\n\nProject: \"Native App\":\nPID: \"native_app\":\nVersion: [1.1.3.0]:\nAuthors: [\"Z# Tests\"]:\nDescription: \"Native startup test.\":\nZSharp: [1.1.3.0]:\n\nDependencies (\n):\n\nNative[JSON] (\n [\n  {\n   \"platform\": \"windows-x86_64\",\n   \"start\": \"Engine/native.exe\"\n  }\n ]\n):\n")
+"zsharp = type.settings\n\nProject: \"Native App\":\nPID: \"native_app\":\nVersion: [1.1.3.1]:\nAuthors: [\"Z# Tests\"]:\nDescription: \"Native startup test.\":\nZSharp: [1.1.3.1]:\n\nDependencies (\n):\n\nNative[JSON] (\n [\n  {\n   \"platform\": \"windows-x86_64\",\n   \"start\": \"Engine/native.exe\"\n  }\n ]\n):\n")
 expect_success("native startup packaging" "${PROJECT_ROOT}"
                package app "${native_app_project}" NativeApp)
 execute_process(
@@ -145,7 +184,7 @@ execute_process(
     OUTPUT_VARIABLE native_app_output
     ERROR_VARIABLE native_app_error)
 if(NOT native_app_result EQUAL 0 OR
-   NOT native_app_output MATCHES "Z# 1.1.3.0")
+   NOT native_app_output MATCHES "Z# 1.1.4.0")
     message(FATAL_ERROR
         "native startup launch failed (${native_app_result})\n"
         "stdout: ${native_app_output}\nstderr: ${native_app_error}")
@@ -582,14 +621,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.3.1]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.4.1]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.1.3.1!"
+               "Update to at least 1.1.4.1!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

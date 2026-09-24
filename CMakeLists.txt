@@ -1,12 +1,22 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.1.3.0 LANGUAGES C)
+project(zsharp VERSION 1.1.4.0 LANGUAGES C)
+if(ANDROID)
+    enable_language(CXX)
+endif()
 
 option(ZSHARP_BUILD_EXAMPLES "Build Z# integration examples" OFF)
 option(ZSHARP_BUILD_GAME_RUNTIME
        "Build the SDL3 and Vulkan Z# game runtime" ON)
+option(ZSHARP_CORE_ONLY
+       "Build only the portable Z# language core for platform ports" OFF)
 option(ZSHARP_BUNDLE_MOLTENVK
        "Bundle the official MoltenVK runtime in macOS builds" ON)
+
+add_subdirectory(native/core)
+if(ZSHARP_CORE_ONLY)
+    return()
+endif()
 
 include(CTest)
 include(FetchContent)
@@ -57,20 +67,15 @@ endif()
 
 add_executable(zsharp
     native/src/achievement.c
-    native/src/bytecode.c
-    native/src/decimal.c
     native/src/desktop.c
-    native/src/hash.c
     native/src/hub.c
     native/src/game_runtime.c
     native/src/game_model.c
     native/src/game_projection.c
     native/src/game_vulkan.c
-    native/src/lexer.c
     native/src/main.c
     native/src/package.c
     native/src/paint.c
-    native/src/parser.c
     native/src/project.c
     native/src/provider_loader.c
     native/src/publisher.c
@@ -85,6 +90,42 @@ add_executable(zsharp
     native/src/window_linux.c
     native/src/window_macos.c
 )
+
+if(ANDROID)
+    # Android packages a shared library, not the desktop CLI executable.
+    # Keep this target separate until the desktop and Android launchers share
+    # a common runtime-library target.
+    add_library(zsharp_android_vm SHARED
+        native/src/android_vm_bridge.c
+        native/src/achievement.c
+        native/src/desktop.c
+        native/src/hub.c
+        native/src/game_runtime.c
+        native/src/game_model.c
+        native/src/game_projection.c
+        native/src/game_vulkan.c
+        native/src/package.c
+        native/src/paint.c
+        native/src/project.c
+        native/src/provider_loader.c
+        native/src/publisher.c
+        native/src/registry.c
+        native/src/settings.c
+        native/src/terminal.c
+        native/src/updater.c
+        native/src/vm.c
+        native/src/window.c
+        native/src/window_runtime.c
+        native/src/window_style.c
+        native/src/window_linux.c
+        native/src/window_macos.c
+    )
+    target_include_directories(zsharp_android_vm PRIVATE native/include native/src)
+    target_compile_features(zsharp_android_vm PRIVATE c_std_17)
+    set_target_properties(zsharp_android_vm PROPERTIES LINKER_LANGUAGE CXX)
+    target_link_libraries(zsharp_android_vm PRIVATE
+        zsharp_language_core qjs zsharp_lua Threads::Threads ${CMAKE_DL_LIBS} m log)
+endif()
 
 add_custom_command(TARGET zsharp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:zsharp>/python"
@@ -104,14 +145,20 @@ target_include_directories(zsharp_installer PRIVATE native/src)
 target_compile_features(zsharp PRIVATE c_std_17)
 target_compile_features(zsharp_installer PRIVATE c_std_17)
 target_link_libraries(zsharp PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+target_link_libraries(zsharp PRIVATE zsharp_language_core)
 target_link_libraries(zsharp PRIVATE qjs)
 target_link_libraries(zsharp PRIVATE zsharp_lua)
 
 if(ZSHARP_BUILD_GAME_RUNTIME)
     include(FetchContent)
 
-    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    if(ANDROID)
+        set(SDL_SHARED ON CACHE BOOL "" FORCE)
+        set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    else()
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    endif()
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
     set(SDL_TESTS OFF CACHE BOOL "" FORCE)
     set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -131,7 +178,15 @@ if(ZSHARP_BUILD_GAME_RUNTIME)
     )
     FetchContent_MakeAvailable(SDL3 VulkanHeaders)
     target_compile_definitions(zsharp PRIVATE ZSHARP_HAS_GAME_RUNTIME=1)
-    target_link_libraries(zsharp PRIVATE SDL3::SDL3-static Vulkan::Headers)
+    if(ANDROID)
+        target_link_libraries(zsharp PRIVATE SDL3::SDL3-shared Vulkan::Headers)
+    else()
+        target_link_libraries(zsharp PRIVATE SDL3::SDL3-static Vulkan::Headers)
+    endif()
+    if(ANDROID)
+        target_compile_definitions(zsharp_android_vm PRIVATE ZSHARP_HAS_GAME_RUNTIME=1)
+        target_link_libraries(zsharp_android_vm PRIVATE SDL3::SDL3-shared Vulkan::Headers)
+    endif()
 
     if(APPLE AND ZSHARP_BUNDLE_MOLTENVK)
         FetchContent_Declare(
@@ -182,9 +237,11 @@ endif()
 
 install(TARGETS zsharp zsharp_installer RUNTIME DESTINATION bin)
 install(FILES native/python/zsharp_bridge.py DESTINATION bin/python)
+install(FILES native/rust/zsharp_ffi.rs DESTINATION share/zsharp/rust)
 install(FILES
     native/include/zsharp.h
     native/include/zsharp_cpp.h
+    native/include/zsharp_rust.h
     native/include/zsharp_provider.h
     DESTINATION include
 )
@@ -235,6 +292,33 @@ if(BUILD_TESTING)
         RUNTIME_OUTPUT_DIRECTORY_DEBUG "${ZSHARP_CPP_TEST_DIR}/Cpp"
         LIBRARY_OUTPUT_DIRECTORY_RELEASE "${ZSHARP_CPP_TEST_DIR}/Cpp"
         LIBRARY_OUTPUT_DIRECTORY_DEBUG "${ZSHARP_CPP_TEST_DIR}/Cpp")
+    find_program(ZSHARP_RUSTC rustc)
+    if(ZSHARP_RUSTC)
+        set(ZSHARP_RUST_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/rust-project")
+        file(REMOVE_RECURSE "${ZSHARP_RUST_TEST_DIR}")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/tests/rust_project/"
+             DESTINATION "${ZSHARP_RUST_TEST_DIR}")
+        file(COPY_FILE "${CMAKE_CURRENT_SOURCE_DIR}/native/rust/zsharp_ffi.rs"
+             "${ZSHARP_RUST_TEST_DIR}/Rust/zsharp_ffi.rs")
+        if(WIN32)
+            set(ZSHARP_RUST_TEST_SUFFIX dll)
+        elseif(APPLE)
+            set(ZSHARP_RUST_TEST_SUFFIX dylib)
+        else()
+            set(ZSHARP_RUST_TEST_SUFFIX so)
+        endif()
+        set(ZSHARP_RUST_TEST_LIBRARY
+            "${ZSHARP_RUST_TEST_DIR}/Rust/Utilities.zrust.${ZSHARP_RUST_TEST_SUFFIX}")
+        add_custom_command(OUTPUT "${ZSHARP_RUST_TEST_LIBRARY}"
+            COMMAND "${ZSHARP_RUSTC}" --edition 2021 --crate-type cdylib
+                    "${ZSHARP_RUST_TEST_DIR}/Rust/Utilities.rs"
+                    -o "${ZSHARP_RUST_TEST_LIBRARY}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/rust_project/Rust/Utilities.rs"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/native/rust/zsharp_ffi.rs"
+            VERBATIM)
+        add_custom_target(zsharp_test_rust_module ALL
+                          DEPENDS "${ZSHARP_RUST_TEST_LIBRARY}")
+    endif()
     add_executable(zsharp_test_zip tests/create-stored-zip.c)
     add_executable(zsharp_test_game_projection
         tests/game-projection-tests.c
@@ -269,6 +353,7 @@ if(BUILD_TESTING)
             "-DTEST_SHORTCUT_CACHE=${CMAKE_CURRENT_BINARY_DIR}/shortcut-cache"
             "-DTEST_DESKTOP=${CMAKE_CURRENT_BINARY_DIR}/test-desktop"
             "-DTEST_CPP_PROJECT=${ZSHARP_CPP_TEST_DIR}"
+            "-DTEST_RUST_PROJECT=${ZSHARP_RUST_TEST_DIR}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-syntax-tests.cmake"
     )
     add_test(NAME zsharp_game_projection

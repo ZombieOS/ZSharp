@@ -305,9 +305,15 @@ $installerArguments = @(
     "-Zig", $zig, "-Version", $version, "-PublishingRoot", $outRoot
 )
 $changelog = Get-Content -LiteralPath (Join-Path $ProjectRoot "CHANGELOG.md") -Raw
-if ($changelog -match "(?m)^##\s+$([regex]::Escape($version)).*\bBeta\b") {
+$isBeta = $changelog -match "(?m)^##\s+$([regex]::Escape($version)).*\bBeta\b"
+if ($isBeta) {
     $installerArguments += "-Beta"
 }
+$archiveName = if ($isBeta) { "ZVM-BETA.zip" } else { "ZVM-LATEST.zip" }
+$installerArguments += @(
+    "-ArchiveUrl",
+    "https://downloads.zsharp.zombieos.com/releases/$version/$archiveName"
+)
 if (Test-Path -LiteralPath $testApp -PathType Leaf) {
     $installerArguments += @("-TestAppPackage", $testApp)
 }

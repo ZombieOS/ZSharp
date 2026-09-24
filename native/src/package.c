@@ -111,7 +111,7 @@ static int ends_with(const char *text, const char *suffix) {
 }
 
 static int ignored_directory(const char *name) {
-    return strcmp(name, ".git") == 0 || strcmp(name, "build") == 0 ||
+    return strcmp(name, ".git") == 0 || strcmp(name, ".godot") == 0 || strcmp(name, "build") == 0 ||
            strcmp(name, "Packages") == 0 || strcmp(name, ".gradle") == 0 ||
            strcmp(name, ".idea") == 0;
 }

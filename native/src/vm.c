@@ -557,11 +557,11 @@ static int execute_python_call(const ZSharpProgram *program,
     return 1;
 }
 
-static int execute_cpp_call(const ZSharpProgram *program,
+static int execute_native_bridge_call(const ZSharpProgram *program,
                             const ZSharpInstruction *instruction,
                             const RuntimeValue *arguments,
                             const char *project_root, RuntimeHeap *heap,
-                            RuntimeValue *result, char *error,
+                            int rust, RuntimeValue *result, char *error,
                             size_t error_size) {
     char relative[1024];
     char library_path[2048];
@@ -574,6 +574,9 @@ static int execute_cpp_call(const ZSharpProgram *program,
     ZSharpCppValue *cpp_arguments = NULL;
     ZSharpCppValue cpp_result;
     char cpp_error[1024] = {0};
+    const char *label = rust ? "Rust" : "C++";
+    const char *entry_name = rust ? "zsharp_rust_call_v1" :
+                              ZSHARP_CPP_ENTRY_NAME;
     int ok = 0;
     if (project_length > 0 &&
         strncmp(module_name, program->project_id, project_length) == 0 &&
@@ -588,14 +591,14 @@ static int execute_cpp_call(const ZSharpProgram *program,
             '/';
 #endif
 #ifdef _WIN32
-    snprintf(library_path, sizeof(library_path), "%s\\%s.zcpp.dll",
-             project_root, relative);
+    snprintf(library_path, sizeof(library_path), "%s\\%s.%s.dll",
+             project_root, relative, rust ? "zrust" : "zcpp");
 #elif defined(__APPLE__)
-    snprintf(library_path, sizeof(library_path), "%s/%s.zcpp.dylib",
-             project_root, relative);
+    snprintf(library_path, sizeof(library_path), "%s/%s.%s.dylib",
+             project_root, relative, rust ? "zrust" : "zcpp");
 #else
-    snprintf(library_path, sizeof(library_path), "%s/%s.zcpp.so",
-             project_root, relative);
+    snprintf(library_path, sizeof(library_path), "%s/%s.%s.so",
+             project_root, relative, rust ? "zrust" : "zcpp");
 #endif
 #ifdef _WIN32
     library = (void *)LoadLibraryA(library_path);
@@ -604,20 +607,20 @@ static int execute_cpp_call(const ZSharpProgram *program,
 #endif
     if (library == NULL) {
         snprintf(error, error_size,
-                 "C++ module '%s' is not compiled for this platform (%s)",
-                 instruction->call_file, library_path);
+                 "%s module '%s' is not compiled for this platform (%s)",
+                 label, instruction->call_file, library_path);
         return 0;
     }
 #ifdef _WIN32
     entry = (ZSharpCppCallV1)(void *)GetProcAddress(
-        (HMODULE)library, ZSHARP_CPP_ENTRY_NAME);
+        (HMODULE)library, entry_name);
 #else
-    entry = (ZSharpCppCallV1)dlsym(library, ZSHARP_CPP_ENTRY_NAME);
+    entry = (ZSharpCppCallV1)dlsym(library, entry_name);
 #endif
     if (entry == NULL) {
         snprintf(error, error_size,
-                 "C++ module '%s' does not export %s",
-                 instruction->call_file, ZSHARP_CPP_ENTRY_NAME);
+                 "%s module '%s' does not export %s",
+                 label, instruction->call_file, entry_name);
         goto cleanup;
     }
     if (instruction->argument_count > 0) {
@@ -643,7 +646,8 @@ static int execute_cpp_call(const ZSharpProgram *program,
             cpp_arguments[index].type = ZSHARP_CPP_NULL;
         } else {
             snprintf(error, error_size,
-                     "C++ arguments support text, number, status, and null");
+                     "%s arguments support text, number, status, and null",
+                     label);
             goto cleanup;
         }
     }
@@ -651,8 +655,8 @@ static int execute_cpp_call(const ZSharpProgram *program,
     if (!entry(ZSHARP_CPP_ABI_VERSION, instruction->call_function,
                cpp_arguments, instruction->argument_count, &cpp_result,
                cpp_error, sizeof(cpp_error))) {
-        snprintf(error, error_size, "C++ call %s:%s failed: %s",
-                 instruction->call_file, instruction->call_function,
+        snprintf(error, error_size, "%s call %s:%s failed: %s",
+                 label, instruction->call_file, instruction->call_function,
                  cpp_error[0] == '\0' ? "native function failed" : cpp_error);
         goto cleanup;
     }
@@ -674,7 +678,7 @@ static int execute_cpp_call(const ZSharpProgram *program,
         char *copy;
         if (!isfinite(cpp_result.number)) {
             snprintf(error, error_size,
-                     "C++ returned a non-finite number");
+                     "%s returned a non-finite number", label);
             goto cleanup;
         }
         snprintf(buffer, sizeof(buffer), "%.17f", cpp_result.number);
@@ -699,7 +703,8 @@ static int execute_cpp_call(const ZSharpProgram *program,
     } else if (cpp_result.type == ZSHARP_CPP_NULL) {
         result->type = ZVALUE_NULL;
     } else {
-        snprintf(error, error_size, "C++ returned an unsupported value type");
+        snprintf(error, error_size, "%s returned an unsupported value type",
+                 label);
         goto cleanup;
     }
     ok = 1;
@@ -4452,10 +4457,13 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     break;
                 }
                 if (instruction->operand != NULL &&
-                    strcmp(instruction->operand, "@cpp") == 0) {
-                    if (!execute_cpp_call(program, instruction,
+                    (strcmp(instruction->operand, "@cpp") == 0 ||
+                     strcmp(instruction->operand, "@rust") == 0)) {
+                    if (!execute_native_bridge_call(program, instruction,
                                           call_arguments, project_root,
-                                          heap, &call_return, error,
+                                          heap,
+                                          strcmp(instruction->operand, "@rust") == 0,
+                                          &call_return, error,
                                           error_size)) {
                         free(call_arguments);
                         ok = 0;
