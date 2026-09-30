@@ -3,13 +3,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.1.4.0",
+    [string] $Version = "1.2.0.0",
 
     [string] $BaseUrl = "https://www.zsharp.zombieos.com",
 
     [string] $ArchiveUrl = "",
 
     [string] $PublishingRoot = "",
+
+    [string] $ReuseInstallersFrom = "",
 
     [string] $TestAppPackage = "",
 
@@ -130,17 +132,50 @@ foreach ($target in $targets) {
         $source,
         $hashSource
     ) + $target.Libraries
-    if ($target.Id.StartsWith("windows-")) {
-        $arguments += @("-I$installerIncludeRoot", $windowsResource)
-    }
     if ($Beta) {
         $arguments = @($arguments[0],
             "-DINSTALLER_UPDATE_ENDPOINT=`"https://www.zsharp.zombieos.com/beta.js?v=`"") +
             $arguments[1..($arguments.Count - 1)]
     }
-    & $zigPath @arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Zig failed to build the $($target.Id) installer"
+    if ([string]::IsNullOrWhiteSpace($ReuseInstallersFrom)) {
+        if ($target.Id.StartsWith("windows-")) {
+            # Compile the same verified installer as a real GUI-subsystem app.
+            # Automatic updates still pass CLI arguments to this executable.
+            $mainObject = (Join-Path $targetBuild "main.obj").Replace('\', '/')
+            $hashObject = (Join-Path $targetBuild "hash.obj").Replace('\', '/')
+            $resourceFile = (Join-Path $targetBuild "windows.res").Replace('\', '/')
+            $outputFile = $installerPath.Replace('\', '/')
+            $guiDefines = @("-DZSHARP_INSTALLER_GUI=1")
+            if ($Beta) {
+                $guiDefines += '-DINSTALLER_UPDATE_ENDPOINT="https://www.zsharp.zombieos.com/beta.js?v="'
+            }
+            & $zigPath cc -target $target.Triple -std=gnu17 -O2 `
+                -Wall -Wextra -Wpedantic "-I$includeRoot" `
+                "-I$installerIncludeRoot" @guiDefines `
+                -c $source -o $mainObject
+            if ($LASTEXITCODE -ne 0) { throw "Could not compile $($target.Id) setup" }
+            & $zigPath cc -target $target.Triple -std=gnu17 -O2 `
+                "-I$includeRoot" -c $hashSource -o $hashObject
+            if ($LASTEXITCODE -ne 0) { throw "Could not compile $($target.Id) hash" }
+            & $zigPath rc $windowsResource $resourceFile
+            if ($LASTEXITCODE -ne 0) { throw "Could not compile $($target.Id) resources" }
+            & $zigPath build-exe -target $target.Triple -O ReleaseSmall -lc `
+                --subsystem windows "-femit-bin=$outputFile" `
+                $mainObject $hashObject $resourceFile `
+                -lwinhttp -ladvapi32 -luser32 -lshell32 -lgdi32 -lcomctl32
+        } else {
+            & $zigPath @arguments
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "Zig failed to build the $($target.Id) installer"
+        }
+    } else {
+        $previousInstaller = Join-Path `
+            (Join-Path $ReuseInstallersFrom $target.Id) $target.Installer
+        if (-not (Test-Path -LiteralPath $previousInstaller -PathType Leaf)) {
+            throw "Reusable installer not found: $previousInstaller"
+        }
+        Copy-Item -LiteralPath $previousInstaller -Destination $installerPath -Force
     }
 
     $runtimeSource = Join-Path (Join-Path $resourceRoot $target.Id) `
@@ -227,6 +262,65 @@ foreach ($target in $targets) {
     $installerChecksum =
         (Get-FileHash -Algorithm SHA256 -LiteralPath $publicInstaller).Hash.ToLowerInvariant()
     $installerChecksums.Add("$installerChecksum  $publicInstallerName")
+    if ($target.Id.StartsWith("macos-")) {
+        # Finder opens this bundle without a Terminal window. Keep the raw
+        # executable too: the ZVM uses it for unattended updates.
+        $appName = "zsharp-setup-$Version-$($target.Id).app.zip"
+        $appArchive = Join-Path $outRoot $appName
+        $zip = [IO.Compression.ZipFile]::Open(
+            $appArchive, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            $executable = $zip.CreateEntry(
+                'ZSharp Setup.app/Contents/MacOS/zsharp-installer')
+            $executable.ExternalAttributes = [int]((33261L -shl 16) - 4294967296L)
+            $inputStream = [IO.File]::OpenRead($installerPath)
+            $outputStream = $executable.Open()
+            try { $inputStream.CopyTo($outputStream) }
+            finally { $outputStream.Dispose(); $inputStream.Dispose() }
+            $plistTemplate = Get-Content -LiteralPath `
+                (Join-Path $projectRoot 'installer\macos-setup-Info.plist') -Raw
+            $plist = $zip.CreateEntry(
+                'ZSharp Setup.app/Contents/Info.plist')
+            $plist.ExternalAttributes = [int]((33188L -shl 16) - 4294967296L)
+            $writer = [IO.StreamWriter]::new($plist.Open(), $utf8NoBom)
+            try {
+                $macBundleVersion = (($Version -split '\.')[0..2] -join '.')
+                $writer.Write($plistTemplate.Replace(
+                    '@ZSHARP_VERSION@', $macBundleVersion))
+            } finally { $writer.Dispose() }
+        } finally { $zip.Dispose() }
+        # ZipArchive writes Windows creator metadata even when POSIX mode bits
+        # are present. Mark the central-directory entries as Unix so Finder's
+        # unzip preserves the executable bit on the app binary.
+        $zipBytes = [IO.File]::ReadAllBytes($appArchive)
+        $directoryEnd = -1
+        for ($position = $zipBytes.Length - 22;
+             $position -ge [Math]::Max(0, $zipBytes.Length - 65557);
+             $position--) {
+            if ([BitConverter]::ToUInt32($zipBytes, $position) -eq 0x06054b50) {
+                $directoryEnd = $position
+                break
+            }
+        }
+        if ($directoryEnd -lt 0) { throw "Invalid macOS setup archive" }
+        $entryCount = [BitConverter]::ToUInt16($zipBytes, $directoryEnd + 10)
+        $entryOffset = [int][BitConverter]::ToUInt32($zipBytes, $directoryEnd + 16)
+        for ($entryIndex = 0; $entryIndex -lt $entryCount; $entryIndex++) {
+            if ($entryOffset + 46 -gt $zipBytes.Length -or
+                [BitConverter]::ToUInt32($zipBytes, $entryOffset) -ne 0x02014b50) {
+                throw "Invalid macOS setup archive directory"
+            }
+            $zipBytes[$entryOffset + 5] = 3
+            $entryOffset += 46 +
+                [BitConverter]::ToUInt16($zipBytes, $entryOffset + 28) +
+                [BitConverter]::ToUInt16($zipBytes, $entryOffset + 30) +
+                [BitConverter]::ToUInt16($zipBytes, $entryOffset + 32)
+        }
+        [IO.File]::WriteAllBytes($appArchive, $zipBytes)
+        Copy-Item -LiteralPath $appArchive -Destination $siteInstallerDirectory
+        $appChecksum = (Get-FileHash -Algorithm SHA256 -LiteralPath $appArchive).Hash.ToLowerInvariant()
+        $installerChecksums.Add("$appChecksum  $appName")
+    }
 }
 
 $archiveDirectory = Join-Path $siteRoot "assets\download"

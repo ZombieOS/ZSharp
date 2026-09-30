@@ -20,6 +20,8 @@ static int valid_face_uvs(const ZSharpProjectedCubeFace faces[6],
             for (axis = 0; axis < 2; axis++) {
                 float uv = faces[face].texcoords[vertex][axis];
                 if (!isfinite(uv) || uv < -0.001f || uv > 1.001f) return 0;
+                if (!isfinite(faces[face].point_depth[vertex]) ||
+                    faces[face].point_depth[vertex] <= 0.0f) return 0;
             }
     return 1;
 }
@@ -48,6 +50,13 @@ int main(void) {
                 count);
         return 1;
     }
+    cube.depth = 120.0f;
+    if (zsharp_game_camera_far_depth(&frame, &cube) <=
+        zsharp_game_camera_depth(&frame, &cube) + 50.0f) {
+        fprintf(stderr, "long cube lost its far-depth ordering extent\n");
+        return 1;
+    }
+    cube.depth = 1.0f;
 
     /* A large cube intersects the near plane. It must be clipped instead of
        causing the entire object to disappear. */
@@ -86,6 +95,22 @@ int main(void) {
     if (count == 0) {
         fprintf(stderr, "Euler-rotated cube or camera produced no faces\n");
         return 1;
+    }
+    {
+        size_t face;
+        for (face = 0; face < count; face++) {
+            float normal_length = sqrtf(
+                faces[face].world_normal[0] * faces[face].world_normal[0] +
+                faces[face].world_normal[1] * faces[face].world_normal[1] +
+                faces[face].world_normal[2] * faces[face].world_normal[2]);
+            if (!isfinite(normal_length) || fabsf(normal_length - 1.0f) > 0.001f ||
+                !isfinite(faces[face].world_center[0]) ||
+                !isfinite(faces[face].world_center[1]) ||
+                !isfinite(faces[face].world_center[2])) {
+                fprintf(stderr, "3D light face geometry was invalid\n");
+                return 1;
+            }
+        }
     }
 
     /* A +90 degree yaw looks toward world -X. */

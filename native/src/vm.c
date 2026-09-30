@@ -2,6 +2,7 @@
 
 #include "zsharp.h"
 #include "zsharp_cpp.h"
+#include "zsharp_c.h"
 #include "decimal.h"
 #include "game_runtime.h"
 #include "hash.h"
@@ -557,11 +558,69 @@ static int execute_python_call(const ZSharpProgram *program,
     return 1;
 }
 
+typedef struct KotlinLibraryCache {
+    char *path;
+    void *handle;
+    struct KotlinLibraryCache *next;
+} KotlinLibraryCache;
+
+static KotlinLibraryCache *kotlin_libraries;
+#ifdef _WIN32
+static SRWLOCK kotlin_library_lock = SRWLOCK_INIT;
+#define KOTLIN_CACHE_LOCK() AcquireSRWLockExclusive(&kotlin_library_lock)
+#define KOTLIN_CACHE_UNLOCK() ReleaseSRWLockExclusive(&kotlin_library_lock)
+#else
+static pthread_mutex_t kotlin_library_lock = PTHREAD_MUTEX_INITIALIZER;
+#define KOTLIN_CACHE_LOCK() pthread_mutex_lock(&kotlin_library_lock)
+#define KOTLIN_CACHE_UNLOCK() pthread_mutex_unlock(&kotlin_library_lock)
+#endif
+
+/* Kotlin/Native starts runtime work that can outlive a function call. Its DLL
+ * must stay loaded until process exit; unloading it after one call can fault
+ * asynchronously in Rules.zkt.dll_unloaded. Cache by full module path so
+ * repeated calls do not leak another library reference each frame. */
+static void *load_kotlin_library(const char *path) {
+    KotlinLibraryCache *cached;
+    void *handle;
+    KOTLIN_CACHE_LOCK();
+    for (cached = kotlin_libraries; cached != NULL; cached = cached->next) {
+        if (strcmp(cached->path, path) == 0) {
+            handle = cached->handle;
+            KOTLIN_CACHE_UNLOCK();
+            return handle;
+        }
+    }
+#ifdef _WIN32
+    handle = (void *)LoadLibraryA(path);
+#else
+    handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (handle != NULL) {
+        cached = (KotlinLibraryCache *)calloc(1, sizeof(*cached));
+        if (cached == NULL ||
+            (cached->path = zsharp_copy_text(path, strlen(path))) == NULL) {
+            free(cached);
+#ifdef _WIN32
+            FreeLibrary((HMODULE)handle);
+#else
+            dlclose(handle);
+#endif
+            handle = NULL;
+        } else {
+            cached->handle = handle;
+            cached->next = kotlin_libraries;
+            kotlin_libraries = cached;
+        }
+    }
+    KOTLIN_CACHE_UNLOCK();
+    return handle;
+}
+
 static int execute_native_bridge_call(const ZSharpProgram *program,
                             const ZSharpInstruction *instruction,
                             const RuntimeValue *arguments,
                             const char *project_root, RuntimeHeap *heap,
-                            int rust, RuntimeValue *result, char *error,
+                            int native_language, RuntimeValue *result, char *error,
                             size_t error_size) {
     char relative[1024];
     char library_path[2048];
@@ -574,9 +633,16 @@ static int execute_native_bridge_call(const ZSharpProgram *program,
     ZSharpCppValue *cpp_arguments = NULL;
     ZSharpCppValue cpp_result;
     char cpp_error[1024] = {0};
-    const char *label = rust ? "Rust" : "C++";
-    const char *entry_name = rust ? "zsharp_rust_call_v1" :
+    const char *label = native_language == 1 ? "Rust" :
+                        native_language == 2 ? "C" :
+                        native_language == 3 ? "Kotlin" : "C++";
+    const char *entry_name = native_language == 1 ? "zsharp_rust_call_v1" :
+                              native_language == 2 ? ZSHARP_C_ENTRY_NAME :
+                              native_language == 3 ? "zsharp_kotlin_call_v1" :
                               ZSHARP_CPP_ENTRY_NAME;
+    const char *suffix = native_language == 1 ? "zrust" :
+                         native_language == 2 ? "zc" :
+                         native_language == 3 ? "zkt" : "zcpp";
     int ok = 0;
     if (project_length > 0 &&
         strncmp(module_name, program->project_id, project_length) == 0 &&
@@ -592,19 +658,22 @@ static int execute_native_bridge_call(const ZSharpProgram *program,
 #endif
 #ifdef _WIN32
     snprintf(library_path, sizeof(library_path), "%s\\%s.%s.dll",
-             project_root, relative, rust ? "zrust" : "zcpp");
+             project_root, relative, suffix);
 #elif defined(__APPLE__)
     snprintf(library_path, sizeof(library_path), "%s/%s.%s.dylib",
-             project_root, relative, rust ? "zrust" : "zcpp");
+             project_root, relative, suffix);
 #else
     snprintf(library_path, sizeof(library_path), "%s/%s.%s.so",
-             project_root, relative, rust ? "zrust" : "zcpp");
+             project_root, relative, suffix);
 #endif
+    if (native_language == 3) library = load_kotlin_library(library_path);
+    else {
 #ifdef _WIN32
-    library = (void *)LoadLibraryA(library_path);
+        library = (void *)LoadLibraryA(library_path);
 #else
-    library = dlopen(library_path, RTLD_NOW | RTLD_LOCAL);
+        library = dlopen(library_path, RTLD_NOW | RTLD_LOCAL);
 #endif
+    }
     if (library == NULL) {
         snprintf(error, error_size,
                  "%s module '%s' is not compiled for this platform (%s)",
@@ -652,7 +721,8 @@ static int execute_native_bridge_call(const ZSharpProgram *program,
         }
     }
     memset(&cpp_result, 0, sizeof(cpp_result));
-    if (!entry(ZSHARP_CPP_ABI_VERSION, instruction->call_function,
+    if (!entry(native_language == 2 ? ZSHARP_C_ABI_VERSION :
+               ZSHARP_CPP_ABI_VERSION, instruction->call_function,
                cpp_arguments, instruction->argument_count, &cpp_result,
                cpp_error, sizeof(cpp_error))) {
         snprintf(error, error_size, "%s call %s:%s failed: %s",
@@ -711,9 +781,9 @@ static int execute_native_bridge_call(const ZSharpProgram *program,
 cleanup:
     free(cpp_arguments);
 #ifdef _WIN32
-    FreeLibrary((HMODULE)library);
+    if (native_language != 3) FreeLibrary((HMODULE)library);
 #else
-    dlclose(library);
+    if (native_language != 3) dlclose(library);
 #endif
     return ok;
 }
@@ -4457,12 +4527,16 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     break;
                 }
                 if (instruction->operand != NULL &&
-                    (strcmp(instruction->operand, "@cpp") == 0 ||
+                    (strcmp(instruction->operand, "@c") == 0 ||
+                     strcmp(instruction->operand, "@cpp") == 0 ||
+                     strcmp(instruction->operand, "@kt") == 0 ||
                      strcmp(instruction->operand, "@rust") == 0)) {
                     if (!execute_native_bridge_call(program, instruction,
                                           call_arguments, project_root,
                                           heap,
-                                          strcmp(instruction->operand, "@rust") == 0,
+                                          strcmp(instruction->operand, "@rust") == 0 ? 1 :
+                                          strcmp(instruction->operand, "@c") == 0 ? 2 :
+                                          strcmp(instruction->operand, "@kt") == 0 ? 3 : 0,
                                           &call_return, error,
                                           error_size)) {
                         free(call_arguments);

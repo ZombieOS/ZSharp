@@ -1,9 +1,12 @@
+#define _CRT_SECURE_NO_WARNINGS
+
 #include "project.h"
 #include "achievement.h"
 
 #include "window_style.h"
 
 #include "game_model.h"
+#include "c_syntax.h"
 #include "zsharp.h"
 
 #include <stdio.h>
@@ -587,6 +590,12 @@ int zsharp_project_parse_file(const char *path, ZSharpProgram *program,
                               size_t error_size) {
     char *source = read_source(path);
     char *stem;
+    char *project_root = NULL;
+    ZSharpSettings settings;
+    ZSharpCustomSyntaxRule *syntax_rules = NULL;
+    size_t syntax_rule_count = 0;
+    char syntax_error[512] = {0};
+    ZSharpDiagnostic settings_diagnostic;
     int ok;
     memset(diagnostic, 0, sizeof(*diagnostic));
     if (source == NULL) {
@@ -601,7 +610,29 @@ int zsharp_project_parse_file(const char *path, ZSharpProgram *program,
         set_error(error, error_size, "out of memory");
         return 0;
     }
-    ok = zsharp_parse_source(source, stem, program, diagnostic);
+    project_root = zsharp_project_find_root(path, syntax_error,
+                                            sizeof(syntax_error));
+    if (project_root != NULL &&
+        zsharp_settings_load(project_root, &settings,
+                             &settings_diagnostic, syntax_error,
+                             sizeof(syntax_error))) {
+        if (!zsharp_c_syntax_collect(source, project_root, settings.project_id,
+                                     &syntax_rules, &syntax_rule_count,
+                                     syntax_error, sizeof(syntax_error))) {
+            if (error != NULL && error_size > 0)
+                snprintf(error, error_size, "%s", syntax_error);
+            zsharp_settings_free(&settings);
+            free(project_root);
+            free(stem);
+            free(source);
+            return 0;
+        }
+        zsharp_settings_free(&settings);
+    }
+    free(project_root);
+    ok = zsharp_parse_source_with_syntax(source, stem, program, diagnostic,
+                                          syntax_rules, syntax_rule_count);
+    zsharp_c_syntax_free(syntax_rules, syntax_rule_count);
     free(stem);
     free(source);
     return ok;
@@ -1256,8 +1287,10 @@ static int validate_instruction(const ZSharpProgram *program,
         return ok;
     }
     if ((program->script_type == ZSCRIPT_GAME ||
-         program->script_type == ZSCRIPT_LEGACY_GAME) &&
+         program->script_type == ZSCRIPT_LEGACY_GAME ||
+         settings->game_start_scene != NULL) &&
         (instruction->op == ZOP_UI_SET ||
+         instruction->op == ZOP_UI_SET_VALUE ||
          instruction->op == ZOP_LOAD_PATH ||
          instruction->op == ZOP_STORE_PATH)) {
         ZSharpGameModel game;
@@ -1265,6 +1298,26 @@ static int validate_instruction(const ZSharpProgram *program,
         if (!zsharp_game_model_load(project_root, &game, error,
                                     error_size)) return 0;
         if (path != NULL && zsharp_game_model_owns_property(&game, path)) {
+            if (instruction->op == ZOP_UI_SET &&
+                zsharp_game_animation_has_command(&game, path)) {
+                const char *separator = strchr(path, '.');
+                char animation_file[256];
+                size_t length = separator == NULL ? 0 :
+                    (size_t)(separator - path);
+                if (length == 0 || length >= sizeof(animation_file)) {
+                    zsharp_game_model_free(&game);
+                    snprintf(error, error_size,
+                             "invalid animation clip command '%s'", path);
+                    return 0;
+                }
+                memcpy(animation_file, path, length);
+                animation_file[length] = '\0';
+                if (!require_file_import(program, settings, room,
+                                         animation_file, error, error_size)) {
+                    zsharp_game_model_free(&game);
+                    return 0;
+                }
+            }
             if (strcmp(path, "Game.scene") == 0 &&
                 !require_game_scene_import(room, settings, error,
                                            error_size)) {
@@ -1276,6 +1329,7 @@ static int validate_instruction(const ZSharpProgram *program,
         }
         zsharp_game_model_free(&game);
         if (instruction->op == ZOP_UI_SET ||
+            instruction->op == ZOP_UI_SET_VALUE ||
             instruction->op == ZOP_STORE_PATH) {
             snprintf(error, error_size, "unknown game property '%s'",
                      path == NULL ? "" : path);
@@ -1313,6 +1367,28 @@ static int validate_instruction(const ZSharpProgram *program,
             return validate_foreign_call(program, settings, room, instruction,
                                          project_root, "rust", "Rust",
                                          "rs", 4, error, error_size);
+        }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@c") == 0) {
+            if (project_version_before(settings, 1, 2, 0, 0)) {
+                snprintf(error, error_size,
+                         "C imports require ZSharp: [1.2.0.0]: or newer");
+                return 0;
+            }
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "c", "C",
+                                         "c", 0, error, error_size);
+        }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@kt") == 0) {
+            if (project_version_before(settings, 1, 2, 0, 0)) {
+                snprintf(error, error_size,
+                         "Kotlin imports require ZSharp: [1.2.0.0]: or newer");
+                return 0;
+            }
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "kt", "Kotlin",
+                                         "kt", 0, error, error_size);
         }
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
             return require_project_import(room, settings, instruction->operand,
@@ -1519,6 +1595,16 @@ static int validate_feature_version(const ZSharpSettings *settings,
                  "native Math functions require ZSharp: [1.1.2.2]: or newer; the project declares %u.%u.%u.%u",
                  settings->zsharp_version[0], settings->zsharp_version[1],
                  settings->zsharp_version[2], settings->zsharp_version[3]);
+        return 0;
+    }
+    if (instruction->op == ZOP_UI_SET &&
+        instruction->operand != NULL &&
+        (strstr(instruction->operand, ".playClip.") != NULL ||
+         strstr(instruction->operand, ".pauseClip.") != NULL ||
+         strstr(instruction->operand, ".stopClip.") != NULL) &&
+        project_version_before(settings, 1, 2, 0, 0)) {
+        snprintf(error, error_size,
+                 "animation clips require ZSharp: [1.2.0.0]: or newer");
         return 0;
     }
     return 1;

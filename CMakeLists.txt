@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.1.4.0 LANGUAGES C)
+project(zsharp VERSION 1.2.0.0 LANGUAGES C)
 if(ANDROID)
     enable_language(CXX)
 endif()
@@ -40,6 +40,20 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(Lua)
+FetchContent_Declare(
+    ufbx
+    URL https://codeload.github.com/ufbx/ufbx/tar.gz/26a482ae66871d7de36eb722aa060bce95bce274
+    URL_HASH SHA256=18d5a7849378e3fe247b0df67cf845cb593c73172cbac0de99b5aba130542667
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    EXCLUDE_FROM_ALL
+)
+FetchContent_GetProperties(ufbx)
+if(NOT ufbx_POPULATED)
+    FetchContent_Populate(ufbx)
+endif()
+add_library(zsharp_ufbx STATIC "${ufbx_SOURCE_DIR}/ufbx.c")
+target_include_directories(zsharp_ufbx PUBLIC "${ufbx_SOURCE_DIR}")
+target_compile_features(zsharp_ufbx PRIVATE c_std_17)
 set(LUA_SOURCE_DIR "${lua_SOURCE_DIR}/src")
 add_library(zsharp_lua STATIC
     ${LUA_SOURCE_DIR}/lapi.c ${LUA_SOURCE_DIR}/lauxlib.c
@@ -66,10 +80,13 @@ if(UNIX)
 endif()
 
 add_executable(zsharp
+    native/src/c_syntax.c
     native/src/achievement.c
     native/src/desktop.c
     native/src/hub.c
     native/src/game_runtime.c
+    native/src/game_animation.c
+    native/src/game_navigation.c
     native/src/game_model.c
     native/src/game_projection.c
     native/src/game_vulkan.c
@@ -96,11 +113,14 @@ if(ANDROID)
     # Keep this target separate until the desktop and Android launchers share
     # a common runtime-library target.
     add_library(zsharp_android_vm SHARED
+        native/src/c_syntax.c
         native/src/android_vm_bridge.c
         native/src/achievement.c
         native/src/desktop.c
         native/src/hub.c
         native/src/game_runtime.c
+        native/src/game_animation.c
+        native/src/game_navigation.c
         native/src/game_model.c
         native/src/game_projection.c
         native/src/game_vulkan.c
@@ -124,7 +144,7 @@ if(ANDROID)
     target_compile_features(zsharp_android_vm PRIVATE c_std_17)
     set_target_properties(zsharp_android_vm PROPERTIES LINKER_LANGUAGE CXX)
     target_link_libraries(zsharp_android_vm PRIVATE
-        zsharp_language_core qjs zsharp_lua Threads::Threads ${CMAKE_DL_LIBS} m log)
+        zsharp_language_core qjs zsharp_lua zsharp_ufbx Threads::Threads ${CMAKE_DL_LIBS} m log)
 endif()
 
 add_custom_command(TARGET zsharp POST_BUILD
@@ -139,6 +159,18 @@ add_executable(zsharp_installer
     native/src/hash.c
 )
 set_target_properties(zsharp_installer PROPERTIES OUTPUT_NAME "zsharp-installer")
+if(WIN32)
+    add_executable(zsharp_setup WIN32
+        installer/main.c
+        native/src/hash.c
+    )
+    target_compile_definitions(zsharp_setup PRIVATE ZSHARP_INSTALLER_GUI=1)
+    target_include_directories(zsharp_setup PRIVATE native/src)
+    target_compile_features(zsharp_setup PRIVATE c_std_17)
+    target_link_libraries(zsharp_setup PRIVATE
+        winhttp advapi32 user32 gdi32 shell32 comctl32)
+    set_target_properties(zsharp_setup PROPERTIES OUTPUT_NAME "zsharp-setup")
+endif()
 
 target_include_directories(zsharp PRIVATE native/include)
 target_include_directories(zsharp_installer PRIVATE native/src)
@@ -148,6 +180,7 @@ target_link_libraries(zsharp PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 target_link_libraries(zsharp PRIVATE zsharp_language_core)
 target_link_libraries(zsharp PRIVATE qjs)
 target_link_libraries(zsharp PRIVATE zsharp_lua)
+target_link_libraries(zsharp PRIVATE zsharp_ufbx)
 
 if(ZSHARP_BUILD_GAME_RUNTIME)
     include(FetchContent)
@@ -236,11 +269,15 @@ else()
 endif()
 
 install(TARGETS zsharp zsharp_installer RUNTIME DESTINATION bin)
+if(WIN32)
+    install(TARGETS zsharp_setup RUNTIME DESTINATION bin)
+endif()
 install(FILES native/python/zsharp_bridge.py DESTINATION bin/python)
 install(FILES native/rust/zsharp_ffi.rs DESTINATION share/zsharp/rust)
 install(FILES
     native/include/zsharp.h
     native/include/zsharp_cpp.h
+    native/include/zsharp_c.h
     native/include/zsharp_rust.h
     native/include/zsharp_provider.h
     DESTINATION include
@@ -275,6 +312,40 @@ include(CPack)
 
 if(BUILD_TESTING)
     enable_language(CXX)
+    set(ZSHARP_C_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/c-project")
+    file(REMOVE_RECURSE "${ZSHARP_C_TEST_DIR}")
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/tests/c_project/"
+         DESTINATION "${ZSHARP_C_TEST_DIR}")
+    add_library(zsharp_test_c_module SHARED
+        tests/c_project/C/Utilities.c)
+    target_include_directories(zsharp_test_c_module PRIVATE native/include)
+    target_compile_features(zsharp_test_c_module PRIVATE c_std_17)
+    set_target_properties(zsharp_test_c_module PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "Utilities.zc"
+        RUNTIME_OUTPUT_DIRECTORY "${ZSHARP_C_TEST_DIR}/C"
+        LIBRARY_OUTPUT_DIRECTORY "${ZSHARP_C_TEST_DIR}/C"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${ZSHARP_C_TEST_DIR}/C"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${ZSHARP_C_TEST_DIR}/C"
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${ZSHARP_C_TEST_DIR}/C"
+        LIBRARY_OUTPUT_DIRECTORY_DEBUG "${ZSHARP_C_TEST_DIR}/C")
+    set(ZSHARP_C_CONFLICT_DIR "${CMAKE_CURRENT_BINARY_DIR}/c-syntax-conflict")
+    file(REMOVE_RECURSE "${ZSHARP_C_CONFLICT_DIR}")
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/tests/c_syntax_conflict/"
+         DESTINATION "${ZSHARP_C_CONFLICT_DIR}")
+    add_library(zsharp_test_c_conflict SHARED
+        tests/c_syntax_conflict/C/Bad.c)
+    target_include_directories(zsharp_test_c_conflict PRIVATE native/include)
+    target_compile_features(zsharp_test_c_conflict PRIVATE c_std_17)
+    set_target_properties(zsharp_test_c_conflict PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "Bad.zc"
+        RUNTIME_OUTPUT_DIRECTORY "${ZSHARP_C_CONFLICT_DIR}/C"
+        LIBRARY_OUTPUT_DIRECTORY "${ZSHARP_C_CONFLICT_DIR}/C"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${ZSHARP_C_CONFLICT_DIR}/C"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${ZSHARP_C_CONFLICT_DIR}/C"
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${ZSHARP_C_CONFLICT_DIR}/C"
+        LIBRARY_OUTPUT_DIRECTORY_DEBUG "${ZSHARP_C_CONFLICT_DIR}/C")
     set(ZSHARP_CPP_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/cpp-project")
     file(REMOVE_RECURSE "${ZSHARP_CPP_TEST_DIR}")
     file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp_project/"
@@ -324,6 +395,29 @@ if(BUILD_TESTING)
         tests/game-projection-tests.c
         native/src/game_projection.c
     )
+    add_executable(zsharp_test_game_skinning tests/game-skinning-tests.c)
+    add_executable(zsharp_test_game_collision tests/game-collision-tests.c)
+    target_include_directories(zsharp_test_game_collision PRIVATE
+        native/include native/src "${ufbx_SOURCE_DIR}")
+    target_compile_features(zsharp_test_game_collision PRIVATE c_std_17)
+    if(MSVC)
+        target_compile_options(zsharp_test_game_collision PRIVATE /Gy)
+        target_link_options(zsharp_test_game_collision PRIVATE /OPT:REF)
+    else()
+        target_compile_options(zsharp_test_game_collision PRIVATE
+            -ffunction-sections -fdata-sections)
+        if(APPLE)
+            target_link_options(zsharp_test_game_collision PRIVATE -Wl,-dead_strip)
+        else()
+            target_link_options(zsharp_test_game_collision PRIVATE -Wl,--gc-sections)
+        endif()
+        target_link_libraries(zsharp_test_game_collision PRIVATE m)
+    endif()
+    target_link_libraries(zsharp_test_game_skinning PRIVATE zsharp_ufbx)
+    target_compile_features(zsharp_test_game_skinning PRIVATE c_std_17)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_game_skinning PRIVATE m)
+    endif()
     target_include_directories(zsharp_test_game_projection PRIVATE native/src)
     target_compile_features(zsharp_test_game_projection PRIVATE c_std_17)
     if(NOT WIN32)
@@ -353,11 +447,18 @@ if(BUILD_TESTING)
             "-DTEST_SHORTCUT_CACHE=${CMAKE_CURRENT_BINARY_DIR}/shortcut-cache"
             "-DTEST_DESKTOP=${CMAKE_CURRENT_BINARY_DIR}/test-desktop"
             "-DTEST_CPP_PROJECT=${ZSHARP_CPP_TEST_DIR}"
+            "-DTEST_C_PROJECT=${ZSHARP_C_TEST_DIR}"
+            "-DTEST_C_CONFLICT_PROJECT=${ZSHARP_C_CONFLICT_DIR}"
             "-DTEST_RUST_PROJECT=${ZSHARP_RUST_TEST_DIR}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-syntax-tests.cmake"
     )
     add_test(NAME zsharp_game_projection
              COMMAND zsharp_test_game_projection)
+    add_test(NAME zsharp_game_skinning
+             COMMAND zsharp_test_game_skinning
+               "${ufbx_SOURCE_DIR}/data/max_transformed_skin_7500_ascii.fbx")
+    add_test(NAME zsharp_game_collision
+             COMMAND zsharp_test_game_collision)
     if(WIN32)
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
             set(ZSHARP_TEST_PLATFORM "windows-aarch64")
@@ -387,4 +488,16 @@ if(BUILD_TESTING)
             "-DZIP_TOOL=$<TARGET_FILE:zsharp_test_zip>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-installer-tests.cmake"
     )
+    if(WIN32)
+        add_test(
+            NAME zsharp_setup_regressions
+            COMMAND ${CMAKE_COMMAND}
+                "-DINSTALLER_BIN=$<TARGET_FILE:zsharp_setup>"
+                "-DRUNTIME_BIN=$<TARGET_FILE:zsharp>"
+                "-DTEST_PLATFORM=${ZSHARP_TEST_PLATFORM}"
+                "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/setup-installer-test"
+                "-DZIP_TOOL=$<TARGET_FILE:zsharp_test_zip>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-installer-tests.cmake"
+        )
+    endif()
 endif()

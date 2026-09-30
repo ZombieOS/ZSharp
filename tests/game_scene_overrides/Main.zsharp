@@ -2,5 +2,13 @@ zsharp = type.script
 
 noticed room Main[] (
  noticed brain Start[] (
+  Spotlight.lightType.set: "spot":
+  number.set:Spotlight.lightIntensity = 200:
+  number.set:Spotlight.lightRange = 80:
+  number.set:Spotlight.lightAngle = 50:
+  Spotlight.castShadows.set: alive:
+  Spotlight.visible.set: alive:
+  number.set:Cube.opacity = 75:
+  number.set:Cube.roughness = 30:
  )
 )

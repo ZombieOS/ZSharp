@@ -10,6 +10,24 @@ if(NOT DEFINED ZSHARP_BIN OR NOT DEFINED PROJECT_ROOT OR
     message(FATAL_ERROR "The Z# test paths were not supplied")
 endif()
 
+if(DEFINED TEST_C_PROJECT AND NOT TEST_C_PROJECT STREQUAL "")
+    execute_process(
+        COMMAND "${ZSHARP_BIN}" run Main.zsharp
+        WORKING_DIRECTORY "${TEST_C_PROJECT}"
+        RESULT_VARIABLE c_result
+        OUTPUT_VARIABLE c_output
+        ERROR_VARIABLE c_error)
+    if(NOT c_result EQUAL 0 OR
+       NOT c_output MATCHES "Hello from C, Tester!" OR
+       NOT c_output MATCHES "42" OR
+       NOT c_output MATCHES "Custom C syntax moved Tester to Spawn" OR
+       NOT c_output MATCHES "Custom C syntax moved Tester to Hub" OR
+       NOT c_output MATCHES "Detections: Windows=1 Linux=0 MacOS=1")
+        message(FATAL_ERROR
+            "C interoperability test failed (${c_result})\n"
+            "stdout: ${c_output}\nstderr: ${c_error}")
+    endif()
+endif()
 set(WINDOW_DIR "${PROJECT_ROOT}/tests/window")
 set(FILE_IO_DIR "${CMAKE_CURRENT_BINARY_DIR}/file-io-project")
 set(MATH_DIR "${PROJECT_ROOT}/tests/math")
@@ -80,6 +98,26 @@ function(expect_failure label expected working_dir)
             "${label} did not report '${expected}'\n${combined}")
     endif()
 endfunction()
+
+if(DEFINED TEST_C_CONFLICT_PROJECT AND
+   NOT TEST_C_CONFLICT_PROJECT STREQUAL "")
+    expect_failure("C syntax cannot override Print"
+                   "custom C syntax cannot replace a built-in statement"
+                   "${TEST_C_CONFLICT_PROJECT}" check Main.zsharp)
+endif()
+if(DEFINED TEST_C_PROJECT AND NOT TEST_C_PROJECT STREQUAL "")
+    set(c_legacy_project "${CMAKE_CURRENT_BINARY_DIR}/c-legacy-project")
+    file(REMOVE_RECURSE "${c_legacy_project}")
+    file(COPY "${TEST_C_PROJECT}/" DESTINATION "${c_legacy_project}")
+    file(READ "${c_legacy_project}/project.zsettings" c_legacy_settings)
+    string(REPLACE "ZSharp: [1.2.0.0]:" "ZSharp: [1.1.4.0]:"
+           c_legacy_settings "${c_legacy_settings}")
+    file(WRITE "${c_legacy_project}/project.zsettings"
+         "${c_legacy_settings}")
+    expect_failure("C version gate"
+                   "C imports require ZSharp: [1.2.0.0]"
+                   "${c_legacy_project}" check Main.zsharp)
+endif()
 
 set(SCENE_OVERRIDE_PROJECT "${CMAKE_CURRENT_BINARY_DIR}/scene-overrides-project")
 file(REMOVE_RECURSE "${SCENE_OVERRIDE_PROJECT}")
@@ -184,7 +222,7 @@ execute_process(
     OUTPUT_VARIABLE native_app_output
     ERROR_VARIABLE native_app_error)
 if(NOT native_app_result EQUAL 0 OR
-   NOT native_app_output MATCHES "Z# 1.1.4.0")
+   NOT native_app_output MATCHES "Z# 1.2.0.0")
     message(FATAL_ERROR
         "native startup launch failed (${native_app_result})\n"
         "stdout: ${native_app_output}\nstderr: ${native_app_error}")
@@ -621,14 +659,14 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.1.4.1]:"
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.2.0.1]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.1.4.1!"
+               "Update to at least 1.2.0.1!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})

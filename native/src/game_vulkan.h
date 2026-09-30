@@ -9,10 +9,20 @@ typedef enum ZSharpGameShape {
     ZGAME_SHAPE_TRIANGLE = 3,
     ZGAME_SHAPE_SPRITE = 4,
     ZGAME_SHAPE_CUBE = 5,
-    ZGAME_SHAPE_TEXT = 6
+    ZGAME_SHAPE_TEXT = 6,
+    ZGAME_SHAPE_LIGHT = 7,
+    ZGAME_SHAPE_MESH = 8,
+    ZGAME_SHAPE_NAV = 9
 } ZSharpGameShape;
 
+typedef struct ZSharpGamePartPose {
+    const char *name;
+    float position[3];
+    float rotation[3];
+} ZSharpGamePartPose;
+
 typedef struct ZSharpGameRenderObject {
+    size_t render_id; /* stable across the per-frame painter sort */
     ZSharpGameShape shape;
     float x;
     float y;
@@ -28,10 +38,25 @@ typedef struct ZSharpGameRenderObject {
     float scale_y;
     float scale_z;
     unsigned color;
+    float opacity;
+    float roughness;
+    float emissive;
+    float metallic;
+    int light_type;
+    float light_intensity;
+    float light_range;
+    float light_angle;
+    int cast_shadows;
     int visible;
     int layer;
     const char *text;
     const char *asset_path;
+    const char *mesh_path;
+    const char *const *material_names;
+    const char *const *material_textures;
+    size_t material_count;
+    const ZSharpGamePartPose *part_poses;
+    size_t part_pose_count;
 } ZSharpGameRenderObject;
 
 typedef struct ZSharpGameRenderFrame {

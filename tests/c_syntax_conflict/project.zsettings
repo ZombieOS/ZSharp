@@ -1,0 +1,11 @@
+zsharp = type.settings
+
+Project: "C Syntax Conflict Test":
+PID: "c_conflict":
+Version: [1.2.0.0]:
+Authors: ["Z# Tests"]:
+Description: "Reserved syntax cannot be replaced.":
+ZSharp: [1.2.0.0]:
+
+Dependencies (
+):

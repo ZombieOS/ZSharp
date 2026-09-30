@@ -1,0 +1,19 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import c:c_test.C.Utilities():
+
+ noticed brain Start[] (
+  text Greeting = Function.call(c:C.Utilities:greeting["Tester"]):
+  number Total = Function.call(c:C.Utilities:add[20, 22]):
+  Print(Greeting):
+  Print(Total):
+  move "Tester" to "Spawn":
+  Movement.move("Tester", "Hub"):
+  Detections(
+   Windows: true:
+   Linux: false:
+   MacOS: true:
+  )
+ )
+)

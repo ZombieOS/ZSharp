@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.0.0 - 2026-09-30
+
+- Added a graphical first-install setup on Windows and macOS while preserving
+  the verified downloader and command-line update flags. Linux displays
+  Zenity dialogs on supported desktops and retains its terminal fallback.
+- Added C interoperability and trusted C modules that register additional Z#
+  statement and block patterns without replacing built-in syntax.
+- Added a Kotlin/Native module bridge. C and Kotlin modules must be compiled
+  for each target platform before packaging; raw source alone is not run.
+- Added `.zmodel` FBX-backed model assets with material-slot textures and
+  per-scene size and appearance controls.
+- Added `.zanimation` clips with keyframes, playback controls, and model and
+  skeletal animation.
+- Added point, spot, and directional lights; shadows; surface properties;
+  and depth-buffered 3D rendering.
+- Added `.zai` model-backed entities, waypoint navigation, line-of-sight
+  queries, sphere/capsule collision, and static model collision.
+- Added a playable 3D development test game for the new systems.
+- Fixed rotated 3D box colliders so contacts and separation follow the visible
+  X/Y/Z orientation; spheres and capsules also contact rotated boxes. Added
+  regression coverage for angled barriers and grounding.
+
 ## 1.1.4.0 - unreleased
 
 - Added Rust interoperability using project-qualified imports and same-project

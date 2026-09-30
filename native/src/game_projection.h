@@ -15,9 +15,12 @@ size_t zsharp_game_project_cube(
 typedef struct ZSharpProjectedCubeFace {
     float points[6][2];
     float texcoords[6][2];
+    float point_depth[6];
     size_t point_count;
     float depth;
     float brightness;
+    float world_center[3];
+    float world_normal[3];
 } ZSharpProjectedCubeFace;
 
 /* Produces clipped, screen-space polygons for the cube's six solid faces.
@@ -27,8 +30,21 @@ size_t zsharp_game_project_cube_faces(
     const ZSharpGameRenderObject *object,
     ZSharpProjectedCubeFace faces[6]);
 
+/* Clip/project one world-space mesh triangle, preserving its UVs and the
+   world-space face geometry used by the scene light pass. */
+int zsharp_game_project_mesh_triangle(
+    const ZSharpGameRenderFrame *frame,
+    const float world[3][3], const float uv[3][2],
+    ZSharpProjectedCubeFace *face);
+
 /* Returns the object's center depth in the rotated camera coordinate system. */
 float zsharp_game_camera_depth(
+    const ZSharpGameRenderFrame *frame,
+    const ZSharpGameRenderObject *object);
+
+/* Backmost corner depth for painter ordering of large cubes. Sorting on the
+   center lets a long floor suddenly paint over the player halfway across it. */
+float zsharp_game_camera_far_depth(
     const ZSharpGameRenderFrame *frame,
     const ZSharpGameRenderObject *object);
 

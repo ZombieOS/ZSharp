@@ -5,12 +5,27 @@
 #include "lexer.h"
 #include "project.h"
 #include "zsharp.h"
+#include <ufbx.h>
 
 #include <ctype.h>
 #include <math.h>
+#include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef ZSHARP_COLLISION_TEST
+typedef struct ZSharpCollisionTriangle {
+    float point[3][3];
+} ZSharpCollisionTriangle;
+
+typedef struct ZSharpMeshCollision {
+    char *path;
+    ZSharpCollisionTriangle *triangles;
+    size_t triangle_count;
+    float source_extent[3];
+    struct ZSharpMeshCollision *next;
+} ZSharpMeshCollision;
 
 typedef enum ModelValueType {
     MODEL_IDENTIFIER,
@@ -41,7 +56,9 @@ typedef struct ModelParser {
 typedef enum ModelFileKind {
     MODEL_FILE_OBJECT,
     MODEL_FILE_SCENE,
-    MODEL_FILE_AUDIO
+    MODEL_FILE_AUDIO,
+    MODEL_FILE_MODEL,
+    MODEL_FILE_AI
 } ModelFileKind;
 
 static void model_error(char *error, size_t error_size, const char *message) {
@@ -366,6 +383,8 @@ static ZSharpGameObject *add_object(ModelParser *parser, char *name) {
     object->gravity_scale = 1.0f;
     object->friction = 0.2f;
     object->color = 0xffffffu;
+    object->opacity = 1.0f;
+    object->roughness = 1.0f;
     object->visible = 1;
     object->audio_volume = 1.0f;
     object->audio_pitch = 1.0f;
@@ -489,9 +508,19 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
             object->collider = ZGAME_COLLIDER_BOX;
         else if (strcmp(value->text, "circle") == 0)
             object->collider = ZGAME_COLLIDER_CIRCLE;
+        else if (strcmp(value->text, "sphere") == 0) {
+            object->collider = ZGAME_COLLIDER_SPHERE;
+            parser->model->is_3d = 1;
+        } else if (strcmp(value->text, "capsule") == 0) {
+            object->collider = ZGAME_COLLIDER_CAPSULE;
+            parser->model->is_3d = 1;
+        } else if (strcmp(value->text, "mesh") == 0) {
+            object->collider = ZGAME_COLLIDER_MESH;
+            parser->model->is_3d = 1;
+        }
         else {
             parser_fail(parser, &parser->current,
-                        "collider must be none, box, or circle");
+                        "collider must be none, box, circle, sphere, capsule, or mesh");
             return 0;
         }
         return 1;
@@ -736,6 +765,17 @@ static ZSharpGameObject *place_object(ModelParser *parser,
     *object = *definition;
     object->name = object->display_name = object->source_file = NULL;
     object->scene = object->text = object->asset_path = object->audio_path = NULL;
+    object->mesh_path = NULL;
+    object->material_names = NULL;
+    object->material_textures = NULL;
+    object->material_count = 0;
+    object->part_poses = NULL;
+    object->part_pose_count = 0;
+    object->nav_aliases = object->nav_ids = NULL;
+    object->nav_count = 0;
+    object->nav_target = NULL;
+    object->nav_path = NULL;
+    object->nav_path_count = object->nav_path_step = 0;
     object->attribute_ids = NULL;
     object->attribute_active = NULL;
     object->attribute_count = 0;
@@ -746,8 +786,41 @@ static ZSharpGameObject *place_object(ModelParser *parser,
         !copy_optional(&object->scene, scene) ||
         !copy_optional(&object->text, definition->text) ||
         !copy_optional(&object->asset_path, definition->asset_path) ||
+        !copy_optional(&object->mesh_path, definition->mesh_path) ||
         !copy_optional(&object->audio_path, definition->audio_path))
         goto memory_error;
+    if (definition->material_count != 0) {
+        object->material_names = (char **)calloc(definition->material_count,
+                                                 sizeof(char *));
+        object->material_textures = (char **)calloc(definition->material_count,
+                                                    sizeof(char *));
+        if (object->material_names == NULL ||
+            object->material_textures == NULL) goto memory_error;
+        object->material_count = definition->material_count;
+        for (index = 0; index < definition->material_count; index++) {
+            if (!copy_optional(&object->material_names[index],
+                               definition->material_names[index]) ||
+                !copy_optional(&object->material_textures[index],
+                               definition->material_textures[index]))
+                goto memory_error;
+        }
+    }
+    if (definition->nav_count != 0) {
+        object->nav_aliases = (char **)calloc(definition->nav_count,
+                                              sizeof(char *));
+        object->nav_ids = (char **)calloc(definition->nav_count,
+                                          sizeof(char *));
+        if (object->nav_aliases == NULL || object->nav_ids == NULL)
+            goto memory_error;
+        object->nav_count = definition->nav_count;
+        for (index = 0; index < definition->nav_count; index++) {
+            if (!copy_optional(&object->nav_aliases[index],
+                               definition->nav_aliases[index]) ||
+                !copy_optional(&object->nav_ids[index],
+                               definition->nav_ids[index]))
+                goto memory_error;
+        }
+    }
     object->display_name = display_name;
     display_name = NULL;
     if (definition->attribute_count != 0) {
@@ -789,6 +862,120 @@ static int json_location_number(ModelParser *parser, float *value) {
     return ok;
 }
 
+static int parse_surface_override(ModelParser *parser,
+                                  ZSharpGameObject *object) {
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
+                            "expected '{' before surface")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_BRACE) {
+        char *field = json_text(parser, "surface field");
+        float value = 0.0f;
+        float *target = NULL;
+        if (field == NULL) return 0;
+        if (!parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after surface field")) {
+            free(field);
+            return 0;
+        }
+        if (strcmp(field, "opacity") == 0) target = &object->opacity;
+        else if (strcmp(field, "roughness") == 0) target = &object->roughness;
+        else if (strcmp(field, "emissive") == 0) target = &object->emissive;
+        else if (strcmp(field, "metallic") == 0) target = &object->metallic;
+        if (target == NULL) {
+            free(field);
+            parser_fail(parser, &parser->current, "unknown surface field");
+            return 0;
+        }
+        free(field);
+        if (!json_location_number(parser, &value)) return 0;
+        if (!isfinite(value) || value < 0.0f || value > 100.0f) {
+            parser_fail(parser, &parser->current,
+                        "surface values must be between 0 and 100");
+            return 0;
+        }
+        *target = value / 100.0f;
+        if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                              "expected '}' after surface");
+}
+
+static int parse_light_attributes(ModelParser *parser,
+                                  ZSharpGameObject *object) {
+    if (object->shape != ZGAME_SHAPE_LIGHT) {
+        parser_fail(parser, &parser->current,
+                    "light attributes require id 'light'");
+        return 0;
+    }
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
+                            "expected '{' before light attributes")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_BRACE) {
+        char *field = json_text(parser, "light attribute");
+        int ok = 1;
+        if (field == NULL) return 0;
+        if (!parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after light attribute")) {
+            free(field);
+            return 0;
+        }
+        if (strcmp(field, "light_type") == 0) {
+            char *kind = json_text(parser, "light type");
+            if (kind == NULL) ok = 0;
+            else {
+                object->light_type = strcmp(kind, "point") == 0 ? 1 :
+                                     strcmp(kind, "spot") == 0 ? 2 :
+                                     strcmp(kind, "directional") == 0 ? 3 : 0;
+                if (object->light_type == 0) {
+                    parser_fail(parser, &parser->current,
+                                "light_type must be point, spot, or directional");
+                    ok = 0;
+                }
+            }
+            free(kind);
+        } else if (strcmp(field, "intensity") == 0) {
+            ok = json_location_number(parser, &object->light_intensity);
+        } else if (strcmp(field, "range") == 0) {
+            ok = json_location_number(parser, &object->light_range);
+        } else if (strcmp(field, "angle") == 0) {
+            ok = json_location_number(parser, &object->light_angle);
+        } else if (strcmp(field, "color") == 0) {
+            char *color = json_text(parser, "light color");
+            if (color == NULL) ok = 0;
+            else {
+                ModelValue value;
+                value.type = MODEL_COLOR;
+                value.text = color;
+                ok = value_color(parser, &value, &object->color);
+            }
+            free(color);
+        } else if (strcmp(field, "castShadows") == 0) {
+            if (parser_match_word(parser, "true")) object->cast_shadows = 1;
+            else if (parser_match_word(parser, "false")) object->cast_shadows = 0;
+            else {
+                parser_fail(parser, &parser->current,
+                            "castShadows must be true or false");
+                ok = 0;
+            }
+        } else {
+            parser_fail(parser, &parser->current, "unknown light attribute");
+            ok = 0;
+        }
+        free(field);
+        if (!ok) return 0;
+        if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
+    }
+    if (!parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                            "expected '}' after light attributes")) return 0;
+    if (!isfinite(object->light_intensity) || object->light_intensity < 0.0f ||
+        !isfinite(object->light_range) || object->light_range < 0.0f ||
+        !isfinite(object->light_angle) || object->light_angle <= 0.0f ||
+        object->light_angle > 180.0f) {
+        parser_fail(parser, &parser->current,
+                    "light intensity/range must be nonnegative and angle must be 0-180");
+        return 0;
+    }
+    return 1;
+}
+
 static int parse_scene_object_override(ModelParser *parser,
                                        ZSharpGameObject *object) {
     char *field = json_text(parser, "scene object field name");
@@ -822,9 +1009,28 @@ static int parse_scene_object_override(ModelParser *parser,
             if (!ok) parser_fail(parser, &parser->current, "out of memory");
             free(texture);
         }
+    } else if (strcmp(field, "surface") == 0) {
+        ok = parse_surface_override(parser, object);
+    } else if (strcmp(field, "attributes") == 0) {
+        ok = parse_light_attributes(parser, object);
+    } else if (strcmp(field, "rotations") == 0) {
+        ok = parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
+                                "expected '{' before rotations") &&
+             json_key(parser, "x") &&
+             json_location_number(parser, &object->rotation_x) &&
+             parser_expect_type(parser, ZTOKEN_COMMA,
+                                "expected ',' after rotation x") &&
+             json_key(parser, "y") &&
+             json_location_number(parser, &object->rotation_y) &&
+             parser_expect_type(parser, ZTOKEN_COMMA,
+                                "expected ',' after rotation y") &&
+             json_key(parser, "z") &&
+             json_location_number(parser, &object->rotation_z) &&
+             parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                                "expected '}' after rotations");
     } else {
         parser_fail(parser, &parser->current,
-                    "unknown scene object override (expected width, height, length, color, or texture)");
+                    "unknown scene object override (expected width, height, length, color, texture, surface, rotations, or light attributes)");
     }
     free(field);
     return ok;
@@ -881,7 +1087,33 @@ static int parse_scene_objects(ModelParser *parser, const char *scene_name) {
             free(display_name);
             return 0;
         }
-        definition = find_definition(parser->model, id);
+        ZSharpGameObject builtin_light;
+        ZSharpGameObject builtin_nav;
+        memset(&builtin_light, 0, sizeof(builtin_light));
+        builtin_light.name = "light";
+        builtin_light.shape = ZGAME_SHAPE_LIGHT;
+        builtin_light.body = ZGAME_BODY_STATIC;
+        builtin_light.visible = 1;
+        builtin_light.width = builtin_light.height = builtin_light.depth = 1.0f;
+        builtin_light.mass = 1.0f;
+        builtin_light.audio_pitch = builtin_light.audio_volume = 1.0f;
+        builtin_light.scale_x = builtin_light.scale_y =
+            builtin_light.scale_z = 1.0f;
+        builtin_light.color = 0xffffffu;
+        builtin_light.opacity = builtin_light.roughness = 1.0f;
+        builtin_light.light_type = 1;
+        builtin_light.light_intensity = 100.0f;
+        builtin_light.light_range = 100.0f;
+        builtin_light.light_angle = 45.0f;
+        builtin_nav = builtin_light;
+        builtin_nav.name = id;
+        builtin_nav.shape = ZGAME_SHAPE_NAV;
+        builtin_nav.visible = 0;
+        builtin_nav.light_intensity = 0.0f;
+        definition = strcmp(id, "light") == 0 ? &builtin_light :
+                     strncmp(id, "nav:", 4) == 0 && id[4] != '\0'
+                         ? &builtin_nav :
+                     find_definition(parser->model, id);
         if (definition == NULL) {
             parser_fail(parser, &parser->current,
                         "scene references an unknown object or audio id");
@@ -951,6 +1183,239 @@ static int parse_object_declaration(ModelParser *parser, char *name) {
     }
     return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
                               "expected ')' after object fields");
+}
+
+static int parse_model_textures(ModelParser *parser, ZSharpGameObject *model) {
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' after textures") ||
+        !parser_expect_word(parser, "JSON") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "expected ']' after textures[JSON]") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before model textures")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN) {
+        char *slot = json_text(parser, "material slot name");
+        char *path = NULL;
+        char **names, **textures;
+        if (slot == NULL ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after material slot")) {
+            free(slot);
+            return 0;
+        }
+        path = json_text(parser, "texture path");
+        if (path == NULL) { free(slot); return 0; }
+        if (slot[0] == '\0' || !safe_relative_asset(path)) {
+            free(slot); free(path);
+            parser_fail(parser, &parser->current,
+                        "model texture requires a named slot and safe relative path");
+            return 0;
+        }
+        names = (char **)realloc(model->material_names,
+             (model->material_count + 1) * sizeof(char *));
+        if (names == NULL) { free(slot); free(path); return 0; }
+        model->material_names = names;
+        textures = (char **)realloc(model->material_textures,
+             (model->material_count + 1) * sizeof(char *));
+        if (textures == NULL) { free(slot); free(path); return 0; }
+        model->material_textures = textures;
+        model->material_names[model->material_count] = slot;
+        model->material_textures[model->material_count++] = path;
+        if (!parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after model texture path")) return 0;
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "expected ')' after model textures");
+}
+
+static int parse_model_declaration(ModelParser *parser, char *name) {
+    ZSharpGameObject *model;
+    parser->definition_mode = 1;
+    model = add_object(parser, name);
+    if (model == NULL ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' after the model id") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "expected ']' after the model id") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before model fields")) return 0;
+    model->shape = ZGAME_SHAPE_MESH;
+    model->width = model->height = model->depth = 1.0f;
+    parser->model->is_3d = 1;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
+           parser->current.type != ZTOKEN_EOF) {
+        char *field = parser_name(parser, "a model field name");
+        ModelValue value;
+        if (field == NULL) return 0;
+        if (strcmp(field, "textures") == 0) {
+            free(field);
+            if (!parse_model_textures(parser, model)) return 0;
+            continue;
+        }
+        if (!parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after model field") ||
+            !parse_value(parser, &value) ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after model value")) {
+            free(field);
+            return 0;
+        }
+        if (strcmp(field, "parent") == 0) {
+            if (value.type != MODEL_TEXT || !safe_relative_asset(value.text) ||
+                !replace_text(&model->mesh_path, value.text))
+                parser_fail(parser, &parser->current,
+                            "model parent requires a quoted project-relative FBX path");
+        } else if (strcmp(field, "shape") == 0) {
+            parser_fail(parser, &parser->current,
+                        "a .zmodel's shape is its imported mesh");
+        } else {
+            apply_object_field(parser, model, field, &value);
+        }
+        free(value.text);
+        free(field);
+    }
+    if (model->mesh_path == NULL && !parser->failed)
+        parser_fail(parser, &parser->current,
+                    "model definitions require parent: \"Model.fbx\":");
+    return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "expected ')' after model fields");
+}
+
+static int parse_ai_navigation(ModelParser *parser, ZSharpGameObject *ai) {
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' after Navigation") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "expected ']' after Navigation") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before Navigation points")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN) {
+        char *alias = parser_name(parser, "a Navigation alias");
+        char *id;
+        char **aliases, **ids;
+        if (alias == NULL ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after Navigation alias")) {
+            free(alias);
+            return 0;
+        }
+        id = json_text(parser, "navigation point id");
+        if (id == NULL) { free(alias); return 0; }
+        if (id[0] == '\0' ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after navigation point id")) {
+            free(alias); free(id);
+            return 0;
+        }
+        aliases = (char **)realloc(ai->nav_aliases,
+            (ai->nav_count + 1) * sizeof(char *));
+        if (aliases == NULL) { free(alias); free(id); return 0; }
+        ai->nav_aliases = aliases;
+        ids = (char **)realloc(ai->nav_ids,
+            (ai->nav_count + 1) * sizeof(char *));
+        if (ids == NULL) { free(alias); free(id); return 0; }
+        ai->nav_ids = ids;
+        ai->nav_aliases[ai->nav_count] = alias;
+        ai->nav_ids[ai->nav_count++] = id;
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "expected ')' after Navigation points");
+}
+
+static int parse_ai_declaration(ModelParser *parser, char *name) {
+    ZSharpGameObject *ai;
+    parser->definition_mode = 1;
+    ai = add_object(parser, name);
+    if (ai == NULL ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected '[' after AI id") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                            "expected ']' after AI id") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN,
+                            "expected '(' before AI fields")) return 0;
+    ai->is_ai = 1;
+    ai->shape = ZGAME_SHAPE_MESH;
+    ai->body = ZGAME_BODY_DYNAMIC;
+    ai->collider = ZGAME_COLLIDER_BOX;
+    ai->width = ai->height = ai->depth = 1.0f;
+    parser->model->is_3d = 1;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
+           parser->current.type != ZTOKEN_EOF) {
+        char *field = parser_name(parser, "an AI field name");
+        ModelValue value;
+        if (field == NULL) return 0;
+        if (strcmp(field, "Navigation") == 0) {
+            free(field);
+            if (!parse_ai_navigation(parser, ai)) return 0;
+            continue;
+        }
+        if (!parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after AI field") ||
+            !parse_value(parser, &value) ||
+            !parser_expect_type(parser, ZTOKEN_COLON,
+                                "expected ':' after AI value")) {
+            free(field);
+            return 0;
+        }
+        if (strcmp(field, "model") == 0) {
+            const char *stem, *dot;
+            ZSharpGameObject *source;
+            char name_buffer[256];
+            size_t length;
+            if (value.type != MODEL_TEXT || !safe_relative_asset(value.text)) {
+                parser_fail(parser, &parser->current,
+                            "AI model requires a quoted .zmodel path");
+            } else {
+                stem = strrchr(value.text, '/');
+                stem = stem == NULL ? value.text : stem + 1;
+                dot = strrchr(stem, '.');
+                length = dot == NULL ? strlen(stem) : (size_t)(dot - stem);
+                if (length == 0 || length >= sizeof(name_buffer)) {
+                    parser_fail(parser, &parser->current, "invalid AI model name");
+                } else {
+                    memcpy(name_buffer, stem, length);
+                    name_buffer[length] = '\0';
+                    source = find_definition(parser->model, name_buffer);
+                    if (source == NULL || source->shape != ZGAME_SHAPE_MESH ||
+                        !replace_text(&ai->mesh_path, source->mesh_path)) {
+                        parser_fail(parser, &parser->current,
+                                    "AI model must reference a loaded .zmodel");
+                    } else {
+                        size_t slot;
+                        ai->material_names = (char **)calloc(source->material_count,
+                                                               sizeof(char *));
+                        ai->material_textures = (char **)calloc(source->material_count,
+                                                                  sizeof(char *));
+                        if (source->material_count != 0 &&
+                            (ai->material_names == NULL ||
+                             ai->material_textures == NULL))
+                            parser_fail(parser, &parser->current, "out of memory");
+                        else {
+                            ai->material_count = source->material_count;
+                            for (slot = 0; slot < source->material_count; slot++) {
+                                if (!copy_optional(&ai->material_names[slot],
+                                        source->material_names[slot]) ||
+                                    !copy_optional(&ai->material_textures[slot],
+                                        source->material_textures[slot])) {
+                                    parser_fail(parser, &parser->current,
+                                                "out of memory");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            apply_object_field(parser, ai, field, &value);
+        }
+        free(value.text);
+        free(field);
+    }
+    if (ai->mesh_path == NULL && !parser->failed)
+        parser_fail(parser, &parser->current,
+                    "AI definitions require model: \"Models/AI.zmodel\":");
+    return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
+                              "expected ')' after AI fields");
 }
 
 static int parse_audio_declaration(ModelParser *parser, char *name) {
@@ -1081,17 +1546,25 @@ static int parse_model_file(const char *path, const char *source,
         !parser_expect_type(&parser, ZTOKEN_EQUAL, "expected '='") ||
         !parser_expect_word(&parser, "type") ||
         !parser_expect_type(&parser, ZTOKEN_DOT, "expected '.'") ||
-        !parser_expect_word(&parser, kind == MODEL_FILE_AUDIO
+        !parser_expect_word(&parser, kind == MODEL_FILE_AI
+                                      ? "ai"
+                                      : kind == MODEL_FILE_AUDIO ||
+                                      kind == MODEL_FILE_MODEL
                                       ? "script"
                                       : kind == MODEL_FILE_SCENE
                                             ? "scene" : "object") ||
-        (kind == MODEL_FILE_AUDIO &&
+        ((kind == MODEL_FILE_AUDIO || kind == MODEL_FILE_MODEL) &&
          (!parser_expect_type(&parser, ZTOKEN_COLON,
                               "expected ':' after type.script") ||
-          !parser_expect_word(&parser, "audio")))) {
+          !parser_expect_word(&parser,
+              kind == MODEL_FILE_MODEL ? "model" : "audio")))) {
         if (!parser.failed)
             parser_fail(&parser, &parser.current,
-                        kind == MODEL_FILE_AUDIO
+                        kind == MODEL_FILE_AI
+                            ? "expected zsharp = type.ai"
+                            : kind == MODEL_FILE_MODEL
+                            ? "expected zsharp = type.script:model"
+                            : kind == MODEL_FILE_AUDIO
                             ? "expected zsharp = type.script:audio"
                             : kind == MODEL_FILE_SCENE
                                   ? "expected zsharp = type.scene"
@@ -1106,24 +1579,40 @@ static int parse_model_file(const char *path, const char *source,
             parser_fail(&parser, &parser.current,
                         "expected 'noticed' or 'silent'");
         } else if (!parser_match_word(
-                       &parser, kind == MODEL_FILE_AUDIO
+                       &parser, kind == MODEL_FILE_AI
+                                      ? "ai"
+                                      : kind == MODEL_FILE_MODEL
+                                      ? "model"
+                                      : kind == MODEL_FILE_AUDIO
                                       ? "audio"
                                       : kind == MODEL_FILE_SCENE
                                             ? "scene" : "object")) {
             parser_fail(&parser, &parser.current,
-                        kind == MODEL_FILE_AUDIO
+                        kind == MODEL_FILE_AI
+                            ? "expected 'ai'"
+                            : kind == MODEL_FILE_MODEL
+                            ? "expected 'model'"
+                            : kind == MODEL_FILE_AUDIO
                             ? "expected 'audio'"
                             : kind == MODEL_FILE_SCENE
                                   ? "expected 'scene'" : "expected 'object'");
         } else {
             name = parser_name(
-                &parser, kind == MODEL_FILE_AUDIO
+                &parser, kind == MODEL_FILE_AI
+                             ? "an AI name"
+                             : kind == MODEL_FILE_MODEL
+                             ? "a model name"
+                             : kind == MODEL_FILE_AUDIO
                              ? "an audio name"
                              : kind == MODEL_FILE_SCENE
                                    ? "a scene name" : "an object name");
             if (name != NULL) {
                 if (kind == MODEL_FILE_SCENE)
                     parse_scene_declaration(&parser, name);
+                else if (kind == MODEL_FILE_AI)
+                    parse_ai_declaration(&parser, name);
+                else if (kind == MODEL_FILE_MODEL)
+                    parse_model_declaration(&parser, name);
                 else if (kind == MODEL_FILE_AUDIO)
                     parse_audio_declaration(&parser, name);
                 else
@@ -1133,7 +1622,11 @@ static int parse_model_file(const char *path, const char *source,
     }
     if (!parser.failed && parser.current.type != ZTOKEN_EOF)
         parser_fail(&parser, &parser.current,
-                    kind == MODEL_FILE_AUDIO
+                    kind == MODEL_FILE_AI
+                        ? "a .zai file can define exactly one AI"
+                        : kind == MODEL_FILE_MODEL
+                        ? "a .zmodel file can define exactly one model"
+                        : kind == MODEL_FILE_AUDIO
                         ? "a .zaudio file can define exactly one audio source"
                         : kind == MODEL_FILE_SCENE
                               ? "a .zscene file can define exactly one scene"
@@ -1351,6 +1844,14 @@ static ZSharpGameObject *find_object(const ZSharpGameModel *model,
             model->active_scene != NULL && model->objects[index].scene != NULL &&
             strcmp(model->objects[index].scene, model->active_scene) == 0)
             return &model->objects[index];
+    /* Built-in lights all have id "light". A unique identifier-style scene
+       name gives scripts a way to move or toggle a particular light. */
+    for (index = 0; index < model->object_count; index++)
+        if (model->objects[index].display_name != NULL &&
+            strcmp(model->objects[index].display_name, name) == 0 &&
+            model->active_scene != NULL && model->objects[index].scene != NULL &&
+            strcmp(model->objects[index].scene, model->active_scene) == 0)
+            return &model->objects[index];
     for (index = 0; index < model->object_count; index++)
         if (strcmp(model->objects[index].name, name) == 0)
             return &model->objects[index];
@@ -1432,6 +1933,34 @@ int zsharp_game_model_load(const char *project_root,
         free(source);
     }
     zsharp_project_source_list_free(&files);
+    if (!zsharp_project_list_files(project_root, ZSHARP_MODEL_EXTENSION,
+                                   &files, error, error_size)) goto failed;
+    for (index = 0; index < files.count; index++) {
+        char *source = NULL;
+        if (!read_file(files.items[index], &source, error, error_size) ||
+            !parse_model_file(files.items[index], source, model,
+                              MODEL_FILE_MODEL, error, error_size)) {
+            free(source);
+            zsharp_project_source_list_free(&files);
+            goto failed;
+        }
+        free(source);
+    }
+    zsharp_project_source_list_free(&files);
+    if (!zsharp_project_list_files(project_root, ZSHARP_AI_EXTENSION,
+                                   &files, error, error_size)) goto failed;
+    for (index = 0; index < files.count; index++) {
+        char *source = NULL;
+        if (!read_file(files.items[index], &source, error, error_size) ||
+            !parse_model_file(files.items[index], source, model,
+                              MODEL_FILE_AI, error, error_size)) {
+            free(source);
+            zsharp_project_source_list_free(&files);
+            goto failed;
+        }
+        free(source);
+    }
+    zsharp_project_source_list_free(&files);
     if (!zsharp_project_list_files(project_root, ZSHARP_AUDIO_EXTENSION,
                                    &files, error, error_size)) goto failed;
     for (index = 0; index < files.count; index++) {
@@ -1467,6 +1996,16 @@ int zsharp_game_model_load(const char *project_root,
                     "game projects require at least one .zscene file");
         goto failed;
     }
+    if (!zsharp_project_list_files(project_root, ".zanimation",
+                                   &files, error, error_size)) goto failed;
+    for (index = 0; index < files.count; index++) {
+        if (!zsharp_game_animation_load(model, files.items[index], error,
+                                        error_size)) {
+            zsharp_project_source_list_free(&files);
+            goto failed;
+        }
+    }
+    zsharp_project_source_list_free(&files);
     for (index = 0; index < model->scene_count; index++) {
         const char *icon = model->scenes[index].icon;
         size_t length;
@@ -1551,10 +2090,21 @@ int zsharp_game_model_load(const char *project_root,
                          object->name);
             goto failed;
         }
+        if (object->collider == ZGAME_COLLIDER_MESH &&
+            (object->shape != ZGAME_SHAPE_MESH ||
+             object->body != ZGAME_BODY_STATIC)) {
+            if (error != NULL && error_size != 0)
+                snprintf(error, error_size,
+                         "mesh collider '%s' requires a static .zmodel object",
+                         object->name);
+            goto failed;
+        }
         if ((object->shape == ZGAME_SHAPE_SPRITE &&
              !safe_relative_asset(object->asset_path)) ||
             (object->asset_path != NULL &&
              !safe_relative_asset(object->asset_path)) ||
+            (object->mesh_path != NULL &&
+             !safe_relative_asset(object->mesh_path)) ||
             (object->audio_path != NULL &&
              !safe_relative_asset(object->audio_path))) {
             if (error != NULL && error_size != 0)
@@ -1562,6 +2112,54 @@ int zsharp_game_model_load(const char *project_root,
                          "game object '%s' requires a safe project-relative asset path",
                          object->name);
             goto failed;
+        }
+        if (object->shape == ZGAME_SHAPE_MESH) {
+            size_t root_length, mesh_length, slot;
+            char *full_path;
+            ufbx_scene *imported;
+            ufbx_error import_error;
+            if (object->mesh_path == NULL ||
+                !project_asset_exists(project_root, object->mesh_path)) {
+                if (error != NULL && error_size != 0)
+                    snprintf(error, error_size,
+                             "model '%s' requires an existing parent FBX asset",
+                             object->name);
+                goto failed;
+            }
+            for (slot = 0; slot < object->material_count; slot++) {
+                if (!project_asset_exists(project_root,
+                                          object->material_textures[slot])) {
+                    if (error != NULL && error_size != 0)
+                        snprintf(error, error_size,
+                                 "model '%s' texture slot '%s' has no file",
+                                 object->name, object->material_names[slot]);
+                    goto failed;
+                }
+            }
+            root_length = strlen(project_root);
+            mesh_length = strlen(object->mesh_path);
+            full_path = (char *)malloc(root_length + mesh_length + 2);
+            if (full_path == NULL) goto out_of_memory;
+            snprintf(full_path, root_length + mesh_length + 2, "%s/%s",
+                     project_root, object->mesh_path);
+            imported = ufbx_load_file(full_path, NULL, &import_error);
+            free(full_path);
+            if (imported == NULL) {
+                if (error != NULL && error_size != 0)
+                    snprintf(error, error_size,
+                             "model '%s' has an invalid FBX parent: %.180s",
+                             object->name, import_error.description.data);
+                goto failed;
+            }
+            if (imported->meshes.count == 0) {
+                ufbx_free_scene(imported);
+                if (error != NULL && error_size != 0)
+                    snprintf(error, error_size,
+                             "model '%s' has no renderable FBX mesh",
+                             object->name);
+                goto failed;
+            }
+            ufbx_free_scene(imported);
         }
         if (object->is_audio_source && !wav_asset(object->audio_path)) {
             if (error != NULL && error_size != 0)
@@ -1596,6 +2194,22 @@ static void free_game_object(ZSharpGameObject *object) {
     free(object->scene);
     free(object->text);
     free(object->asset_path);
+    free(object->mesh_path);
+    for (index = 0; index < object->material_count; index++) {
+        free(object->material_names[index]);
+        free(object->material_textures[index]);
+    }
+    free(object->material_names);
+    free(object->material_textures);
+    free(object->part_poses);
+    for (index = 0; index < object->nav_count; index++) {
+        free(object->nav_aliases[index]);
+        free(object->nav_ids[index]);
+    }
+    free(object->nav_aliases);
+    free(object->nav_ids);
+    free(object->nav_target);
+    free(object->nav_path);
     free(object->audio_path);
     for (index = 0; index < object->attribute_count; index++)
         free(object->attribute_ids[index]);
@@ -1605,7 +2219,16 @@ static void free_game_object(ZSharpGameObject *object) {
 
 void zsharp_game_model_free(ZSharpGameModel *model) {
     size_t index;
+    ZSharpMeshCollision *collision;
     if (model == NULL) return;
+    collision = model->mesh_collisions;
+    while (collision != NULL) {
+        ZSharpMeshCollision *next = collision->next;
+        free(collision->path);
+        free(collision->triangles);
+        free(collision);
+        collision = next;
+    }
     for (index = 0; index < model->scene_count; index++) {
         free(model->scenes[index].name);
         free(model->scenes[index].title);
@@ -1619,6 +2242,7 @@ void zsharp_game_model_free(ZSharpGameModel *model) {
     free(model->scenes);
     free(model->objects);
     free(model->definitions);
+    zsharp_game_animation_free(model);
     free(model->active_scene);
     free(model->project_root);
     memset(model, 0, sizeof(*model));
@@ -1642,6 +2266,99 @@ const char *zsharp_game_model_scene_icon(const ZSharpGameModel *model) {
     return scene == NULL ? NULL : scene->icon;
 }
 
+static ZSharpMeshCollision *collision_mesh(ZSharpGameModel *model,
+                                            const char *relative) {
+    ZSharpMeshCollision *cache;
+    ufbx_scene *source;
+    char *full_path;
+    size_t node_index;
+    if (relative == NULL || model->project_root == NULL) return NULL;
+    for (cache = model->mesh_collisions; cache != NULL; cache = cache->next)
+        if (strcmp(cache->path, relative) == 0) return cache;
+    full_path = (char *)malloc(strlen(model->project_root) +
+                               strlen(relative) + 2);
+    if (full_path == NULL) return NULL;
+    sprintf(full_path, "%s/%s", model->project_root, relative);
+    source = ufbx_load_file(full_path, NULL, NULL);
+    free(full_path);
+    if (source == NULL) return NULL;
+    cache = (ZSharpMeshCollision *)calloc(1, sizeof(*cache));
+    if (cache == NULL) { ufbx_free_scene(source); return NULL; }
+    cache->path = zsharp_copy_text(relative, strlen(relative));
+    if (cache->path == NULL) goto failed;
+    for (node_index = 0; node_index < source->nodes.count; node_index++) {
+        const ufbx_node *node = source->nodes.data[node_index];
+        const ufbx_mesh *mesh = node->mesh;
+        size_t face_index;
+        if (mesh == NULL) continue;
+        for (face_index = 0; face_index < mesh->faces.count; face_index++) {
+            ufbx_face face = mesh->faces.data[face_index];
+            uint32_t *indices;
+            uint32_t count, triangle;
+            ZSharpCollisionTriangle *resized;
+            if (face.num_indices < 3 || face.num_indices > 100000) continue;
+            indices = (uint32_t *)malloc((face.num_indices - 2) * 3 *
+                                          sizeof(uint32_t));
+            if (indices == NULL) goto failed;
+            count = ufbx_triangulate_face(indices,
+                (face.num_indices - 2) * 3, mesh, face);
+            if (cache->triangle_count + count > 200000) {
+                free(indices); goto failed;
+            }
+            resized = (ZSharpCollisionTriangle *)realloc(cache->triangles,
+                (cache->triangle_count + count) * sizeof(*resized));
+            if (resized == NULL && count != 0) { free(indices); goto failed; }
+            if (count != 0) cache->triangles = resized;
+            for (triangle = 0; triangle < count; triangle++) {
+                ZSharpCollisionTriangle *destination =
+                    &cache->triangles[cache->triangle_count + triangle];
+                int corner;
+                for (corner = 0; corner < 3; corner++) {
+                    uint32_t vertex_index = indices[triangle * 3 + corner];
+                    ufbx_vec3 vertex = ufbx_get_vertex_vec3(
+                        &mesh->vertex_position, vertex_index);
+                    ufbx_vec3 position = ufbx_transform_position(
+                        &node->geometry_to_world, vertex);
+                    destination->point[corner][0] = (float)position.x;
+                    destination->point[corner][1] = (float)position.y;
+                    destination->point[corner][2] = (float)position.z;
+                }
+            }
+            cache->triangle_count += count;
+            free(indices);
+        }
+    }
+    if (cache->triangle_count > 0) {
+        float low[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+        float high[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+        size_t triangle;
+        int axis, corner;
+        for (triangle = 0; triangle < cache->triangle_count; triangle++)
+            for (corner = 0; corner < 3; corner++)
+                for (axis = 0; axis < 3; axis++) {
+                    float value = cache->triangles[triangle].point[corner][axis];
+                    if (value < low[axis]) low[axis] = value;
+                    if (value > high[axis]) high[axis] = value;
+                }
+        for (axis = 0; axis < 3; axis++) {
+            float extent = high[axis] - low[axis];
+            cache->source_extent[axis] = extent > 0.000001f ? extent : 1.0f;
+        }
+    }
+    ufbx_free_scene(source);
+    cache->next = model->mesh_collisions;
+    model->mesh_collisions = cache;
+    return cache;
+failed:
+    ufbx_free_scene(source);
+    free(cache->path);
+    free(cache->triangles);
+    free(cache);
+    return NULL;
+}
+
+#endif
+
 static int overlaps(const ZSharpGameObject *a, const ZSharpGameObject *b,
                     float *overlap_x, float *overlap_y, float *overlap_z) {
     float ax = a->width * a->scale_x * 0.5f;
@@ -1654,6 +2371,83 @@ static int overlaps(const ZSharpGameObject *a, const ZSharpGameObject *b,
     *overlap_y = ay + by - fabsf(a->y - b->y);
     *overlap_z = az + bz - fabsf(a->z - b->z);
     return *overlap_x > 0.0f && *overlap_y > 0.0f && *overlap_z > 0.0f;
+}
+
+typedef struct CollisionBox {
+    float center[3];
+    float axis[3][3];
+    float half[3];
+} CollisionBox;
+
+/* Match the renderer's X, Y, Z Euler order (and legacy cube yaw). */
+static void collision_box(const ZSharpGameObject *object, CollisionBox *box) {
+    float rx = object->rotation_x * 0.017453292519943295f;
+    float ry = (object->rotation_y + object->rotation) * 0.017453292519943295f;
+    float rz = object->rotation_z * 0.017453292519943295f;
+    float sx = sinf(rx), cx = cosf(rx);
+    float sy = sinf(ry), cy = cosf(ry);
+    float sz = sinf(rz), cz = cosf(rz);
+    box->center[0] = object->x;
+    box->center[1] = object->y;
+    box->center[2] = object->z;
+    box->half[0] = fabsf(object->width * object->scale_x) * 0.5f;
+    box->half[1] = fabsf(object->height * object->scale_y) * 0.5f;
+    box->half[2] = fabsf(object->depth * object->scale_z) * 0.5f;
+    box->axis[0][0] = cz*cy;
+    box->axis[0][1] = sz*cy;
+    box->axis[0][2] = -sy;
+    box->axis[1][0] = cz*sy*sx-sz*cx;
+    box->axis[1][1] = sz*sy*sx+cz*cx;
+    box->axis[1][2] = cy*sx;
+    box->axis[2][0] = cz*sy*cx+sz*sx;
+    box->axis[2][1] = sz*sy*cx-cz*sx;
+    box->axis[2][2] = cy*cx;
+}
+
+/* Separating-axis test for two oriented boxes. Normal points from b to a.
+ * Cross-product axes are necessary when both boxes rotate. */
+static int box_contact(const ZSharpGameObject *a, const ZSharpGameObject *b,
+                       float normal[3], float *penetration) {
+    CollisionBox first, second;
+    float delta[3], best = INFINITY;
+    int axis_index;
+    collision_box(a, &first);
+    collision_box(b, &second);
+    for (axis_index = 0; axis_index < 3; axis_index++)
+        delta[axis_index] = first.center[axis_index] - second.center[axis_index];
+    for (axis_index = 0; axis_index < 15; axis_index++) {
+        float axis[3], length, distance, reach_a = 0.0f, reach_b = 0.0f;
+        float overlap;
+        int index;
+        if (axis_index < 3) memcpy(axis, first.axis[axis_index], sizeof(axis));
+        else if (axis_index < 6)
+            memcpy(axis, second.axis[axis_index-3], sizeof(axis));
+        else {
+            const float *u = first.axis[(axis_index-6)/3];
+            const float *v = second.axis[(axis_index-6)%3];
+            axis[0] = u[1]*v[2]-u[2]*v[1];
+            axis[1] = u[2]*v[0]-u[0]*v[2];
+            axis[2] = u[0]*v[1]-u[1]*v[0];
+        }
+        length = sqrtf(axis[0]*axis[0]+axis[1]*axis[1]+axis[2]*axis[2]);
+        if (length < 0.00001f) continue;
+        for (index = 0; index < 3; index++) axis[index] /= length;
+        distance = delta[0]*axis[0]+delta[1]*axis[1]+delta[2]*axis[2];
+        for (index = 0; index < 3; index++) {
+            const float *u = first.axis[index], *v = second.axis[index];
+            reach_a += first.half[index]*fabsf(u[0]*axis[0]+u[1]*axis[1]+u[2]*axis[2]);
+            reach_b += second.half[index]*fabsf(v[0]*axis[0]+v[1]*axis[1]+v[2]*axis[2]);
+        }
+        overlap = reach_a + reach_b - fabsf(distance);
+        if (overlap <= 0.0f) return 0;
+        if (overlap < best) {
+            best = overlap;
+            for (index = 0; index < 3; index++)
+                normal[index] = distance >= 0.0f ? axis[index] : -axis[index];
+        }
+    }
+    *penetration = best;
+    return isfinite(best);
 }
 
 static void resolve_collision(ZSharpGameObject *dynamic,
@@ -1681,6 +2475,352 @@ static void resolve_collision(ZSharpGameObject *dynamic,
     }
 }
 
+static float collision_clamp(float value, float low, float high) {
+    return fminf(fmaxf(value, low), high);
+}
+
+static int round_collider(const ZSharpGameObject *object) {
+    return object->collider == ZGAME_COLLIDER_SPHERE ||
+           object->collider == ZGAME_COLLIDER_CAPSULE;
+}
+
+static float round_radius(const ZSharpGameObject *object) {
+    float x = fabsf(object->width * object->scale_x) * 0.5f;
+    float z = fabsf(object->depth * object->scale_z) * 0.5f;
+    float y = fabsf(object->height * object->scale_y) * 0.5f;
+    return object->collider == ZGAME_COLLIDER_SPHERE ?
+        fminf(x, fminf(y, z)) : fminf(x, z);
+}
+
+static float capsule_segment(const ZSharpGameObject *object, float radius) {
+    if (object->collider != ZGAME_COLLIDER_CAPSULE) return 0.0f;
+    return fmaxf(0.0f,
+        fabsf(object->height * object->scale_y) * 0.5f - radius);
+}
+
+static float round_box_distance(const float origin[3], const float direction[3],
+                                const CollisionBox *box, float height,
+                                float closest[3], float point[3]) {
+    float distance = 0.0f;
+    int axis;
+    for (axis = 0; axis < 3; axis++) {
+        point[axis] = origin[axis] + direction[axis] * height;
+        closest[axis] = collision_clamp(point[axis], -box->half[axis],
+                                        box->half[axis]);
+        distance += (point[axis]-closest[axis]) *
+                    (point[axis]-closest[axis]);
+    }
+    return distance;
+}
+
+static int round_box_contact(const ZSharpGameObject *a,
+                             const ZSharpGameObject *b,
+                             float normal[3], float *penetration) {
+    const ZSharpGameObject *round = round_collider(a) ? a : b;
+    const ZSharpGameObject *other = round == a ? b : a;
+    CollisionBox box;
+    float radius = round_radius(round);
+    float segment = capsule_segment(round, radius);
+    float origin[3], direction[3], closest[3], point[3], local_normal[3];
+    float low = -segment, high = segment, distance, length;
+    int axis, iteration;
+    if (radius <= 0.0f) return 0;
+    collision_box(other, &box);
+    for (axis = 0; axis < 3; axis++) {
+        origin[axis] = (round->x-box.center[0])*box.axis[axis][0] +
+                       (round->y-box.center[1])*box.axis[axis][1] +
+                       (round->z-box.center[2])*box.axis[axis][2];
+        direction[axis] = box.axis[axis][1];
+    }
+    /* Squared distance from a line segment to a convex box is convex. */
+    for (iteration = 0; iteration < 28; iteration++) {
+        float first = low + (high-low)/3.0f;
+        float second = high - (high-low)/3.0f;
+        float unused_a[3], unused_b[3];
+        float d1 = round_box_distance(origin, direction, &box, first,
+                                      unused_a, unused_b);
+        float d2 = round_box_distance(origin, direction, &box, second,
+                                      unused_a, unused_b);
+        if (d1 < d2) high = second;
+        else low = first;
+    }
+    distance = sqrtf(round_box_distance(origin, direction, &box,
+                                        (low+high)*0.5f, closest, point));
+    if (distance >= radius) return 0;
+    if (distance > 0.00001f) {
+        for (axis = 0; axis < 3; axis++)
+            local_normal[axis] = (point[axis]-closest[axis])/distance;
+        *penetration = radius-distance;
+    } else {
+        int nearest = 0;
+        float exit = INFINITY;
+        for (axis = 0; axis < 3; axis++) {
+            float candidate = box.half[axis]-fabsf(point[axis]);
+            if (candidate < exit) { exit = candidate; nearest = axis; }
+        }
+        local_normal[0] = local_normal[1] = local_normal[2] = 0.0f;
+        local_normal[nearest] = point[nearest] >= 0.0f ? 1.0f : -1.0f;
+        *penetration = radius+exit;
+    }
+    for (axis = 0; axis < 3; axis++)
+        normal[axis] = local_normal[0]*box.axis[0][axis] +
+                       local_normal[1]*box.axis[1][axis] +
+                       local_normal[2]*box.axis[2][axis];
+    length = sqrtf(normal[0]*normal[0] + normal[1]*normal[1] +
+                   normal[2]*normal[2]);
+    if (length < 0.00001f) return 0;
+    for (axis = 0; axis < 3; axis++)
+        normal[axis] = (round == a ? normal[axis] : -normal[axis])/length;
+    return 1;
+}
+
+/* Contact normal points from b into a. Boxes retain the existing AABB
+ * resolution path; round shapes use true radial distance to avoid false
+ * contacts at box corners. */
+static int round_contact(const ZSharpGameObject *a,
+                         const ZSharpGameObject *b,
+                         float normal[3], float *penetration) {
+    const ZSharpGameObject *round = round_collider(a) ? a : b;
+    const ZSharpGameObject *other = round == a ? b : a;
+    float radius = round_radius(round);
+    float segment = capsule_segment(round, radius);
+    float dx, dy, dz, distance;
+    if (radius <= 0.0f) return 0;
+    if (round_collider(other)) {
+        float other_radius = round_radius(other);
+        float other_segment = capsule_segment(other, other_radius);
+        float first_y = collision_clamp(other->y, round->y - segment,
+                                         round->y + segment);
+        float second_y = collision_clamp(first_y,
+                                          other->y - other_segment,
+                                          other->y + other_segment);
+        first_y = collision_clamp(second_y, round->y - segment,
+                                   round->y + segment);
+        dx = round->x - other->x;
+        dy = first_y - second_y;
+        dz = round->z - other->z;
+        radius += other_radius;
+    } else {
+        float half_x = fabsf(other->width * other->scale_x) * 0.5f;
+        float half_y = fabsf(other->height * other->scale_y) * 0.5f;
+        float half_z = fabsf(other->depth * other->scale_z) * 0.5f;
+        float sample_y = collision_clamp(other->y,
+                                          round->y - segment,
+                                          round->y + segment);
+        dx = round->x - collision_clamp(round->x,
+                                         other->x - half_x,
+                                         other->x + half_x);
+        dy = sample_y - collision_clamp(sample_y,
+                                         other->y - half_y,
+                                         other->y + half_y);
+        dz = round->z - collision_clamp(round->z,
+                                         other->z - half_z,
+                                         other->z + half_z);
+        if (dx == 0.0f && dy == 0.0f && dz == 0.0f) {
+            float exits[3] = {
+                half_x - fabsf(round->x - other->x),
+                half_y + segment - fabsf(round->y - other->y),
+                half_z - fabsf(round->z - other->z)
+            };
+            int axis = exits[0] < exits[1] ? 0 : 1;
+            if (exits[2] < exits[axis]) axis = 2;
+            normal[0] = normal[1] = normal[2] = 0.0f;
+            normal[axis] = (axis == 0 ? round->x >= other->x :
+                            axis == 1 ? round->y >= other->y :
+                                        round->z >= other->z) ? 1.0f : -1.0f;
+            if (round != a) normal[axis] = -normal[axis];
+            *penetration = fmaxf(0.0f, exits[axis]) + radius;
+            return *penetration > 0.0f;
+        }
+    }
+    distance = sqrtf(dx*dx + dy*dy + dz*dz);
+    if (distance >= radius) return 0;
+    if (distance < 0.00001f) {
+        normal[0] = normal[2] = 0.0f;
+        normal[1] = round->y >= other->y ? 1.0f : -1.0f;
+    } else {
+        normal[0] = dx / distance;
+        normal[1] = dy / distance;
+        normal[2] = dz / distance;
+    }
+    if (round != a) {
+        normal[0] = -normal[0];
+        normal[1] = -normal[1];
+        normal[2] = -normal[2];
+    }
+    *penetration = radius - distance;
+    return 1;
+}
+
+static void resolve_round_collision(ZSharpGameObject *dynamic,
+                                    const ZSharpGameObject *other,
+                                    const float normal[3], float penetration) {
+    float motion = dynamic->velocity_x * normal[0] +
+                   dynamic->velocity_y * normal[1] +
+                   dynamic->velocity_z * normal[2];
+    dynamic->x += normal[0] * penetration;
+    dynamic->y += normal[1] * penetration;
+    dynamic->z += normal[2] * penetration;
+    if (normal[1] > 0.5f && dynamic->velocity_y <= 0.0f) {
+        dynamic->grounded = 1;
+        dynamic->velocity_x *= 1.0f - collision_clamp(dynamic->friction, 0, 1);
+        dynamic->velocity_z *= 1.0f - collision_clamp(dynamic->friction, 0, 1);
+        dynamic->x += other->motion_x;
+        dynamic->z += other->motion_z;
+    }
+    if (motion < 0.0f) {
+        float impulse = (1.0f + dynamic->restitution) * motion;
+        dynamic->velocity_x -= impulse * normal[0];
+        dynamic->velocity_y -= impulse * normal[1];
+        dynamic->velocity_z -= impulse * normal[2];
+    }
+}
+
+#ifndef ZSHARP_COLLISION_TEST
+static void transform_collision_point(const ZSharpGameObject *object,
+                                      const ZSharpMeshCollision *mesh,
+                                      const float input[3], float output[3]) {
+    float angle, sine, cosine, first, second;
+    output[0] = input[0] * object->width * object->scale_x /
+                mesh->source_extent[0];
+    output[1] = input[1] * object->height * object->scale_y /
+                mesh->source_extent[1];
+    output[2] = input[2] * object->depth * object->scale_z /
+                mesh->source_extent[2];
+    angle = object->rotation_x * 0.017453292519943295f;
+    sine = sinf(angle); cosine = cosf(angle);
+    first = output[1]*cosine-output[2]*sine;
+    second = output[1]*sine+output[2]*cosine;
+    output[1] = first; output[2] = second;
+    angle = (object->rotation_y + object->rotation) * 0.017453292519943295f;
+    sine = sinf(angle); cosine = cosf(angle);
+    first = output[0]*cosine+output[2]*sine;
+    second = -output[0]*sine+output[2]*cosine;
+    output[0] = first; output[2] = second;
+    angle = object->rotation_z * 0.017453292519943295f;
+    sine = sinf(angle); cosine = cosf(angle);
+    first = output[0]*cosine-output[1]*sine;
+    second = output[0]*sine+output[1]*cosine;
+    output[0] = first + object->x;
+    output[1] = second + object->y;
+    output[2] += object->z;
+}
+
+static float collision_dot(const float a[3], const float b[3]) {
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+static void closest_triangle_point(const float p[3],
+                                    const float a[3], const float b[3],
+                                    const float c[3], float result[3]) {
+    float ab[3], ac[3], ap[3], bp[3], cp[3], bc[3];
+    float d1, d2, d3, d4, d5, d6, va, vb, vc, amount;
+    int axis;
+    for (axis = 0; axis < 3; axis++) {
+        ab[axis] = b[axis]-a[axis];
+        ac[axis] = c[axis]-a[axis];
+        ap[axis] = p[axis]-a[axis];
+    }
+    d1 = collision_dot(ab, ap); d2 = collision_dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) { memcpy(result,a,3*sizeof(float)); return; }
+    for (axis = 0; axis < 3; axis++) bp[axis] = p[axis]-b[axis];
+    d3 = collision_dot(ab,bp); d4 = collision_dot(ac,bp);
+    if (d3 >= 0.0f && d4 <= d3) { memcpy(result,b,3*sizeof(float)); return; }
+    vc = d1*d4-d3*d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        amount = d1/(d1-d3);
+        for (axis=0;axis<3;axis++) result[axis]=a[axis]+amount*ab[axis];
+        return;
+    }
+    for (axis = 0; axis < 3; axis++) cp[axis] = p[axis]-c[axis];
+    d5 = collision_dot(ab,cp); d6 = collision_dot(ac,cp);
+    if (d6 >= 0.0f && d5 <= d6) { memcpy(result,c,3*sizeof(float)); return; }
+    vb = d5*d2-d1*d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        amount = d2/(d2-d6);
+        for (axis=0;axis<3;axis++) result[axis]=a[axis]+amount*ac[axis];
+        return;
+    }
+    va = d3*d6-d5*d4;
+    if (va <= 0.0f && d4-d3 >= 0.0f && d5-d6 >= 0.0f) {
+        amount = (d4-d3)/((d4-d3)+(d5-d6));
+        for (axis=0;axis<3;axis++) {
+            bc[axis] = c[axis]-b[axis];
+            result[axis]=b[axis]+amount*bc[axis];
+        }
+        return;
+    }
+    {
+        float denominator = va+vb+vc;
+        if (fabsf(denominator) < 0.000001f) {
+            memcpy(result,a,3*sizeof(float)); return;
+        }
+        amount = 1.0f/denominator;
+        for (axis=0;axis<3;axis++)
+            result[axis]=a[axis]+ab[axis]*vb*amount+ac[axis]*vc*amount;
+    }
+}
+
+static int mesh_contact(ZSharpGameModel *model,
+                        const ZSharpGameObject *dynamic,
+                        const ZSharpGameObject *static_mesh,
+                        float normal[3], float *penetration) {
+    ZSharpMeshCollision *cache = collision_mesh(model, static_mesh->mesh_path);
+    float radius = round_radius(dynamic);
+    float segment = capsule_segment(dynamic, radius);
+    size_t index;
+    *penetration = 0.0f;
+    if (cache == NULL || radius <= 0.0f) return 0;
+    for (index = 0; index < cache->triangle_count; index++) {
+        const ZSharpCollisionTriangle *triangle = &cache->triangles[index];
+        float world[3][3];
+        int corner, sample;
+        for (corner = 0; corner < 3; corner++)
+            transform_collision_point(static_mesh, cache,
+                                       triangle->point[corner],
+                                       world[corner]);
+        for (sample = 0; sample < (segment > 0.0f ? 5 : 1); sample++) {
+            float center[3] = {dynamic->x,
+                dynamic->y + (segment > 0.0f ?
+                    segment * ((float)sample - 2.0f) * 0.5f : 0.0f),
+                dynamic->z};
+            float closest[3], delta[3], distance_squared = 0.0f;
+            float depth;
+            int axis;
+            closest_triangle_point(center, world[0], world[1], world[2],
+                                   closest);
+            for (axis=0;axis<3;axis++) {
+                delta[axis]=center[axis]-closest[axis];
+                distance_squared += delta[axis]*delta[axis];
+            }
+            if (distance_squared >= radius*radius) continue;
+            depth = radius-sqrtf(distance_squared);
+            if (depth <= *penetration) continue;
+            *penetration = depth;
+            if (distance_squared > 0.000001f) {
+                float inverse = 1.0f/sqrtf(distance_squared);
+                for (axis=0;axis<3;axis++) normal[axis]=delta[axis]*inverse;
+            } else {
+                float ab[3], ac[3], length;
+                for (axis=0;axis<3;axis++) {
+                    ab[axis]=world[1][axis]-world[0][axis];
+                    ac[axis]=world[2][axis]-world[0][axis];
+                }
+                normal[0]=ab[1]*ac[2]-ab[2]*ac[1];
+                normal[1]=ab[2]*ac[0]-ab[0]*ac[2];
+                normal[2]=ab[0]*ac[1]-ab[1]*ac[0];
+                length=sqrtf(collision_dot(normal,normal));
+                if (length < 0.00001f) {
+                    normal[0]=normal[2]=0.0f; normal[1]=1.0f;
+                } else for(axis=0;axis<3;axis++) normal[axis]/=length;
+                if (normal[1] < 0.0f) for(axis=0;axis<3;axis++)
+                    normal[axis]=-normal[axis];
+            }
+        }
+    }
+    return *penetration > 0.0f;
+}
+
 void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
     ZSharpGameScene *scene = find_scene(model, model->active_scene);
     float delta = (float)fmin(delta_seconds, 0.05);
@@ -1689,6 +2829,8 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
     if (scene == NULL) return;
     model->delta = delta;
     model->elapsed += delta;
+    zsharp_game_animation_update(model, delta);
+    zsharp_game_navigation_update(model, delta);
     for (index = 0; index < model->object_count; index++) {
         ZSharpGameObject *object = &model->objects[index];
         if (!same_active_scene(model, object)) continue;
@@ -1718,18 +2860,62 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
         for (other_index = index + 1; other_index < model->object_count;
              other_index++) {
             ZSharpGameObject *b = &model->objects[other_index];
-            float overlap_x, overlap_y, overlap_z;
+            float overlap_x = 0.0f, overlap_y = 0.0f, overlap_z = 0.0f;
+            float normal[3] = {0.0f, 0.0f, 0.0f}, penetration = 0.0f;
+            int rounded;
+            ZSharpGameObject *mesh_body, *round_body;
             if (!same_active_scene(model, b) ||
                 b->collider == ZGAME_COLLIDER_NONE ||
                 (a->body == ZGAME_BODY_STATIC &&
-                 b->body == ZGAME_BODY_STATIC) ||
-                !overlaps(a, b, &overlap_x, &overlap_y, &overlap_z)) continue;
+                 b->body == ZGAME_BODY_STATIC)) continue;
+            mesh_body = a->collider == ZGAME_COLLIDER_MESH ? a :
+                        b->collider == ZGAME_COLLIDER_MESH ? b : NULL;
+            round_body = mesh_body == a ? b : a;
+            if (mesh_body != NULL && round_collider(round_body)) {
+                if (!mesh_contact(model, round_body, mesh_body,
+                                  normal, &penetration)) continue;
+                a->colliding = b->colliding = 1;
+                if (!a->trigger && !b->trigger &&
+                    round_body->body == ZGAME_BODY_DYNAMIC)
+                    resolve_round_collision(round_body, mesh_body,
+                                            normal, penetration);
+                continue;
+            }
+            rounded = model->is_3d &&
+                (round_collider(a) || round_collider(b));
+            if (model->is_3d && rounded &&
+                (a->collider == ZGAME_COLLIDER_BOX ||
+                 b->collider == ZGAME_COLLIDER_BOX)) {
+                if (!round_box_contact(a, b, normal, &penetration)) continue;
+            } else if (model->is_3d && !rounded &&
+                a->collider == ZGAME_COLLIDER_BOX &&
+                b->collider == ZGAME_COLLIDER_BOX) {
+                if (!box_contact(a, b, normal, &penetration)) continue;
+            } else {
+                if (!overlaps(a, b, &overlap_x, &overlap_y, &overlap_z))
+                    continue;
+                if (rounded && !round_contact(a, b, normal, &penetration))
+                    continue;
+            }
             a->colliding = b->colliding = 1;
             if (a->trigger || b->trigger) continue;
-            if (a->body == ZGAME_BODY_DYNAMIC)
+            if (rounded || (model->is_3d &&
+                            a->collider == ZGAME_COLLIDER_BOX &&
+                            b->collider == ZGAME_COLLIDER_BOX)) {
+                float share = a->body == ZGAME_BODY_DYNAMIC &&
+                              b->body == ZGAME_BODY_DYNAMIC ? 0.5f : 1.0f;
+                if (a->body == ZGAME_BODY_DYNAMIC)
+                    resolve_round_collision(a, b, normal,
+                                            penetration * share);
+                if (b->body == ZGAME_BODY_DYNAMIC) {
+                    float opposite[3] = {-normal[0], -normal[1], -normal[2]};
+                    resolve_round_collision(b, a, opposite,
+                                            penetration * share);
+                }
+            } else if (a->body == ZGAME_BODY_DYNAMIC)
                 resolve_collision(a, b, model->is_3d,
                                   overlap_x, overlap_y, overlap_z);
-            if (b->body == ZGAME_BODY_DYNAMIC)
+            if (!rounded && b->body == ZGAME_BODY_DYNAMIC)
                 resolve_collision(b, a, model->is_3d,
                                   overlap_x, overlap_y, overlap_z);
         }
@@ -1789,10 +2975,14 @@ static int valid_object_field(const char *field) {
         "rotation","rotationX","rotationY","rotationZ",
         "scaleX","scaleY","scaleZ","velocityX","velocityY",
         "velocityZ","mass","gravityScale","restitution","friction",
+        "opacity","roughness","metallic","emissive",
+        "lightType","lightIntensity","lightRange","lightAngle",
+        "castShadows",
         "audioVolume","tone","texture",
         "toneDuration","layer","color",
         "visible","trigger","grounded","colliding","text","scene",
-        "audioLoop","audioAutoplay","audioOnCollision","audioPlay"
+        "audioLoop","audioAutoplay","audioOnCollision","audioPlay",
+        "navStatus"
     };
     size_t index;
     for (index = 0; index < sizeof(fields) / sizeof(fields[0]); index++)
@@ -1820,6 +3010,9 @@ int zsharp_game_model_owns_property(const ZSharpGameModel *model,
     char *parts[3];
     size_t count;
     ZSharpGameObject *object;
+    if (zsharp_game_animation_has_command(model, path)) return 1;
+    if (zsharp_game_navigation_has_command(model, path)) return 1;
+    if (zsharp_game_navigation_has_sight_query(model, path)) return 1;
     if (!split_path(path, storage, sizeof(storage), parts, &count)) return 0;
     if (count == 3 && strcmp(parts[0], "input") == 0 &&
         strcmp(parts[1], "key") == 0)
@@ -1857,7 +3050,19 @@ static int copy_property_text(const char *source, char **output, char *error,
 static int number_property(float value, char **output, char *error,
                            size_t error_size) {
     char buffer[64];
-    snprintf(buffer, sizeof(buffer), "%.9g", (double)value);
+    char *end;
+    if (!isfinite(value)) {
+        model_error(error, error_size, "game property has a non-finite number");
+        return 0;
+    }
+    /* Z# number expressions deliberately reject exponent notation.  Physics
+     * values near zero naturally make %g emit it, so return ordinary decimal
+     * notation and discard precision beyond the float's useful digits. */
+    snprintf(buffer, sizeof(buffer), "%.9f", (double)value);
+    end = buffer + strlen(buffer);
+    while (end > buffer && end[-1] == '0') *--end = '\0';
+    if (end > buffer && end[-1] == '.') *--end = '\0';
+    if (strcmp(buffer, "-0") == 0) strcpy(buffer, "0");
     return copy_property_text(buffer, output, error, error_size);
 }
 
@@ -1884,6 +3089,11 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
         return 0;
     }
     field = parts[count - 1];
+    if (zsharp_game_navigation_has_sight_query(model, path)) {
+        *type = ZWINDOW_READ_STATUS;
+        return status_property(zsharp_game_navigation_can_see(model, path),
+                               text, error, error_size);
+    }
     if (count == 3 && strcmp(parts[0], "input") == 0 &&
         strcmp(parts[1], "key") == 0) {
         int key = game_key_from_name(field);
@@ -1946,6 +3156,12 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
             text, error, error_size);
     }
     object = find_object(model, count == 2 ? parts[0] : parts[1]);
+    if (strcmp(field, "navStatus") == 0) {
+        *type = ZWINDOW_READ_TEXT;
+        return copy_property_text(object->nav_reachable ?
+                                  (object->nav_moving ? "moving" : "reachable") :
+                                  "notReachable", text, error, error_size);
+    }
 #define GET_NUMBER(name, member)                                               \
     if (strcmp(field, name) == 0) {                                            \
         *type = ZWINDOW_READ_NUMBER;                                           \
@@ -1971,6 +3187,9 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
     GET_NUMBER("gravityScale", gravity_scale)
     GET_NUMBER("restitution", restitution)
     GET_NUMBER("friction", friction)
+    GET_NUMBER("lightIntensity", light_intensity)
+    GET_NUMBER("lightRange", light_range)
+    GET_NUMBER("lightAngle", light_angle)
     GET_NUMBER("audioVolume", audio_volume)
     GET_NUMBER("tone", tone_frequency)
     GET_NUMBER("toneDuration", tone_duration)
@@ -1978,6 +3197,24 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
     if (strcmp(field, "layer") == 0) {
         *type = ZWINDOW_READ_NUMBER;
         return number_property((float)object->layer, text, error, error_size);
+    }
+    if (strcmp(field, "opacity") == 0 ||
+        strcmp(field, "roughness") == 0 ||
+        strcmp(field, "metallic") == 0 ||
+        strcmp(field, "emissive") == 0) {
+        float surface = strcmp(field, "opacity") == 0 ? object->opacity :
+                        strcmp(field, "roughness") == 0 ? object->roughness :
+                        strcmp(field, "metallic") == 0 ? object->metallic :
+                                                       object->emissive;
+        *type = ZWINDOW_READ_NUMBER;
+        return number_property(surface * 100.0f, text, error, error_size);
+    }
+    if (strcmp(field, "lightType") == 0) {
+        *type = ZWINDOW_READ_TEXT;
+        return copy_property_text(object->light_type == 2 ? "spot" :
+                                  object->light_type == 3 ? "directional" :
+                                                             "point",
+                                  text, error, error_size);
     }
     if (strcmp(field, "color") == 0) {
         char color[8];
@@ -2005,6 +3242,8 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
         strcmp(field, "audioLoop") == 0 ? object->audio_loop :
         strcmp(field, "audioAutoplay") == 0 ? object->audio_autoplay :
         strcmp(field, "audioOnCollision") == 0 ? object->audio_on_collision
+                                              :
+        strcmp(field, "castShadows") == 0 ? object->cast_shadows
                                                 : object->audio_started,
         text, error, error_size);
 }
@@ -2031,6 +3270,16 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
     float number;
     int status;
     (void)value_type;
+    if (zsharp_game_animation_has_command(model, path))
+        return zsharp_game_animation_command(model, path, value, error,
+                                             error_size);
+    if (zsharp_game_navigation_has_command(model, path))
+        return zsharp_game_navigation_command(model, path, value, error,
+                                              error_size);
+    if (zsharp_game_navigation_has_sight_query(model, path)) {
+        model_error(error, error_size, "AI sight queries are read-only");
+        return 0;
+    }
     if (!zsharp_game_model_owns_property(model, path) ||
         !split_path(path, storage, sizeof(storage), parts, &count)) {
         if (error != NULL && error_size != 0)
@@ -2038,6 +3287,10 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
         return 0;
     }
     field = parts[count - 1];
+    if (strcmp(field, "navStatus") == 0) {
+        model_error(error, error_size, "AI navStatus is read-only");
+        return 0;
+    }
     if (count == 2 && strcmp(parts[0], "Game") == 0 &&
         strcmp(field, "scene") == 0) {
         size_t index;
@@ -2128,6 +3381,19 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
         }
         return replace_text(&object->asset_path, value);
     }
+    if (strcmp(field, "lightType") == 0) {
+        if (object->shape != ZGAME_SHAPE_LIGHT ||
+            (strcmp(value, "point") != 0 &&
+             strcmp(value, "spot") != 0 &&
+             strcmp(value, "directional") != 0)) {
+            model_error(error, error_size,
+                        "lightType requires point, spot, or directional on a light");
+            return 0;
+        }
+        object->light_type = strcmp(value, "point") == 0 ? 1 :
+                             strcmp(value, "spot") == 0 ? 2 : 3;
+        return 1;
+    }
     if (strcmp(field, "scene") == 0) {
         if (find_scene(model, value) == NULL) {
             model_error(error, error_size, "unknown game scene");
@@ -2151,6 +3417,7 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
         strcmp(field, "audioLoop") == 0 ||
         strcmp(field, "audioAutoplay") == 0 ||
         strcmp(field, "audioOnCollision") == 0 ||
+        strcmp(field, "castShadows") == 0 ||
         strcmp(field, "audioPlay") == 0) {
         if (strcmp(value, "alive") == 0) status = 1;
         else if (strcmp(value, "dead") == 0) status = 0;
@@ -2165,6 +3432,13 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
             object->audio_autoplay = status;
         else if (strcmp(field, "audioOnCollision") == 0)
             object->audio_on_collision = status;
+        else if (strcmp(field, "castShadows") == 0) {
+            if (object->shape != ZGAME_SHAPE_LIGHT) {
+                model_error(error, error_size, "castShadows requires a light");
+                return 0;
+            }
+            object->cast_shadows = status;
+        }
         else object->audio_started = status;
         return 1;
     }
@@ -2175,6 +3449,39 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
     if (!parse_runtime_number(value, &number)) {
         model_error(error, error_size, "game property requires a number");
         return 0;
+    }
+    if (strcmp(field, "lightIntensity") == 0 ||
+        strcmp(field, "lightRange") == 0 ||
+        strcmp(field, "lightAngle") == 0) {
+        if (object->shape != ZGAME_SHAPE_LIGHT || number < 0.0f ||
+            (strcmp(field, "lightAngle") == 0 && number > 180.0f)) {
+            model_error(error, error_size,
+                        "light property requires a valid number on a light");
+            return 0;
+        }
+        if (strcmp(field, "lightIntensity") == 0)
+            object->light_intensity = number;
+        else if (strcmp(field, "lightRange") == 0)
+            object->light_range = number;
+        else object->light_angle = number;
+        return 1;
+    }
+    if (strcmp(field, "opacity") == 0 ||
+        strcmp(field, "roughness") == 0 ||
+        strcmp(field, "metallic") == 0 ||
+        strcmp(field, "emissive") == 0) {
+        if (number < 0.0f || number > 100.0f) {
+            model_error(error, error_size,
+                        "surface property must be between 0 and 100");
+            return 0;
+        }
+        if (strcmp(field, "opacity") == 0) object->opacity = number / 100.0f;
+        else if (strcmp(field, "roughness") == 0)
+            object->roughness = number / 100.0f;
+        else if (strcmp(field, "metallic") == 0)
+            object->metallic = number / 100.0f;
+        else object->emissive = number / 100.0f;
+        return 1;
     }
 #define SET_NUMBER(name, member)                                               \
     if (strcmp(field, name) == 0) { object->member = number; return 1; }
@@ -2225,6 +3532,7 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
         ZSharpGameRenderObject *target;
         if (!same_active_scene(model, source)) continue;
         target = &(*objects)[count++];
+        target->render_id = count;
         target->shape = source->shape;
         target->x = source->x;
         target->y = source->y;
@@ -2240,10 +3548,25 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
         target->scale_y = source->scale_y;
         target->scale_z = source->scale_z;
         target->color = source->color;
+        target->opacity = source->opacity;
+        target->roughness = source->roughness;
+        target->emissive = source->emissive;
+        target->metallic = source->metallic;
+        target->light_type = source->light_type;
+        target->light_intensity = source->light_intensity;
+        target->light_range = source->light_range;
+        target->light_angle = source->light_angle;
+        target->cast_shadows = source->cast_shadows;
         target->visible = source->visible;
         target->layer = source->layer;
         target->text = source->text;
         target->asset_path = source->asset_path;
+        target->mesh_path = source->mesh_path;
+        target->material_names = (const char *const *)source->material_names;
+        target->material_textures = (const char *const *)source->material_textures;
+        target->material_count = source->material_count;
+        target->part_poses = source->part_poses;
+        target->part_pose_count = source->part_pose_count;
     }
     frame->is_3d = model->is_3d;
     frame->background = scene == NULL ? 0x08080bu : scene->background;
@@ -2258,3 +3581,4 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
     frame->objects = *objects;
     frame->object_count = count;
 }
+#endif

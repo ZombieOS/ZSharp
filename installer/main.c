@@ -16,7 +16,39 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <shellapi.h>
+#ifdef ZSHARP_INSTALLER_GUI
+#include <commctrl.h>
+#define INSTALLER_GUI_STATUS (WM_APP + 1)
+#define INSTALLER_GUI_DONE (WM_APP + 2)
+static HWND installer_gui_window;
+static HWND installer_gui_status;
+static HWND installer_gui_progress;
+static HWND installer_gui_action;
+static char installer_gui_error[512];
+static char installer_gui_version[64];
+static int installer_gui_running;
+static int installer_gui_finished;
+static void installer_gui_step(const char *message) {
+    if (installer_gui_window != NULL) {
+        char *copy = _strdup(message);
+        if (copy != NULL && !PostMessageA(installer_gui_window,
+                                           INSTALLER_GUI_STATUS, 0,
+                                           (LPARAM)copy)) free(copy);
+    }
+}
 #else
+#define installer_gui_step(message) ((void)0)
+#endif
+
+#if defined(_WIN32) && !defined(ZSHARP_INSTALLER_GUI)
+static int installer_core_main(int argc, char **argv);
+int main(int argc, char **argv) {
+    return installer_core_main(argc, argv);
+}
+#endif
+#else
+#define installer_gui_step(message) ((void)0)
+static char installer_desktop_error[512];
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/file.h>
@@ -1112,7 +1144,8 @@ static int run_runtime_command(const char *runtime, const char *argument1,
     memset(&process, 0, sizeof(process));
     startup.cb = sizeof(startup);
     SetEnvironmentVariableW(L"ZSHARP_SKIP_UPDATE_CHECK", L"1");
-    if (CreateProcessW(wide_runtime, command, NULL, NULL, FALSE, 0, NULL, NULL,
+    if (CreateProcessW(wide_runtime, command, NULL, NULL, FALSE,
+                       CREATE_NO_WINDOW, NULL, NULL,
                        &startup, &process)) {
         WaitForSingleObject(process.hProcess, INFINITE);
         GetExitCodeProcess(process.hProcess, &code);
@@ -1226,7 +1259,7 @@ static void wait_on_windows(int automatic) {
 #endif
 }
 
-int main(int argc, char **argv) {
+static int installer_core_main(int argc, char **argv) {
     const char *platform = platform_id();
     const char *operating_system = operating_system_id();
     const char *manifest_url = getenv("ZSHARP_INSTALLER_MANIFEST_URL");
@@ -1355,6 +1388,7 @@ int main(int argc, char **argv) {
 #endif
     }
     if (!quiet) printf("Z# ZVM installer for %s\n", platform);
+    installer_gui_step("Checking the latest Z# release...");
     if (manifest_file == NULL) {
 #ifdef _WIN32
         snprintf(manifest_temp, sizeof(manifest_temp), "%s\\zsharp-manifest-%lu.tmp",
@@ -1488,6 +1522,7 @@ int main(int argc, char **argv) {
         goto done;
     }
     if (!quiet) puts("Downloading the verified ZVM archive...");
+    installer_gui_step("Downloading the Z# runtime...");
     if (artifact_override != NULL && artifact_override[0] != '\0') {
         if (!copy_file(artifact_override, archive, INSTALLER_ARCHIVE_LIMIT,
                        error, sizeof(error))) goto done;
@@ -1504,6 +1539,7 @@ int main(int argc, char **argv) {
         strcpy(error, "the downloaded ZVM archive failed SHA-256 verification");
         goto done;
     }
+    installer_gui_step("Verifying the downloaded files...");
     if (!extract_stored_zip_member(archive, release.runtime_path,
                                    runtime_temporary,
                                    release.runtime_size, error,
@@ -1569,6 +1605,7 @@ int main(int argc, char **argv) {
 #endif
     }
     wait_for_process(wait_process_id);
+    installer_gui_step("Installing Z# and setting up the Hub...");
     if (!same_path(self, installed_installer) &&
         !replace_file(installer_temporary, installed_installer,
                       installer_backup, "Z# updater", error,
@@ -1637,6 +1674,19 @@ int main(int argc, char **argv) {
     }
     result = 0;
 done:
+#ifdef ZSHARP_INSTALLER_GUI
+    if (installer_gui_running) {
+        snprintf(installer_gui_error, sizeof(installer_gui_error), "%s", error);
+        if (result == 0 && release.update_available && release.version != NULL)
+            snprintf(installer_gui_version, sizeof(installer_gui_version),
+                     "%s", release.version);
+    }
+#endif
+#ifndef _WIN32
+    if (getenv("ZSHARP_INSTALLER_DESKTOP_GUI") != NULL)
+        snprintf(installer_desktop_error, sizeof(installer_desktop_error),
+                 "%s", error);
+#endif
     if (result != 0 && error[0] != '\0' && !quiet)
         fprintf(stderr, "installer error: %s\n", error);
     if (archive != NULL) remove(archive);
@@ -1651,6 +1701,7 @@ done:
     if (update_lock >= 0) close(update_lock);
     free(update_lock_path);
 #endif
+
     release_free(&release);
     free(self);
     free(installer_temporary);
@@ -1672,3 +1723,254 @@ done:
     wait_on_windows(automatic);
     return result;
 }
+
+#ifndef _WIN32
+static int installer_dialog(const char *kind, const char *message) {
+    pid_t child = fork();
+    int status;
+    if (child < 0) return -1;
+    if (child == 0) {
+#if defined(__APPLE__)
+        char script[1024];
+        char escaped[768];
+        size_t source_index, target_index = 0;
+        const char *button = strcmp(kind, "question") == 0 ?
+            "buttons {\"Cancel\", \"Install\"} default button \"Install\"" :
+            "buttons {\"OK\"} default button \"OK\"";
+        for (source_index = 0; message[source_index] != '\0' &&
+             target_index + 3 < sizeof(escaped); source_index++) {
+            char character = message[source_index];
+            if (character == '\\' || character == '"')
+                escaped[target_index++] = '\\';
+            escaped[target_index++] = character == '\n' ? ' ' : character;
+        }
+        escaped[target_index] = '\0';
+        snprintf(script, sizeof(script),
+                 "display dialog \"%s\" with title \"Z# Setup\" %s",
+                 escaped, button);
+        execl("/usr/bin/osascript", "osascript", "-e", script,
+              (char *)NULL);
+#else
+        const char *argument = strcmp(kind, "question") == 0 ?
+            "--question" : strcmp(kind, "error") == 0 ?
+            "--error" : "--info";
+        char text[1024];
+        snprintf(text, sizeof(text), "--text=%s", message);
+        execl("/usr/bin/zenity", "zenity", argument,
+              "--title=Z# Setup", text, (char *)NULL);
+#endif
+        _exit(127);
+    }
+    if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+}
+
+int main(int argc, char **argv) {
+    char *arguments[] = {"zsharp-installer", "--yes", "--quiet"};
+    int response, result;
+#if !defined(__APPLE__)
+    pid_t progress = -1;
+#endif
+    if (argc > 1) return installer_core_main(argc, argv);
+#if !defined(__APPLE__)
+    if ((getenv("DISPLAY") == NULL && getenv("WAYLAND_DISPLAY") == NULL) ||
+        access("/usr/bin/zenity", X_OK) != 0)
+        return installer_core_main(argc, argv);
+#endif
+    response = installer_dialog("question",
+        "Install the latest verified Z# Virtual Machine and Hub?");
+    if (response == 127) return installer_core_main(argc, argv);
+    if (response != 0) return response == 1 ? 0 : 1;
+    setenv("ZSHARP_INSTALLER_DESKTOP_GUI", "1", 1);
+#if !defined(__APPLE__)
+    progress = fork();
+    if (progress == 0) {
+        execl("/usr/bin/zenity", "zenity", "--progress", "--pulsate",
+              "--no-cancel", "--title=Z# Setup",
+              "--text=Downloading and installing Z#...", (char *)NULL);
+        _exit(127);
+    }
+#else
+    show_result_notification("Z# Setup", "Downloading and installing Z#...");
+#endif
+    result = installer_core_main(3, arguments);
+#if !defined(__APPLE__)
+    if (progress > 0) {
+        kill(progress, SIGTERM);
+        waitpid(progress, NULL, 0);
+    }
+#endif
+    if (result == 0)
+        installer_dialog("info", "Z# is installed. The Hub is ready.");
+    else {
+        char message[768];
+        snprintf(message, sizeof(message),
+                 "Installation failed: %.650s",
+                 installer_desktop_error[0] ? installer_desktop_error :
+                 "see the installer log");
+        installer_dialog("error", message);
+    }
+    return result;
+}
+#endif
+
+#ifdef ZSHARP_INSTALLER_GUI
+static DWORD WINAPI installer_gui_worker(LPVOID ignored) {
+    char *arguments[] = {"zsharp-installer", "--yes", "--quiet"};
+    int result;
+    (void)ignored;
+    result = installer_core_main(3, arguments);
+    PostMessageA(installer_gui_window, INSTALLER_GUI_DONE,
+                 (WPARAM)result, 0);
+    return 0;
+}
+
+static LRESULT CALLBACK installer_gui_proc(HWND window, UINT message,
+                                            WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_CREATE: {
+        HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HWND title = CreateWindowExA(0, "STATIC", "Install Z#",
+            WS_CHILD | WS_VISIBLE, 24, 22, 490, 32, window, NULL, NULL, NULL);
+        HWND description = CreateWindowExA(0, "STATIC",
+            "Install the Z# Virtual Machine and Hub for this Windows user. "
+            "The installer downloads and verifies the latest release.",
+            WS_CHILD | WS_VISIBLE | SS_LEFT, 24, 65, 490, 56,
+            window, NULL, NULL, NULL);
+        installer_gui_status = CreateWindowExA(0, "STATIC", "Ready to install.",
+            WS_CHILD | WS_VISIBLE, 24, 135, 490, 26,
+            window, NULL, NULL, NULL);
+        installer_gui_progress = CreateWindowExA(0, PROGRESS_CLASSA, "",
+            WS_CHILD | WS_VISIBLE, 24, 165, 490, 22,
+            window, NULL, NULL, NULL);
+        installer_gui_action = CreateWindowExA(0, "BUTTON", "Install Z#",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            390, 210, 124, 35, window, (HMENU)(INT_PTR)1, NULL, NULL);
+        SendMessageA(title, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(description, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(installer_gui_status, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(installer_gui_action, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageA(installer_gui_progress, PBM_SETRANGE, 0,
+                     MAKELPARAM(0, 100));
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wparam) == 1) {
+            if (installer_gui_finished) { DestroyWindow(window); return 0; }
+            if (!installer_gui_running) {
+                HANDLE worker;
+                installer_gui_running = 1;
+                installer_gui_error[0] = '\0';
+                EnableWindow(installer_gui_action, FALSE);
+                SetWindowTextA(installer_gui_status,
+                               "Checking the latest Z# release...");
+                SetTimer(window, 1, 85, NULL);
+                worker = CreateThread(NULL, 0, installer_gui_worker,
+                                      NULL, 0, NULL);
+                if (worker == NULL) {
+                    KillTimer(window, 1);
+                    installer_gui_running = 0;
+                    EnableWindow(installer_gui_action, TRUE);
+                    SetWindowTextA(installer_gui_status,
+                                   "Could not start the installer.");
+                } else CloseHandle(worker);
+            }
+        }
+        return 0;
+    case WM_TIMER: {
+        LRESULT position = SendMessageA(installer_gui_progress,
+                                         PBM_GETPOS, 0, 0);
+        SendMessageA(installer_gui_progress, PBM_SETPOS,
+                     (WPARAM)((position + 2) % 95), 0);
+        return 0;
+    }
+    case INSTALLER_GUI_STATUS:
+        SetWindowTextA(installer_gui_status, (const char *)lparam);
+        free((void *)lparam);
+        return 0;
+    case INSTALLER_GUI_DONE: {
+        char summary[256];
+        installer_gui_running = 0;
+        installer_gui_finished = 1;
+        KillTimer(window, 1);
+        EnableWindow(installer_gui_action, TRUE);
+        SetWindowTextA(installer_gui_action, "Finish");
+        if (wparam == 0) {
+            SendMessageA(installer_gui_progress, PBM_SETPOS, 100, 0);
+            if (installer_gui_version[0] != '\0')
+                snprintf(summary, sizeof(summary),
+                         "Z# %s is installed. The Hub is ready.",
+                         installer_gui_version);
+            else snprintf(summary, sizeof(summary),
+                          "Z# is already up to date.");
+        } else {
+            SendMessageA(installer_gui_progress, PBM_SETPOS, 0, 0);
+            snprintf(summary, sizeof(summary), "Installation failed: %.220s",
+                     installer_gui_error[0] ? installer_gui_error :
+                     "see the installer log");
+        }
+        SetWindowTextA(installer_gui_status, summary);
+        return 0;
+    }
+    case WM_CLOSE:
+        if (!installer_gui_running) DestroyWindow(window);
+        return 0;
+    case WM_DESTROY:
+        installer_gui_window = NULL;
+        PostQuitMessage(0);
+        return 0;
+    default:
+        return DefWindowProcA(window, message, wparam, lparam);
+    }
+}
+
+int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous,
+                   LPSTR command_line, int show) {
+    int argc, index, result;
+    LPWSTR *wide_arguments = CommandLineToArgvW(GetCommandLineW(), &argc);
+    char **arguments;
+    WNDCLASSA window_class = {0};
+    INITCOMMONCONTROLSEX controls = {sizeof(controls), ICC_PROGRESS_CLASS};
+    MSG message;
+    (void)previous; (void)command_line;
+    if (wide_arguments == NULL) return 2;
+    arguments = (char **)calloc((size_t)argc + 1, sizeof(*arguments));
+    if (arguments == NULL) { LocalFree(wide_arguments); return 2; }
+    for (index = 0; index < argc; index++) {
+        int length = WideCharToMultiByte(CP_UTF8, 0, wide_arguments[index],
+                                        -1, NULL, 0, NULL, NULL);
+        if (length <= 0 || (arguments[index] = (char *)malloc(length)) == NULL)
+            break;
+        WideCharToMultiByte(CP_UTF8, 0, wide_arguments[index], -1,
+                            arguments[index], length, NULL, NULL);
+    }
+    LocalFree(wide_arguments);
+    if (index != argc) { result = 2; goto cleanup; }
+    if (argc > 1) {
+        result = installer_core_main(argc, arguments);
+        goto cleanup;
+    }
+    InitCommonControlsEx(&controls);
+    window_class.lpfnWndProc = installer_gui_proc;
+    window_class.hInstance = instance;
+    window_class.hCursor = LoadCursorA(NULL, IDC_ARROW);
+    window_class.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    window_class.lpszClassName = "ZSharpSetupWindow";
+    if (!RegisterClassA(&window_class)) { result = 2; goto cleanup; }
+    installer_gui_window = CreateWindowExA(0, window_class.lpszClassName,
+        "Z# Setup", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        CW_USEDEFAULT, CW_USEDEFAULT, 560, 300, NULL, NULL, instance, NULL);
+    if (installer_gui_window == NULL) { result = 2; goto cleanup; }
+    ShowWindow(installer_gui_window, show);
+    UpdateWindow(installer_gui_window);
+    while (GetMessageA(&message, NULL, 0, 0) > 0) {
+        TranslateMessage(&message);
+        DispatchMessageA(&message);
+    }
+    result = 0;
+cleanup:
+    for (index = 0; index < argc; index++) free(arguments[index]);
+    free(arguments);
+    return result;
+}
+#endif

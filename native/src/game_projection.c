@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define ZGAME_LOGICAL_WIDTH 1280.0f
 #define ZGAME_LOGICAL_HEIGHT 720.0f
@@ -99,6 +100,22 @@ float zsharp_game_camera_depth(const ZSharpGameRenderFrame *frame,
     return -camera[2];
 }
 
+float zsharp_game_camera_far_depth(const ZSharpGameRenderFrame *frame,
+                                   const ZSharpGameRenderObject *object) {
+    float corners[8][3];
+    float farthest = -INFINITY;
+    int index;
+    if (frame == NULL || object == NULL) return 0.0f;
+    if (object->shape != ZGAME_SHAPE_CUBE)
+        return zsharp_game_camera_depth(frame, object);
+    cube_camera_points(frame, object, corners);
+    for (index = 0; index < 8; index++) {
+        float depth = -corners[index][2];
+        if (depth > farthest) farthest = depth;
+    }
+    return farthest;
+}
+
 size_t zsharp_game_project_cube(const ZSharpGameRenderFrame *frame,
                                 const ZSharpGameRenderObject *object,
                                 float output[12][4]) {
@@ -139,6 +156,69 @@ static int compare_faces(const void *left, const void *right) {
     return a->depth < b->depth ? 1 : a->depth > b->depth ? -1 : 0;
 }
 
+int zsharp_game_project_mesh_triangle(
+    const ZSharpGameRenderFrame *frame,
+    const float world[3][3], const float uv[3][2],
+    ZSharpProjectedCubeFace *face) {
+    float camera[3][5], clipped[6][5];
+    float edge_a[3], edge_b[3], length, depth_total = 0.0f;
+    size_t count = 0, index;
+    int axis;
+    if (frame == NULL || world == NULL || uv == NULL || face == NULL) return 0;
+    memset(face, 0, sizeof(*face));
+    for (index = 0; index < 3; index++) {
+        camera_space(frame, world[index], camera[index]);
+        camera[index][3] = uv[index][0];
+        camera[index][4] = uv[index][1];
+    }
+    for (index = 0; index < 3; index++) {
+        const float *current = camera[index];
+        const float *previous = camera[(index + 2) % 3];
+        int inside = current[2] <= -ZGAME_NEAR_DEPTH;
+        int previous_inside = previous[2] <= -ZGAME_NEAR_DEPTH;
+        if (inside != previous_inside) {
+            float amount = (-ZGAME_NEAR_DEPTH - previous[2]) /
+                           (current[2] - previous[2]);
+            for (axis = 0; axis < 5; axis++)
+                clipped[count][axis] = previous[axis] +
+                    (current[axis] - previous[axis]) * amount;
+            clipped[count][2] = -ZGAME_NEAR_DEPTH;
+            count++;
+        }
+        if (inside) {
+            for (axis = 0; axis < 5; axis++) clipped[count][axis] = current[axis];
+            count++;
+        }
+    }
+    if (count < 3) return 0;
+    face->point_count = count;
+    face->brightness = 1.0f;
+    for (index = 0; index < count; index++) {
+        if (!project_camera_point(frame, clipped[index], face->points[index]))
+            return 0;
+        face->texcoords[index][0] = clipped[index][3];
+        face->texcoords[index][1] = 1.0f - clipped[index][4];
+        face->point_depth[index] = -clipped[index][2];
+        depth_total += -clipped[index][2];
+    }
+    face->depth = depth_total / (float)count;
+    for (axis = 0; axis < 3; axis++) {
+        edge_a[axis] = world[1][axis] - world[0][axis];
+        edge_b[axis] = world[2][axis] - world[0][axis];
+        face->world_center[axis] =
+            (world[0][axis] + world[1][axis] + world[2][axis]) / 3.0f;
+    }
+    face->world_normal[0] = edge_a[1]*edge_b[2]-edge_a[2]*edge_b[1];
+    face->world_normal[1] = edge_a[2]*edge_b[0]-edge_a[0]*edge_b[2];
+    face->world_normal[2] = edge_a[0]*edge_b[1]-edge_a[1]*edge_b[0];
+    length = sqrtf(face->world_normal[0]*face->world_normal[0] +
+                   face->world_normal[1]*face->world_normal[1] +
+                   face->world_normal[2]*face->world_normal[2]);
+    if (length < 0.00001f) return 0;
+    for (axis = 0; axis < 3; axis++) face->world_normal[axis] /= length;
+    return 1;
+}
+
 size_t zsharp_game_project_cube_faces(
     const ZSharpGameRenderFrame *frame,
     const ZSharpGameRenderObject *object,
@@ -150,9 +230,11 @@ size_t zsharp_game_project_cube_faces(
     static const float brightness[6] = {0.58f, 0.82f, 0.68f,
                                          1.00f, 0.74f, 0.90f};
     float points[8][3];
+    float world_points[8][3];
     size_t face_count = 0;
     int face;
     if (frame == NULL || object == NULL || output == NULL) return 0;
+    cube_points(object, world_points);
     cube_camera_points(frame, object, points);
     for (face = 0; face < 6; face++) {
         float input[6][5], clipped[6][5];
@@ -193,12 +275,34 @@ size_t zsharp_game_project_cube_faces(
         result = &output[face_count];
         result->point_count = clipped_count;
         result->brightness = brightness[face];
+        {
+            const float *a = world_points[face_indices[face][0]];
+            const float *b = world_points[face_indices[face][1]];
+            const float *c = world_points[face_indices[face][2]];
+            float ab[3] = {b[0]-a[0], b[1]-a[1], b[2]-a[2]};
+            float ac[3] = {c[0]-a[0], c[1]-a[1], c[2]-a[2]};
+            float length;
+            int axis;
+            result->world_normal[0] = ab[1]*ac[2]-ab[2]*ac[1];
+            result->world_normal[1] = ab[2]*ac[0]-ab[0]*ac[2];
+            result->world_normal[2] = ab[0]*ac[1]-ab[1]*ac[0];
+            length = sqrtf(result->world_normal[0]*result->world_normal[0] +
+                           result->world_normal[1]*result->world_normal[1] +
+                           result->world_normal[2]*result->world_normal[2]);
+            if (length < 0.00001f) length = 1.0f;
+            for (axis = 0; axis < 3; axis++) {
+                result->world_normal[axis] /= length;
+                result->world_center[axis] = (a[axis] + b[axis] + c[axis] +
+                    world_points[face_indices[face][3]][axis]) * 0.25f;
+            }
+        }
         for (index = 0; index < clipped_count; index++) {
             if (!project_camera_point(frame, clipped[index], result->points[index])) {
                 clipped_count = 0; break;
             }
             result->texcoords[index][0] = clipped[index][3];
             result->texcoords[index][1] = clipped[index][4];
+            result->point_depth[index] = -clipped[index][2];
             depth_total += -clipped[index][2];
         }
         if (clipped_count < 3) continue;

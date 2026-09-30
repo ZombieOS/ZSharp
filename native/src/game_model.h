@@ -2,6 +2,8 @@
 #define ZSHARP_GAME_MODEL_H
 
 #include "game_vulkan.h"
+#include "game_animation.h"
+#include "game_navigation.h"
 #include "window.h"
 
 #include <stddef.h>
@@ -15,7 +17,10 @@ typedef enum ZSharpGameBodyType {
 typedef enum ZSharpGameColliderType {
     ZGAME_COLLIDER_NONE = 0,
     ZGAME_COLLIDER_BOX = 1,
-    ZGAME_COLLIDER_CIRCLE = 2
+    ZGAME_COLLIDER_CIRCLE = 2,
+    ZGAME_COLLIDER_SPHERE = 3,
+    ZGAME_COLLIDER_CAPSULE = 4,
+    ZGAME_COLLIDER_MESH = 5
 } ZSharpGameColliderType;
 
 typedef enum ZSharpGameKey {
@@ -97,6 +102,15 @@ typedef struct ZSharpGameObject {
     float restitution;
     float friction;
     unsigned color;
+    float opacity;
+    float roughness;
+    float emissive;
+    float metallic;
+    int light_type;
+    float light_intensity;
+    float light_range;
+    float light_angle;
+    int cast_shadows;
     int visible;
     int layer;
     int trigger;
@@ -104,6 +118,23 @@ typedef struct ZSharpGameObject {
     int colliding;
     char *text;
     char *asset_path;
+    char *mesh_path;
+    char **material_names;
+    char **material_textures;
+    size_t material_count;
+    ZSharpGamePartPose *part_poses;
+    size_t part_pose_count;
+    int is_ai;
+    char **nav_aliases;
+    char **nav_ids;
+    size_t nav_count;
+    char *nav_target;
+    float nav_speed;
+    int nav_reachable;
+    int nav_moving;
+    float *nav_path; /* X/Z coordinate pairs */
+    size_t nav_path_count;
+    size_t nav_path_step;
     char *audio_path;
     float audio_volume;
     float audio_pitch;
@@ -138,6 +169,7 @@ typedef struct ZSharpGameInput {
 
 typedef struct ZSharpGameModel {
     int is_3d;
+    struct ZSharpMeshCollision *mesh_collisions;
     ZSharpGameScene *scenes;
     size_t scene_count;
     ZSharpGameObject *objects;
@@ -146,6 +178,8 @@ typedef struct ZSharpGameModel {
     size_t definition_count;
     char *active_scene;
     char *project_root;
+    ZSharpAnimationFile *animations;
+    size_t animation_count;
     ZSharpGameInput input;
     double elapsed;
     double delta;

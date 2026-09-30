@@ -25,6 +25,8 @@ typedef struct Parser {
     LoopContext loops[64];
     size_t loop_depth;
     size_t named_outcome_depth;
+    const ZSharpCustomSyntaxRule *syntax_rules;
+    size_t syntax_rule_count;
 } Parser;
 
 static void fail_at(Parser *parser, const ZSharpToken *token,
@@ -678,7 +680,9 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
     if (!parser->failed && strcmp(parts[0], "py") != 0 &&
         strcmp(parts[0], "js") != 0 &&
         strcmp(parts[0], "lua") != 0 &&
+        strcmp(parts[0], "c") != 0 &&
         strcmp(parts[0], "cpp") != 0 &&
+        strcmp(parts[0], "kt") != 0 &&
         strcmp(parts[0], "rust") != 0 &&
         part_count != 3 && part_count != 4) {
         fail_at(parser, &parser->current,
@@ -687,7 +691,9 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
     }
     if (!parser->failed &&
         (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0 ||
+         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "c") == 0 ||
+         strcmp(parts[0], "cpp") == 0 ||
+         strcmp(parts[0], "kt") == 0 ||
          strcmp(parts[0], "rust") == 0) &&
         part_count < 3) {
         fail_at(parser, &parser->current,
@@ -735,7 +741,9 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
         return 0;
     }
     if (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-        strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0 ||
+        strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "c") == 0 ||
+        strcmp(parts[0], "cpp") == 0 ||
+        strcmp(parts[0], "kt") == 0 ||
         strcmp(parts[0], "rust") == 0) {
         size_t module_length = 0;
         char *module;
@@ -747,10 +755,13 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
             strcmp(parts[0], "py") == 0 ? "@py" :
             strcmp(parts[0], "js") == 0 ? "@js" :
             strcmp(parts[0], "lua") == 0 ? "@lua" :
-            strcmp(parts[0], "cpp") == 0 ? "@cpp" : "@rust",
+            strcmp(parts[0], "c") == 0 ? "@c" :
+            strcmp(parts[0], "cpp") == 0 ? "@cpp" :
+            strcmp(parts[0], "kt") == 0 ? "@kt" : "@rust",
             (strcmp(parts[0], "lua") == 0 ||
              strcmp(parts[0], "cpp") == 0) ? 4 :
-             strcmp(parts[0], "rust") == 0 ? 5 : 3);
+             strcmp(parts[0], "rust") == 0 ? 5 :
+             strcmp(parts[0], "c") == 0 ? 2 : 3);
         instruction->call_room = zsharp_copy_text("", 0);
         if (module == NULL || instruction->operand == NULL ||
             instruction->call_room == NULL) {
@@ -1116,6 +1127,52 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
     }
     if (parser->failed) goto failed;
 
+    if (part_count == 3 && strcmp(parts[1], "toPoint") == 0 &&
+        (strcmp(parts[2], "glide") == 0 ||
+         strcmp(parts[2], "teleport") == 0) &&
+        parser->current.type == ZTOKEN_LEFT_PAREN) {
+        char *target;
+        char command[512];
+        int glide = strcmp(parts[2], "glide") == 0;
+        advance_token(parser);
+        if (parser->current.type != ZTOKEN_IDENTIFIER &&
+            parser->current.type != ZTOKEN_STRING) {
+            fail_at(parser, &parser->current, "a navigation point name");
+            goto failed;
+        }
+        target = copy_token(parser, &parser->current);
+        if (target == NULL) goto failed;
+        if (snprintf(command, sizeof(command), "%s.toPoint.%s.%s",
+                     parts[0], parts[2], target) >= (int)sizeof(command)) {
+            free(target);
+            fail_at(parser, &parser->current, "navigation command is too long");
+            goto failed;
+        }
+        free(target);
+        advance_token(parser);
+        if (glide) {
+            if (!consume_type(parser, ZTOKEN_COMMA,
+                              "',' before AI glide speed") ||
+                !parse_expression(parser, function)) goto failed;
+        }
+        if (!consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                          "')' after navigation command") ||
+            !consume_type(parser, ZTOKEN_COLON,
+                          "':' after navigation command")) goto failed;
+        instruction = emit(parser, function,
+                           glide ? ZOP_UI_SET_VALUE : ZOP_UI_SET);
+        if (instruction == NULL) goto failed;
+        instruction->operand = zsharp_copy_text(command, strlen(command));
+        if (!glide) {
+            instruction->number_operand = ZUI_PROPERTY_TEXT;
+            instruction->call_function = zsharp_copy_text("", 0);
+        }
+        if (instruction->operand == NULL ||
+            (!glide && instruction->call_function == NULL)) goto failed;
+        for (index = 0; index < part_count; index++) free(parts[index]);
+        return 1;
+    }
+
     if (part_count == 4 && strcmp(parts[0], "ZSharp") == 0 &&
         strcmp(parts[1], "Achievement") == 0 &&
         strcmp(parts[2], "Award") == 0 &&
@@ -1131,6 +1188,65 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
         instruction->number_operand = ZUI_PROPERTY_STATUS;
         instruction->call_function = zsharp_copy_text("alive", 5);
         if (instruction->call_function == NULL) goto failed;
+        for (index = 0; index < part_count; index++) free(parts[index]);
+        return 1;
+    }
+
+    if (part_count == 3 &&
+        (strcmp(parts[1], "playClip") == 0 ||
+         strcmp(parts[1], "pauseClip") == 0 ||
+         strcmp(parts[1], "stopClip") == 0) &&
+        (parser->current.type == ZTOKEN_COLON ||
+         parser->current.type == ZTOKEN_LEFT_BRACKET)) {
+        char selected[256] = {0};
+        size_t used = 0;
+        if (match_type(parser, ZTOKEN_LEFT_BRACKET)) {
+            do {
+                char *index_text;
+                char *end = NULL;
+                unsigned long instance;
+                size_t length;
+                if (parser->current.type != ZTOKEN_NUMBER) {
+                    fail_at(parser, &parser->current,
+                            "animation instance indexes must be positive integers");
+                    goto failed;
+                }
+                index_text = copy_token(parser, &parser->current);
+                if (index_text == NULL) goto failed;
+                instance = strtoul(index_text, &end, 10);
+                if (end == index_text || *end != '\0' || instance == 0 ||
+                    instance > 1000000) {
+                    free(index_text);
+                    fail_at(parser, &parser->current,
+                            "animation instance indexes must be positive integers");
+                    goto failed;
+                }
+                length = strlen(index_text);
+                if (used + length + 2 >= sizeof(selected)) {
+                    free(index_text);
+                    fail_at(parser, &parser->current,
+                            "too many animation instance indexes");
+                    goto failed;
+                }
+                if (used > 0) selected[used++] = ',';
+                memcpy(selected + used, index_text, length);
+                used += length;
+                selected[used] = '\0';
+                free(index_text);
+                advance_token(parser);
+            } while (match_type(parser, ZTOKEN_COMMA));
+            if (!consume_type(parser, ZTOKEN_RIGHT_BRACKET,
+                              "']' after animation indexes")) goto failed;
+        }
+        if (!consume_type(parser, ZTOKEN_COLON,
+                          "':' after the animation command")) goto failed;
+        instruction = emit(parser, function, ZOP_UI_SET);
+        if (instruction == NULL) goto failed;
+        instruction->operand = join_path_parts(parser, parts, part_count);
+        instruction->call_function = zsharp_copy_text(selected, used);
+        instruction->number_operand = ZUI_PROPERTY_TEXT;
+        if (instruction->operand == NULL || instruction->call_function == NULL)
+            goto failed;
         for (index = 0; index < part_count; index++) free(parts[index]);
         return 1;
     }
@@ -1670,7 +1786,145 @@ static int parse_continue(Parser *parser, ZSharpFunction *function) {
     return 1;
 }
 
+static int syntax_token_equals(const ZSharpToken *left,
+                               const ZSharpToken *right) {
+    return left->type == right->type && left->length == right->length &&
+           memcmp(left->start, right->start, left->length) == 0;
+}
+
+/* A dry match avoids emitting bytecode for a rule that does not apply. */
+static int custom_statement_matches(Parser *parser, const char *pattern) {
+    ZSharpLexer pattern_lexer;
+    ZSharpLexer source_lexer = parser->lexer;
+    ZSharpToken expected;
+    ZSharpToken actual = parser->current;
+    zsharp_lexer_init(&pattern_lexer, pattern);
+    expected = zsharp_lexer_next(&pattern_lexer);
+    while (expected.type != ZTOKEN_EOF && expected.type != ZTOKEN_ERROR) {
+        if (expected.type == ZTOKEN_LEFT_BRACE) {
+            ZSharpToken name = zsharp_lexer_next(&pattern_lexer);
+            ZSharpToken close = zsharp_lexer_next(&pattern_lexer);
+            if (name.type != ZTOKEN_IDENTIFIER ||
+                close.type != ZTOKEN_RIGHT_BRACE ||
+                (actual.type != ZTOKEN_IDENTIFIER &&
+                 actual.type != ZTOKEN_NUMBER &&
+                 actual.type != ZTOKEN_STRING)) return 0;
+        } else if (!syntax_token_equals(&expected, &actual)) {
+            return 0;
+        }
+        actual = zsharp_lexer_next(&source_lexer);
+        expected = zsharp_lexer_next(&pattern_lexer);
+    }
+    return expected.type == ZTOKEN_EOF && actual.type == ZTOKEN_COLON;
+}
+
+static int emit_custom_call(Parser *parser, ZSharpFunction *function,
+                            const ZSharpCustomSyntaxRule *rule,
+                            uint32_t argument_count) {
+    ZSharpInstruction *instruction;
+    instruction = emit(parser, function, ZOP_CALL_QUALIFIED);
+    if (instruction == NULL) return 0;
+    instruction->operand = zsharp_copy_text("@c", 2);
+    instruction->call_file = zsharp_copy_text(rule->module,
+                                               strlen(rule->module));
+    instruction->call_room = zsharp_copy_text("", 0);
+    instruction->call_function = zsharp_copy_text(rule->function,
+                                                   strlen(rule->function));
+    instruction->argument_count = argument_count;
+    if (instruction->operand == NULL || instruction->call_file == NULL ||
+        instruction->call_room == NULL || instruction->call_function == NULL) {
+        fail_at(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    return 1;
+}
+
+static int parse_custom_statement(Parser *parser, ZSharpFunction *function,
+                                  const ZSharpCustomSyntaxRule *rule) {
+    ZSharpLexer pattern_lexer;
+    ZSharpToken expected;
+    uint32_t argument_count = 0;
+    zsharp_lexer_init(&pattern_lexer, rule->pattern);
+    expected = zsharp_lexer_next(&pattern_lexer);
+    while (expected.type != ZTOKEN_EOF && !parser->failed) {
+        if (expected.type == ZTOKEN_LEFT_BRACE) {
+            (void)zsharp_lexer_next(&pattern_lexer);
+            (void)zsharp_lexer_next(&pattern_lexer);
+            if (!parse_primary(parser, function)) return 0;
+            argument_count++;
+        } else {
+            advance_token(parser);
+        }
+        expected = zsharp_lexer_next(&pattern_lexer);
+    }
+    if (!consume_type(parser, ZTOKEN_COLON,
+                      "':' after the custom C statement")) return 0;
+    return emit_custom_call(parser, function, rule, argument_count);
+}
+
+static int parse_custom_block(Parser *parser, ZSharpFunction *function,
+                              const ZSharpCustomSyntaxRule *rule) {
+    uint32_t argument_count = 0;
+    advance_token(parser);
+    if (!consume_type(parser, ZTOKEN_LEFT_PAREN,
+                      "'(' after the custom C block name")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
+           parser->current.type != ZTOKEN_EOF) {
+        char *key = consume_name(parser, "a custom C block field name");
+        ZSharpInstruction *instruction;
+        if (key == NULL ||
+            !consume_type(parser, ZTOKEN_COLON,
+                          "':' after the custom C block field")) {
+            free(key);
+            return 0;
+        }
+        instruction = emit(parser, function, ZOP_PUSH_TEXT);
+        if (instruction == NULL) {
+            free(key);
+            return 0;
+        }
+        instruction->operand = key;
+        if (zsharp_token_equals(&parser->current, "true") ||
+            zsharp_token_equals(&parser->current, "false")) {
+            instruction = emit(parser, function, ZOP_PUSH_STATUS);
+            if (instruction == NULL) return 0;
+            instruction->number_operand =
+                zsharp_token_equals(&parser->current, "true");
+            advance_token(parser);
+        } else if (!parse_expression(parser, function)) {
+            return 0;
+        }
+        if (!consume_type(parser, ZTOKEN_COLON,
+                          "':' after the custom C block value")) return 0;
+        if (argument_count > UINT32_MAX - 2) {
+            fail_at(parser, &parser->current,
+                    "custom C block has too many fields");
+            return 0;
+        }
+        argument_count += 2;
+    }
+    if (!consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                      "')' after the custom C block")) return 0;
+    return emit_custom_call(parser, function, rule, argument_count);
+}
+
 static int parse_statement(Parser *parser, ZSharpFunction *function) {
+    size_t syntax_index;
+    for (syntax_index = 0; syntax_index < parser->syntax_rule_count;
+         syntax_index++) {
+        const ZSharpCustomSyntaxRule *rule =
+            &parser->syntax_rules[syntax_index];
+        if (rule->is_block &&
+            zsharp_token_equals(&parser->current, rule->pattern) &&
+            parser->current.type == ZTOKEN_IDENTIFIER) {
+            ZSharpLexer lookahead = parser->lexer;
+            if (zsharp_lexer_next(&lookahead).type == ZTOKEN_LEFT_PAREN)
+                return parse_custom_block(parser, function, rule);
+        }
+        if (!rule->is_block &&
+            custom_statement_matches(parser, rule->pattern))
+            return parse_custom_statement(parser, function, rule);
+    }
     if (match_word(parser, "Print")) return parse_print(parser, function);
     if (match_word(parser, "Function")) {
         return parse_qualified_call(parser, function, 0);
@@ -2434,13 +2688,17 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     parts[part_count++] = consume_name(parser, "an imported project name");
     if (!parser->failed &&
         (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0 ||
+         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "c") == 0 ||
+         strcmp(parts[0], "cpp") == 0 ||
+         strcmp(parts[0], "kt") == 0 ||
          strcmp(parts[0], "rust") == 0) &&
         match_type(parser, ZTOKEN_COLON)) {
         foreign_language = strcmp(parts[0], "py") == 0 ? 1 :
                            strcmp(parts[0], "js") == 0 ? 2 :
                            strcmp(parts[0], "lua") == 0 ? 3 :
-                           strcmp(parts[0], "cpp") == 0 ? 4 : 5;
+                           strcmp(parts[0], "cpp") == 0 ? 4 :
+                           strcmp(parts[0], "rust") == 0 ? 5 :
+                           strcmp(parts[0], "c") == 0 ? 6 : 7;
         parts[part_count++] = consume_name(parser,
                                            "the foreign project name");
     }
@@ -2489,7 +2747,9 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
         const char *prefix = foreign_language == 1 ? "py" :
                              foreign_language == 2 ? "js" :
                              foreign_language == 3 ? "lua" :
-                             foreign_language == 4 ? "cpp" : "rust";
+                             foreign_language == 4 ? "cpp" :
+                             foreign_language == 5 ? "rust" :
+                             foreign_language == 6 ? "c" : "kt";
         size_t prefix_length = strlen(prefix);
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {
@@ -2529,13 +2789,17 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     parts[part_count++] = consume_name(parser, "an imported project name");
     if (!parser->failed &&
         (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0 ||
+         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "c") == 0 ||
+         strcmp(parts[0], "cpp") == 0 ||
+         strcmp(parts[0], "kt") == 0 ||
          strcmp(parts[0], "rust") == 0) &&
         match_type(parser, ZTOKEN_COLON)) {
         foreign_language = strcmp(parts[0], "py") == 0 ? 1 :
                            strcmp(parts[0], "js") == 0 ? 2 :
                            strcmp(parts[0], "lua") == 0 ? 3 :
-                           strcmp(parts[0], "cpp") == 0 ? 4 : 5;
+                           strcmp(parts[0], "cpp") == 0 ? 4 :
+                           strcmp(parts[0], "rust") == 0 ? 5 :
+                           strcmp(parts[0], "c") == 0 ? 6 : 7;
         parts[part_count++] = consume_name(parser,
                                            "the foreign project name");
     }
@@ -2584,7 +2848,9 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
         const char *prefix = foreign_language == 1 ? "py" :
                              foreign_language == 2 ? "js" :
                              foreign_language == 3 ? "lua" :
-                             foreign_language == 4 ? "cpp" : "rust";
+                             foreign_language == 4 ? "cpp" :
+                             foreign_language == 5 ? "rust" :
+                             foreign_language == 6 ? "c" : "kt";
         size_t prefix_length = strlen(prefix);
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {
@@ -3518,12 +3784,16 @@ static int parse_room(Parser *parser, ZSharpProgram *program,
     return consume_type(parser, ZTOKEN_RIGHT_PAREN, "')' after the room body");
 }
 
-int zsharp_parse_source(const char *source, const char *source_name,
-                        ZSharpProgram *program, ZSharpDiagnostic *diagnostic) {
+int zsharp_parse_source_with_syntax(
+    const char *source, const char *source_name, ZSharpProgram *program,
+    ZSharpDiagnostic *diagnostic, const ZSharpCustomSyntaxRule *rules,
+    size_t rule_count) {
     Parser parser;
     memset(&parser, 0, sizeof(parser));
     memset(diagnostic, 0, sizeof(*diagnostic));
     parser.diagnostic = diagnostic;
+    parser.syntax_rules = rules;
+    parser.syntax_rule_count = rule_count;
     zsharp_program_init(program);
     program->source_name = zsharp_copy_text(source_name, strlen(source_name));
     if (program->source_name == NULL) {
@@ -3575,4 +3845,10 @@ int zsharp_parse_source(const char *source, const char *source_name,
         return 0;
     }
     return 1;
+}
+
+int zsharp_parse_source(const char *source, const char *source_name,
+                        ZSharpProgram *program, ZSharpDiagnostic *diagnostic) {
+    return zsharp_parse_source_with_syntax(source, source_name, program,
+                                           diagnostic, NULL, 0);
 }

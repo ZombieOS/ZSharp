@@ -1,0 +1,8 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import c:c_conflict.C.Bad():
+ noticed brain Start[] (
+  Print("Still built in"):
+ )
+)
