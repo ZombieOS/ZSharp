@@ -10,6 +10,11 @@ noticed scene Main[] (
  objects[JSON] (
   [
    {
+    "id": "NewGame",
+    "name": "New Game",
+    "location": {"x": 0, "y": 100}
+   },
+   {
     "id": "TestBlock",
     "name": "Test Block",
     "location": {

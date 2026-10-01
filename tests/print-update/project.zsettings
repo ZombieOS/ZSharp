@@ -1,0 +1,9 @@
+zsharp = type.settings
+Project: "Print Update Test":
+PID: "print_update_test":
+Version: [1.0.0.0]:
+Authors: ["Z# Tests"]:
+Description: "Print update syntax and bytecode roundtrip.":
+ZSharp: [1.2.0.1]:
+Dependencies (
+):

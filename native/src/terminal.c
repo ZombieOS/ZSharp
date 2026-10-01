@@ -21,6 +21,45 @@
 static FILE *terminal_output;
 static char terminal_active_path[1200];
 static volatile int terminal_detach;
+static size_t terminal_line_width;
+#ifdef _WIN32
+static SRWLOCK terminal_print_lock = SRWLOCK_INIT;
+#define PRINT_LOCK() AcquireSRWLockExclusive(&terminal_print_lock)
+#define PRINT_UNLOCK() ReleaseSRWLockExclusive(&terminal_print_lock)
+#else
+static pthread_mutex_t terminal_print_lock = PTHREAD_MUTEX_INITIALIZER;
+#define PRINT_LOCK() pthread_mutex_lock(&terminal_print_lock)
+#define PRINT_UNLOCK() pthread_mutex_unlock(&terminal_print_lock)
+#endif
+
+/* Use the same stream bytes for direct output and attached terminal replay. */
+static void print_line(FILE *stream, const char *text, int update,
+                        size_t previous_width) {
+    size_t width = strlen(text), i;
+    if (update || previous_width != 0) fputc('\r', stream);
+    fputs(text, stream);
+    for (i = width; i < previous_width; ++i) fputc(' ', stream);
+    if (update) {
+        /* Leave the cursor after the replacement, even when padding was used. */
+        if (width < previous_width) {
+            fputc('\r', stream);
+            fputs(text, stream);
+        }
+    } else fputc('\n', stream);
+    fflush(stream);
+}
+
+void zsharp_terminal_print(const char *text, int update) {
+    const char *last_newline;
+    if (text == NULL) text = "";
+    PRINT_LOCK();
+    print_line(stdout, text, update, terminal_line_width);
+    if (terminal_output != NULL)
+        print_line(terminal_output, text, update, terminal_line_width);
+    last_newline = strrchr(text, '\n');
+    terminal_line_width = update ? strlen(last_newline == NULL ? text : last_newline + 1) : 0;
+    PRINT_UNLOCK();
+}
 
 static int make_directory(const char *path) {
 #ifdef _WIN32

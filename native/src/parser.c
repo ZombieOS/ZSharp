@@ -640,15 +640,20 @@ static int parse_expression(Parser *parser, ZSharpFunction *function) {
 }
 
 static int parse_print(Parser *parser, ZSharpFunction *function) {
+    int update = 0;
     if (!consume_type(parser, ZTOKEN_LEFT_PAREN, "'(' after 'Print'") ||
         !parse_expression(parser, function) ||
         !consume_type(parser, ZTOKEN_RIGHT_PAREN,
-                      "')' after the Print value") ||
-        !consume_type(parser, ZTOKEN_COLON,
-                      "':' after the Print statement")) {
+                      "')' after the Print value")) {
         return 0;
     }
-    return emit(parser, function, ZOP_PRINT) != NULL;
+    if (match_type(parser, ZTOKEN_DOT)) {
+        if (!consume_word(parser, "update")) return 0;
+        update = 1;
+    }
+    if (!consume_type(parser, ZTOKEN_COLON,
+                      "':' after the Print statement")) return 0;
+    return emit(parser, function, update ? ZOP_PRINT_UPDATE : ZOP_PRINT) != NULL;
 }
 
 static int parse_qualified_call(Parser *parser, ZSharpFunction *function,

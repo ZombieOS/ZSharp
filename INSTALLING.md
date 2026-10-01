@@ -57,9 +57,12 @@ notarized, so Windows SmartScreen or macOS Gatekeeper may show an unknown
 publisher warning until official code-signing certificates are added.
 
 ChromeOS users can try the matching Linux x86_64 or aarch64 download inside
-the optional Linux development environment. This is not a native ChromeOS
+the optional Linux development environment. ChromeOS has deprecated UI-based
+installation of `.deb` files, so there is currently no supported no-terminal
+installation path for the native ZVM on ChromeOS. This is not a native ChromeOS
 installation, and graphical app/game compatibility has not been verified on
-every Chromebook. Managed devices may not allow the Linux environment.
+every Chromebook. Managed devices may disable the Linux environment or
+terminal access.
 Bundled Linux runtimes target glibc 2.17 or newer; musl-based distributions
 need a separately built runtime.
 

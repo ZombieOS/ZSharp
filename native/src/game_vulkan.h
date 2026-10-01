@@ -12,7 +12,8 @@ typedef enum ZSharpGameShape {
     ZGAME_SHAPE_TEXT = 6,
     ZGAME_SHAPE_LIGHT = 7,
     ZGAME_SHAPE_MESH = 8,
-    ZGAME_SHAPE_NAV = 9
+    ZGAME_SHAPE_NAV = 9,
+    ZGAME_SHAPE_BUTTON = 10
 } ZSharpGameShape;
 
 typedef struct ZSharpGamePartPose {

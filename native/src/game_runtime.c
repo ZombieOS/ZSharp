@@ -4,6 +4,7 @@
 
 #include "achievement.h"
 #include "game_model.h"
+#include "game_input_edges.h"
 #include "game_vulkan.h"
 #include "registry.h"
 #include "settings.h"
@@ -34,7 +35,21 @@ typedef struct ZSharpGameState {
     char *window_icon_path;
     int mouse_capture_dirty;
     int cancelled;
+    ZSharpMouseEdges mouse_edges;
 } ZSharpGameState;
+
+#ifdef _MSC_VER
+static __declspec(thread) ZSharpMouseCursor mouse_cursor;
+#else
+static _Thread_local ZSharpMouseCursor mouse_cursor;
+#endif
+
+static void game_begin_task(void *state) {
+    ZSharpGameState *game = (ZSharpGameState *)state;
+    SDL_LockMutex(game->model_mutex);
+    zsharp_mouse_cursor_begin(&mouse_cursor, &game->mouse_edges);
+    SDL_UnlockMutex(game->model_mutex);
+}
 
 static void game_request_close(void *data) {
     ZSharpGameState *game = (ZSharpGameState *)data;
@@ -154,6 +169,7 @@ static int show_splashes(ZSharpGameState *game, const ZSharpSettings *settings,
 static int game_owns_property(void *state, const char *path) {
     ZSharpGameState *game = (ZSharpGameState *)state;
     int owns;
+    if (zsharp_mouse_edge_index(path) >= 0) return 1;
     if (path != NULL &&
         strncmp(path, "ZSharp.Achievement.Award.", 25) == 0) return 1;
     SDL_LockMutex(game->model_mutex);
@@ -168,6 +184,23 @@ static int game_get_property(void *state, const char *path,
     ZSharpGameState *game = (ZSharpGameState *)state;
     int ok;
     SDL_LockMutex(game->model_mutex);
+    {
+        int edge = zsharp_mouse_edge_index(path);
+        if (edge >= 0) {
+            /* Allocate before consuming so allocation failure loses no event. */
+            *text = zsharp_copy_text("alive", 5);
+            if (*text == NULL) {
+                SDL_UnlockMutex(game->model_mutex);
+                game_error(error, error_size, "out of memory");
+                return 0;
+            }
+            if (!zsharp_mouse_edge_read(&mouse_cursor, &game->mouse_edges, edge))
+                strcpy(*text, "dead");
+            *type = ZWINDOW_READ_STATUS;
+            SDL_UnlockMutex(game->model_mutex);
+            return 1;
+        }
+    }
     ok = zsharp_game_model_get_property(&game->model, path, type, text,
                                         error, error_size);
     SDL_UnlockMutex(game->model_mutex);
@@ -572,6 +605,7 @@ int zsharp_game_run(const char *title, const char *project_root,
     runtime.wait = game_wait;
     runtime.is_cancelled = game_cancelled;
     runtime.request_close = game_request_close;
+    runtime.begin_task = game_begin_task;
     if (callback != NULL && !callback(user_data, ZSHARP_WINDOW_PROJECT_STARTS,
                                       &runtime, error, error_size)) goto done;
     tasks_started = callback != NULL;
@@ -592,6 +626,14 @@ int zsharp_game_run(const char *title, const char *project_root,
             else if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
                      event.type == SDL_EVENT_WINDOW_RESIZED)
                 resized = 1;
+            else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                SDL_LockMutex(game.model_mutex);
+                zsharp_mouse_transition(&game.mouse_edges, 0, 0);
+                zsharp_mouse_transition(&game.mouse_edges, 1, 0);
+                game.model.input.mouse_left = 0;
+                game.model.input.mouse_right = 0;
+                SDL_UnlockMutex(game.model_mutex);
+            }
             else if (event.type == SDL_EVENT_MOUSE_MOTION) {
                 int width = 1280;
                 int height = 720;
@@ -610,12 +652,44 @@ int zsharp_game_run(const char *title, const char *project_root,
             } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                        event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 int pressed = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                char *click_target = NULL;
+                int click_failed = 0;
                 SDL_LockMutex(game.model_mutex);
-                if (event.button.button == SDL_BUTTON_LEFT)
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    zsharp_mouse_transition(&game.mouse_edges, 0, pressed);
                     game.model.input.mouse_left = pressed;
-                else if (event.button.button == SDL_BUTTON_RIGHT)
+                }
+                else if (event.button.button == SDL_BUTTON_RIGHT) {
+                    zsharp_mouse_transition(&game.mouse_edges, 1, pressed);
                     game.model.input.mouse_right = pressed;
+                }
+                if (pressed && !game.model.input.mouse_captured &&
+                    (event.button.button == SDL_BUTTON_LEFT || event.button.button == SDL_BUTTON_RIGHT)) {
+                    int width = 1280, height = 720;
+                    const ZSharpGameObject *button;
+                    const char *target;
+                    SDL_GetWindowSize(game.window, &width, &height);
+                    button = zsharp_game_model_button_at(&game.model,
+                        width > 0 ? event.button.x * 1280.0f / width - 640.0f : 0,
+                        height > 0 ? 360.0f - event.button.y * 720.0f / height : 0);
+                    target = button == NULL ? NULL :
+                        event.button.button == SDL_BUTTON_LEFT ? button->click_left : button->click_right;
+                    if (target != NULL) {
+                        click_target = zsharp_copy_text(target, strlen(target));
+                        if (click_target == NULL) {
+                            game_error(error, error_size, "out of memory scheduling game button");
+                            click_failed = 1;
+                        }
+                    }
+                }
                 SDL_UnlockMutex(game.model_mutex);
+                if (click_target != NULL) {
+                    if (callback != NULL && !callback(user_data, click_target, &runtime, error, error_size)) {
+                        click_failed = 1;
+                    }
+                    free(click_target);
+                }
+                if (click_failed) goto done;
             }
         }
         SDL_LockMutex(game.model_mutex);
@@ -647,6 +721,8 @@ int zsharp_game_run(const char *title, const char *project_root,
             accumulator -= 1.0 / 120.0;
         }
         update_audio(&game);
+        SDL_UnlockMutex(game.model_mutex);
+        SDL_LockMutex(game.model_mutex);
         {
             const char *scene_title = zsharp_game_model_scene_title(&game.model);
             if (scene_title != NULL && scene_title[0] != '\0' &&

@@ -7,6 +7,7 @@ noticed room Game[] (
  )
  noticed brain Start[] (
   Print("game start ran"):
+  Print("mouse edge properties resolved: " + input.mouse.leftPressed + " " + input.mouse.leftReleased + " " + input.mouse.rightPressed + " " + input.mouse.rightReleased):
   if[input.key.a == alive] (
    TestBlock.color.set: #00E5FF:
   ) else (
@@ -16,5 +17,8 @@ noticed room Game[] (
    number.set:TestBlock.positionX = TestBlock.positionX + 1:
   ) else (
   )
+ )
+ noticed brain ButtonClick[DR] (
+  Print("game button clicked"):
  )
 )

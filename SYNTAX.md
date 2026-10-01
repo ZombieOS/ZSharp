@@ -294,6 +294,22 @@ noticed text Message = "Hello": // This is a comment.
 
 Statements end with `:` rather than `;`:
 
+From Z# 1.2.0.1, `Print(value).update:` replaces the current unfinished console
+line without adding a newline. Use it for progress or live input displays:
+
+```zsharp
+Print("Loading: 10%").update:
+Print("Loading: 100%").update:
+Print("Loaded!"):
+```
+
+Shorter replacements erase leftover text. Ordinary `Print(value):` finishes
+the current line with a newline; completed earlier lines are not editable.
+Updates flush immediately and are replayed by `zsharp terminal` connections.
+Use single-line values that fit the console width; this is not a multiline
+terminal UI. Output from concurrent tasks shares one current line, with each
+print operation synchronized to avoid interleaving its bytes.
+
 ```zsharp
 Print("Hello"):
 ```
@@ -2127,6 +2143,10 @@ input.key.space
 input.key.fn1
 input.mouse.left
 input.mouse.right
+input.mouse.leftPressed
+input.mouse.leftReleased
+input.mouse.rightPressed
+input.mouse.rightReleased
 input.mouse.x
 input.mouse.y
 input.mouse.deltaX
@@ -2142,6 +2162,59 @@ Player.positionX
 Player.velocityY
 Player.grounded
 Player.colliding
+```
+
+### Game buttons (Z# 1.2.0.1)
+
+```zsharp
+zsharp = type.object
+noticed object NewGame[] (
+ shape: button:
+ text: "New Game":
+ width: 160:
+ height: 32:
+ color: #FFFFFF:
+ hoverColor: #990000:
+ event(
+  left: "Menu:Menu:NewGame":
+  right: "Menu:Menu:Options":
+ )
+)
+```
+
+Place the button in the scene's `objects[JSON]` like any other object.
+`event(...)` is required, and must contain at least one nonempty `left` or
+`right` callback. Both are optional individually. Targets use the existing
+`File:Room:Function` window callback format (or `Project:File:Room:Function`).
+Callbacks must take no arguments and execute as Z# tasks on button-down, not
+by polling held-state. Hidden buttons do not receive clicks. Overlapping
+buttons use the highest `layer`, with later placements winning ties.
+`color` is the background; `hoverColor` is optional. The label is centered
+with automatically contrasting text. Buttons are axis-aligned, respect size
+and scale, and overlay the scene. In 2D they follow the scene camera; in 3D
+their X/Y placement is screen-space (center = 0,0). Release mouse capture
+before using menu buttons. Their press events remain available to scripts.
+
+`input.mouse.left` and `input.mouse.right` are held-state statuses. A complete
+click between script reads can leave both held-state reads `dead`.
+Use `leftPressed`, `leftReleased`, `rightPressed`, and `rightReleased` for
+reliable transitions. Each read consumes one pending transition of that kind
+for the current script task and returns `alive`; when none remain it returns
+`dead`. These are read-only statuses, not one-frame pulses: pending events
+survive waits and render frames. Tasks consume independently, so one task
+cannot steal another's clicks. Tracking starts when each task thread begins;
+new tasks do not replay earlier clicks. Multiple queued clicks produce
+multiple `alive` reads. Press/release queues are independent, not a combined
+chronological event stream. Read once and save the result if multiple actions
+need to use the same transition. Losing focus releases held mouse buttons.
+
+```zsharp
+loop (
+ if[input.mouse.leftPressed == alive] (
+  Print("Left button pressed"):
+ ) else ()
+ wait(16ms):
+)
 ```
 
 `input.mouse.deltaX` and `input.mouse.deltaY` contain the accumulated mouse

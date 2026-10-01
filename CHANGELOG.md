@@ -2,6 +2,11 @@
 
 ## 1.2.0.0 - 2026-09-30
 
+- Fixed clicks not detecting right
+- Added buttons to games
+
+## 1.2.0.0 - 2026-09-30
+
 - Added a graphical first-install setup on Windows and macOS while preserving
   the verified downloader and command-line update flags. Linux displays
   Zenity dialogs on supported desktops and retains its terminal fallback.

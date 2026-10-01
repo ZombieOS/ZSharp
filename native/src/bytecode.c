@@ -354,6 +354,7 @@ static int write_instruction(FILE *file,
         case ZOP_OR:
         case ZOP_GET_INDEX:
         case ZOP_PRINT:
+        case ZOP_PRINT_UPDATE:
         case ZOP_RETURN_VALUE:
         case ZOP_RETURN_VOID:
         case ZOP_RETURN_IF_FALSE:
@@ -819,6 +820,7 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
         case ZOP_OR:
         case ZOP_GET_INDEX:
         case ZOP_PRINT:
+        case ZOP_PRINT_UPDATE:
         case ZOP_RETURN_VALUE:
         case ZOP_RETURN_VOID:
         case ZOP_RETURN_IF_FALSE:

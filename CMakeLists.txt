@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.2.0.0 LANGUAGES C)
+project(zsharp VERSION 1.2.0.1 LANGUAGES C)
 if(ANDROID)
     enable_language(CXX)
 endif()
@@ -397,6 +397,26 @@ if(BUILD_TESTING)
     )
     add_executable(zsharp_test_game_skinning tests/game-skinning-tests.c)
     add_executable(zsharp_test_game_collision tests/game-collision-tests.c)
+    add_executable(zsharp_test_game_input tests/game-input-tests.c)
+    target_include_directories(zsharp_test_game_input PRIVATE native/src)
+    target_compile_features(zsharp_test_game_input PRIVATE c_std_17)
+    add_test(NAME zsharp_game_input COMMAND zsharp_test_game_input)
+    add_executable(zsharp_test_terminal_print tests/terminal-print-tests.c)
+    target_compile_features(zsharp_test_terminal_print PRIVATE c_std_17)
+    if(NOT WIN32)
+        find_package(Threads REQUIRED)
+        target_link_libraries(zsharp_test_terminal_print PRIVATE Threads::Threads)
+    endif()
+    add_test(NAME zsharp_terminal_print COMMAND zsharp_test_terminal_print)
+    add_test(NAME zsharp_print_update
+        COMMAND "${CMAKE_COMMAND}" "-DBIN=$<TARGET_FILE:zsharp>"
+        "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/print-update.zbc"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-print-update-tests.cmake")
+    add_test(NAME zsharp_game_buttons
+        COMMAND "${CMAKE_COMMAND}" "-DBIN=$<TARGET_FILE:zsharp>"
+        "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUT=${CMAKE_CURRENT_BINARY_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-game-button-tests.cmake")
     target_include_directories(zsharp_test_game_collision PRIVATE
         native/include native/src "${ufbx_SOURCE_DIR}")
     target_compile_features(zsharp_test_game_collision PRIVATE c_std_17)

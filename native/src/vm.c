@@ -4141,22 +4141,19 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 break;
             }
             case ZOP_PRINT:
+            case ZOP_PRINT_UPDATE:
                 if (!pop(stack, &stack_count, &value, error, error_size)) {
                     ok = 0;
                     goto done;
                 }
                 if (value.type == ZVALUE_NUMBER) {
-                    puts(value.number_text);
-                    zsharp_terminal_write(value.number_text);
+                    zsharp_terminal_print(value.number_text, instruction->op == ZOP_PRINT_UPDATE);
                 } else if (value.type == ZVALUE_TEXT) {
-                    puts(value.text);
-                    zsharp_terminal_write(value.text);
+                    zsharp_terminal_print(value.text, instruction->op == ZOP_PRINT_UPDATE);
                 } else if (value.type == ZVALUE_STATUS) {
-                    puts(value.number ? "alive" : "dead");
-                    zsharp_terminal_write(value.number ? "alive" : "dead");
+                    zsharp_terminal_print(value.number ? "alive" : "dead", instruction->op == ZOP_PRINT_UPDATE);
                 } else if (value.type == ZVALUE_NULL) {
-                    puts("null");
-                    zsharp_terminal_write("null");
+                    zsharp_terminal_print("null", instruction->op == ZOP_PRINT_UPDATE);
                 } else {
                     snprintf(error, error_size,
                              "Print does not yet support this value type");
@@ -5294,6 +5291,8 @@ static void run_window_task(WindowTask *task) {
     int initialized = 0;
     int state_locked = 0;
     int ok = 0;
+    if (task->runtime != NULL && task->runtime->begin_task != NULL)
+        task->runtime->begin_task(task->runtime->state);
     memset(&program, 0, sizeof(program));
     memset(&diagnostic, 0, sizeof(diagnostic));
     memset(&heap, 0, sizeof(heap));

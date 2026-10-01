@@ -925,7 +925,10 @@ static int render_before(const ZSharpGameRenderFrame *frame,
                          const ZSharpGameRenderObject *a,
                          const ZSharpGameRenderObject *b) {
     float a_depth, b_depth;
+    if ((a->shape == ZGAME_SHAPE_BUTTON) != (b->shape == ZGAME_SHAPE_BUTTON))
+        return a->shape != ZGAME_SHAPE_BUTTON;
     if (a->layer != b->layer) return a->layer < b->layer;
+    if (a->shape == ZGAME_SHAPE_BUTTON && b->shape == ZGAME_SHAPE_BUTTON) return 0;
     if (!frame->is_3d) return a->z > b->z;
     /* A long floor's center can pass behind the player even while much of
        that floor extends farther away. Drawing by its backmost corner keeps
@@ -1150,7 +1153,7 @@ int zsharp_game_vulkan_draw(ZSharpGameVulkan *renderer, int resized,
     for (index = 0; index < frame->object_count; index++) {
         const ZSharpGameRenderObject *object = &ordered[index];
         int ok = 1;
-        if (!object->visible || object->shape == ZGAME_SHAPE_LIGHT ||
+        if (!object->visible || object->shape == ZGAME_SHAPE_BUTTON || object->shape == ZGAME_SHAPE_LIGHT ||
             object->shape == ZGAME_SHAPE_NAV) continue;
         if (frame->is_3d && (object->shape == ZGAME_SHAPE_MESH ||
                              object->shape == ZGAME_SHAPE_CUBE)) continue;
@@ -1200,6 +1203,41 @@ int zsharp_game_vulkan_draw(ZSharpGameVulkan *renderer, int resized,
                                   frame->camera_x, frame->camera_y);
         }
         if (!ok) goto failed;
+    }
+    /* Screen-space buttons overlay the game, including 3D scenes. */
+    for (index = 0; index < frame->object_count; ++index) {
+        const ZSharpGameRenderObject *object = &ordered[index];
+        ZSharpGameRenderObject button;
+        int ok;
+        float camera_x = frame->is_3d ? 0 : frame->camera_x;
+        float camera_y = frame->is_3d ? 0 : frame->camera_y;
+        float width, height, x, y;
+        const char *label;
+        if (!object->visible || object->shape != ZGAME_SHAPE_BUTTON) continue;
+        button = *object;
+        button.rotation = 0;
+        button.width = fabsf(button.width);
+        button.height = fabsf(button.height);
+        button.scale_x = fabsf(button.scale_x);
+        button.scale_y = fabsf(button.scale_y);
+        if (!render_rectangle(renderer->renderer, &button, camera_x, camera_y)) goto failed;
+        width = button.width * button.scale_x;
+        height = button.height * button.scale_y;
+        label = object->text == NULL ? "" : object->text;
+        x = screen_x(object->x, camera_x) - (float)strlen(label) * 4.0f;
+        y = screen_y(object->y, camera_y) - 4.0f;
+        {
+            SDL_Rect clip = {(int)(screen_x(object->x, camera_x) - width * 0.5f),
+                             (int)(screen_y(object->y, camera_y) - height * 0.5f),
+                             (int)width, (int)height};
+            unsigned color = object->color;
+            unsigned brightness = ((color >> 16) & 255) + ((color >> 8) & 255) + (color & 255);
+            SDL_SetRenderClipRect(renderer->renderer, &clip);
+            set_color(renderer->renderer, brightness > 382 ? 0x000000 : 0xFFFFFF);
+            ok = SDL_RenderDebugText(renderer->renderer, x, y, label);
+            SDL_SetRenderClipRect(renderer->renderer, NULL);
+            if (!ok) goto failed;
+        }
     }
     free(ordered);
     if (!SDL_RenderPresent(renderer->renderer)) goto failed_without_objects;

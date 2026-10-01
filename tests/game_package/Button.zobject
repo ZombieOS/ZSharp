@@ -1,0 +1,12 @@
+zsharp = type.object
+noticed object NewGame[] (
+ shape: button:
+ text: "New Game":
+ width: 160:
+ height: 32:
+ color: #FFFFFF:
+ hoverColor: #990000:
+ event(
+  left: "Main:Game:ButtonClick":
+ )
+)

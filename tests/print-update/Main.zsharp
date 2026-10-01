@@ -1,0 +1,12 @@
+zsharp = type.script
+noticed room Main[] (
+ noticed brain Start[] (
+  Print("Header"):
+  Print("Long progress line").update:
+  Print("X").update:
+  Print(42).update:
+  Print(alive).update:
+  Print("Done"):
+  Print("Next"):
+ )
+)

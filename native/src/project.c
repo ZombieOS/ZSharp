@@ -1597,6 +1597,12 @@ static int validate_feature_version(const ZSharpSettings *settings,
                  settings->zsharp_version[2], settings->zsharp_version[3]);
         return 0;
     }
+    if (instruction->op == ZOP_PRINT_UPDATE &&
+        project_version_before(settings, 1, 2, 0, 1)) {
+        snprintf(error, error_size,
+                 "Print(...).update requires ZSharp: [1.2.0.1]: or newer");
+        return 0;
+    }
     if (instruction->op == ZOP_UI_SET &&
         instruction->operand != NULL &&
         (strstr(instruction->operand, ".playClip.") != NULL ||

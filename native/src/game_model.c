@@ -478,9 +478,11 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
         }
         else if (strcmp(value->text, "text") == 0)
             object->shape = ZGAME_SHAPE_TEXT;
+        else if (strcmp(value->text, "button") == 0)
+            object->shape = ZGAME_SHAPE_BUTTON;
         else {
             parser_fail(parser, &parser->current,
-                        "shape must be rectangle, circle, triangle, sprite, cube, or text");
+                        "shape must be rectangle, circle, triangle, sprite, cube, text, or button");
             return 0;
         }
         return 1;
@@ -575,6 +577,10 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
     }
     if (strcmp(field, "color") == 0)
         return value_color(parser, value, &object->color);
+    if (strcmp(field, "hoverColor") == 0) {
+        object->hover_color_explicit = 1;
+        return value_color(parser, value, &object->hover_color);
+    }
 #define STATUS_FIELD(name, member)                                             \
     if (strcmp(field, name) == 0)                                              \
         return value_status(parser, value, &object->member)
@@ -765,6 +771,7 @@ static ZSharpGameObject *place_object(ModelParser *parser,
     *object = *definition;
     object->name = object->display_name = object->source_file = NULL;
     object->scene = object->text = object->asset_path = object->audio_path = NULL;
+    object->click_left = object->click_right = NULL;
     object->mesh_path = NULL;
     object->material_names = NULL;
     object->material_textures = NULL;
@@ -785,6 +792,8 @@ static ZSharpGameObject *place_object(ModelParser *parser,
         !copy_optional(&object->source_file, definition->source_file) ||
         !copy_optional(&object->scene, scene) ||
         !copy_optional(&object->text, definition->text) ||
+        !copy_optional(&object->click_left, definition->click_left) ||
+        !copy_optional(&object->click_right, definition->click_right) ||
         !copy_optional(&object->asset_path, definition->asset_path) ||
         !copy_optional(&object->mesh_path, definition->mesh_path) ||
         !copy_optional(&object->audio_path, definition->audio_path))
@@ -1141,6 +1150,57 @@ static int parse_scene_objects(ModelParser *parser, const char *scene_name) {
                               "expected ')' after objects");
 }
 
+static int parse_button_events(ModelParser *parser, ZSharpGameObject *object) {
+    if (object->event_defined) {
+        parser_fail(parser, &parser->current, "duplicate event block");
+        return 0;
+    }
+    object->event_defined = 1;
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_PAREN, "expected '(' after event")) return 0;
+    while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN) {
+        char *field = parser_name(parser, "left or right click action");
+        char **target;
+        ModelValue value;
+        if (field == NULL) return 0;
+        target = strcmp(field, "left") == 0 ? &object->click_left :
+                 strcmp(field, "right") == 0 ? &object->click_right : NULL;
+        free(field);
+        if (target == NULL || *target != NULL) {
+            parser_fail(parser, &parser->current, "event accepts one left and/or right action");
+            return 0;
+        }
+        if (!parser_expect_type(parser, ZTOKEN_COLON, "expected ':' after click action") ||
+            !parse_value(parser, &value)) return 0;
+        if (value.type != MODEL_TEXT || value.text == NULL || value.text[0] == '\0') {
+            free(value.text);
+            parser_fail(parser, &parser->current, "click action requires a nonempty quoted File:Room:Function target");
+            return 0;
+        }
+        *target = value.text;
+        {
+            const char *part = *target;
+            int parts = 1;
+            while (*part != '\0') {
+                if (*part == ':') {
+                    if (part == *target || part[-1] == ':' || part[1] == '\0') break;
+                    ++parts;
+                } else if (isspace((unsigned char)*part)) break;
+                ++part;
+            }
+            if (*part != '\0' || (parts != 3 && parts != 4)) {
+                parser_fail(parser, &parser->current, "click target must be File:Room:Function or Project:File:Room:Function");
+                return 0;
+            }
+        }
+        if (!parser_expect_type(parser, ZTOKEN_COLON, "expected ':' after click target")) return 0;
+    }
+    if (object->click_left == NULL && object->click_right == NULL) {
+        parser_fail(parser, &parser->current, "event requires at least one click action");
+        return 0;
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN, "expected ')' after event");
+}
+
 static int parse_object_declaration(ModelParser *parser, char *name) {
     ZSharpGameObject *object;
     parser->definition_mode = 1;
@@ -1157,6 +1217,11 @@ static int parse_object_declaration(ModelParser *parser, char *name) {
         char *field = parser_name(parser, "an object field name");
         ModelValue value;
         if (field == NULL) return 0;
+        if (strcmp(field, "event") == 0) {
+            free(field);
+            if (!parse_button_events(parser, object)) return 0;
+            continue;
+        }
         if (strcmp(field, "attributes") == 0) {
             free(field);
             if (!parse_attributes(parser, object)) return 0;
@@ -1180,6 +1245,14 @@ static int parse_object_declaration(ModelParser *parser, char *name) {
         apply_object_field(parser, object, field, &value);
         free(value.text);
         free(field);
+    }
+    if (object->shape == ZGAME_SHAPE_BUTTON && !object->event_defined) {
+        parser_fail(parser, &parser->current, "shape: button requires an event block");
+        return 0;
+    }
+    if (object->shape != ZGAME_SHAPE_BUTTON && object->event_defined) {
+        parser_fail(parser, &parser->current, "event is only supported for shape: button");
+        return 0;
     }
     return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
                               "expected ')' after object fields");
@@ -2193,6 +2266,8 @@ static void free_game_object(ZSharpGameObject *object) {
     free(object->source_file);
     free(object->scene);
     free(object->text);
+    free(object->click_left);
+    free(object->click_right);
     free(object->asset_path);
     free(object->mesh_path);
     for (index = 0; index < object->material_count; index++) {
@@ -3021,6 +3096,10 @@ int zsharp_game_model_owns_property(const ZSharpGameModel *model,
         strcmp(parts[1], "mouse") == 0)
         return strcmp(parts[2], "left") == 0 ||
                strcmp(parts[2], "right") == 0 ||
+               strcmp(parts[2], "leftPressed") == 0 ||
+               strcmp(parts[2], "leftReleased") == 0 ||
+               strcmp(parts[2], "rightPressed") == 0 ||
+               strcmp(parts[2], "rightReleased") == 0 ||
                strcmp(parts[2], "x") == 0 || strcmp(parts[2], "y") == 0 ||
                strcmp(parts[2], "deltaX") == 0 ||
                strcmp(parts[2], "deltaY") == 0 ||
@@ -3517,12 +3596,35 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
     return 0;
 }
 
+const ZSharpGameObject *zsharp_game_model_button_at(const ZSharpGameModel *model,
+                                                   float mouse_x, float mouse_y) {
+    const ZSharpGameObject *selected = NULL;
+    ZSharpGameScene *scene = find_scene(model, model->active_scene);
+    size_t i;
+    if (!model->is_3d && scene != NULL) {
+        mouse_x += scene->camera_x;
+        mouse_y += scene->camera_y;
+    }
+    for (i = 0; i < model->object_count; ++i) {
+        const ZSharpGameObject *object = &model->objects[i];
+        if (object->shape != ZGAME_SHAPE_BUTTON || !object->visible ||
+            object->opacity <= 0 || object->scene == NULL || model->active_scene == NULL ||
+            strcmp(object->scene, model->active_scene) != 0) continue;
+        if (fabsf(mouse_x - object->x) <= fabsf(object->width * object->scale_x) * 0.5f &&
+            fabsf(mouse_y - object->y) <= fabsf(object->height * object->scale_y) * 0.5f &&
+            (selected == NULL || object->layer >= selected->layer)) selected = object;
+    }
+    return selected;
+}
+
 void zsharp_game_model_frame(const ZSharpGameModel *model,
                              ZSharpGameRenderFrame *frame,
                              ZSharpGameRenderObject **objects) {
     ZSharpGameScene *scene = find_scene(model, model->active_scene);
     size_t index;
     size_t count = 0;
+    const ZSharpGameObject *hovered_button = model->input.mouse_captured ? NULL :
+        zsharp_game_model_button_at(model, model->input.mouse_x, model->input.mouse_y);
     memset(frame, 0, sizeof(*frame));
     *objects = model->object_count == 0 ? NULL :
         (ZSharpGameRenderObject *)calloc(model->object_count,
@@ -3548,6 +3650,9 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
         target->scale_y = source->scale_y;
         target->scale_z = source->scale_z;
         target->color = source->color;
+        if (source->shape == ZGAME_SHAPE_BUTTON && source->hover_color_explicit &&
+            hovered_button == source)
+            target->color = source->hover_color;
         target->opacity = source->opacity;
         target->roughness = source->roughness;
         target->emissive = source->emissive;

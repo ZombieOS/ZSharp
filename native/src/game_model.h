@@ -70,6 +70,11 @@ typedef struct ZSharpGameObject {
     char *source_file;
     char *scene;
     ZSharpGameShape shape;
+    unsigned hover_color;
+    int hover_color_explicit;
+    int event_defined;
+    char *click_left;
+    char *click_right;
     ZSharpGameBodyType body;
     ZSharpGameColliderType collider;
     float x;
@@ -207,5 +212,7 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
                              ZSharpGameRenderObject **objects);
 const char *zsharp_game_model_scene_title(const ZSharpGameModel *model);
 const char *zsharp_game_model_scene_icon(const ZSharpGameModel *model);
+const ZSharpGameObject *zsharp_game_model_button_at(const ZSharpGameModel *model,
+                                                   float mouse_x, float mouse_y);
 
 #endif

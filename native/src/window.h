@@ -33,6 +33,8 @@ typedef struct ZSharpWindowRuntime {
                 char *error, size_t error_size);
     int (*is_cancelled)(void *state);
     void (*request_close)(void *state);
+    /* Called on the script thread before loading/executing its task. */
+    void (*begin_task)(void *state);
 } ZSharpWindowRuntime;
 
 typedef int (*ZSharpWindowCallback)(void *user_data, const char *target,

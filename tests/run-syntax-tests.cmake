@@ -221,8 +221,13 @@ execute_process(
     RESULT_VARIABLE native_app_result
     OUTPUT_VARIABLE native_app_output
     ERROR_VARIABLE native_app_error)
-if(NOT native_app_result EQUAL 0 OR
-   NOT native_app_output MATCHES "Z# 1.2.0.0")
+execute_process(COMMAND "${ZSHARP_BIN}" --version
+                OUTPUT_VARIABLE native_expected_version
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
+string(FIND "${native_app_output}" "${native_expected_version}"
+       native_version_position)
+if(NOT native_app_result EQUAL 0 OR native_expected_version STREQUAL "" OR
+   native_version_position LESS 0)
     message(FATAL_ERROR
         "native startup launch failed (${native_app_result})\n"
         "stdout: ${native_app_output}\nstderr: ${native_app_error}")
@@ -659,14 +664,17 @@ file(REMOVE_RECURSE "${future_game_project}")
 file(COPY "${PROJECT_ROOT}/tests/game_package/"
      DESTINATION "${future_game_project}")
 file(READ "${future_game_project}/project.zsettings" future_settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.2.0.1]:"
+string(REGEX MATCH "([0-9]+)\\.([0-9]+)\\.([0-9]+)\\.([0-9]+)" ignored "${native_expected_version}")
+math(EXPR future_revision "${CMAKE_MATCH_4} + 1")
+set(future_version "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}.${future_revision}")
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [${future_version}]:"
        future_settings "${future_settings}")
 file(WRITE "${future_game_project}/project.zsettings" "${future_settings}")
 expect_success("future-version game packaging" "${PROJECT_ROOT}"
                package game "${future_game_project}" FutureVersion)
 set(ENV{ZSHARP_HUB_CONSOLE_ONLY} "1")
 expect_failure("future-version package launch"
-               "Update to at least 1.2.0.1!"
+               "Update to at least ${future_version}!"
                "${PROJECT_ROOT}"
                open "${future_game_project}/Packages/FutureVersion.zgame")
 unset(ENV{ZSHARP_HUB_CONSOLE_ONLY})
@@ -865,7 +873,8 @@ if(WIN32)
     )
     if(NOT game_result EQUAL 0 OR
        NOT game_output MATCHES "running bytecoded startup" OR
-       NOT game_output MATCHES "game start ran")
+       NOT game_output MATCHES "game start ran" OR
+       NOT game_output MATCHES "mouse edge properties resolved")
         message(FATAL_ERROR
             "Vulkan game package smoke test failed (${game_result})\n"
             "stdout: ${game_output}\nstderr: ${game_error}")
