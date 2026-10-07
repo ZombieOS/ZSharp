@@ -1,5 +1,110 @@
 # Changelog
 
+## 1.2.1.0 - 2026-10-07
+
+- Added root `.zignore` package exclusions with ordered Git-style glob rules,
+  folder/root patterns and negation for apps, games, source companions and
+  dependency packages. Ignore files are not included in the package.
+
+- Added versioned C extension hooks for custom function declarations and named
+  configuration blocks, plus queued callback/background-service lifetime support.
+  Existing C statement/expression registrations remain compatible.
+
+- Allowed nested expressions such as `File.read(".env")` directly inside custom
+  C syntax arguments, including arithmetic and nested function calls.
+
+- Fixed Python state being lost between calls by retaining a shared interpreter
+  and loaded modules until ZVM process exit, with serialized calls and bounded
+  worker shutdown.
+
+- Added source-only `.zpackage` dependencies and `zsharp package pack`.
+  Running scripts and packaging apps/games install declared dependencies from
+  local `Dependencies/` packages first, or download missing releases from ZOS
+  Store. Includes project-scoped imports, transitive dependencies, and C syntax
+  registration before script parsing.
+
+- Added `Regex.test`, `Regex.matches`, and `Regex.replace` with optional flags
+  and ordinary text-array results.
+
+- Added native `Math.pow(base, exponent)` with nested expressions and clear
+  domain/overflow errors.
+
+- Added C extension `add_expression` registrations for value-producing custom
+  syntax in conditions, arithmetic, assignments, and call arguments.
+- Allowed distinct custom C syntax patterns to share a namespace while
+  rejecting overlapping registrations.
+- Fixed C modules losing native state between calls by retaining loaded
+  libraries for the process lifetime, matching C++ modules.
+
+- Improved moving-camera/flashlight frame performance by retaining stationary
+  lights' exact cube-face shadow visibility results independently of moving
+  lights and metallic highlights. Geometry changes invalidate the cache;
+  moving lights use live shadow queries. Optional cache storage is bounded.
+- Reduced live moving-light shadow work by sharing ray reciprocals during
+  spatial traversal, checking nearby blockers first, and sharing rotation
+  calculations between shadow-ray endpoints.
+
+- Improved dense-scene rendering by retaining shadow geometry indexes when
+  only lights change, avoiding cache invalidation from zero-intensity light
+  transforms, and caching exact metallic lighting by camera position.
+
+- Added `File.searchExtension(".ext")`, returning sorted project-relative
+  text paths with case-insensitive extension matching, recursive regular-file
+  discovery, and normal zero-based indexing. Added local `text()` array values.
+
+- Optimized frame work in large 3D scenes: reused draw-list sorting buffers,
+  skipped unnecessary out-of-range/zero-intensity lighting work, and rejected
+  distant capsule/box pairs before the exact collision solver. Existing
+  transparency order, lighting appearance, and nearby collision behavior remain.
+
+- Optimized game packaging by sharing a freshly validated scene/object model
+  across script checks and startup compilation within each build, rather than
+  reloading all scenes for every property expression. Full asset validation
+  and package integrity checks are preserved; later builds load fresh data.
+- Optimized large-scene loading with amortized object-array growth rather than
+  reallocating the complete array for every placement; construction slack is
+  trimmed before the runtime instance index is built.
+
+- Added text-based callback calls and dedicated `function` references,
+  including local/room variables, function parameters, arguments, returned
+  values, and existing foreign-language call targets. Parameterized `Start`
+  brains require explicit calls rather than auto-running without arguments.
+
+- Added indexed runtime access to individual scene placements through
+  `Scene.Instance.property`, optional placement `instanceId`, and clear
+  duplicate/ambiguous identifier errors. Transform edits update live colliders
+  and record platform translation for grounded rider carrying.
+
+- Added hardware depth-tested 3D rasterization through SDL_GPU/Vulkan, including
+  GPU texture sampling, perspective-correct interpolation, alpha blending,
+  reusable upload buffers, and adjacent-material batching. The software depth
+  renderer remains a fallback; scene math and lighting remain on the CPU.
+
+- Fixed quadratic render sorting and unnecessary static/static collision
+  traversal in larger scenes; added conservative cube frustum culling.
+- Optimized shadow queries with conservative segment bounds and unrotated
+  caster fast paths while preserving the existing shadow geometry tests.
+- Added a spatial shadow-caster index and value-invalidated cube lighting
+  cache for dense scenes. Camera-only changes reuse static lighting; changed
+  lights/casters refresh it. Projection camera transforms and render sort
+  depths are prepared once, and closed opaque cubes skip hidden back faces.
+- Added conservative box-collision rejection before oriented contact tests
+  and opt-in renderer phase timings for production-scene profiling.
+- Fixed `Game.fps` reporting the physics tick rate instead of actual frame
+  intervals, and added opt-in frame timing diagnostics.
+
+- Fixed C++ module state being lost between calls, and Windows loading of
+  module-local dependent DLLs. C++ modules now remain loaded until process exit.
+- Added chained `else if` conditions.
+- Added optional `Shutdown[]` cleanup brains for normal runtime shutdown.
+- Added game text/button `font-size` and `Application.Quit:` for normal
+  app/game closure from scripts.
+- Added game-button `:hover` and `:focus` styles, keyboard focus navigation,
+  Enter/Space activation, and color/opacity/scale transitions.
+- Added native-window alpha colors, opacity, flat flex/grid layout, expanded
+  selectors, and layout-only width/height media queries. Platform verification
+  and remaining native-control styling work are still in progress.
+
 ## 1.2.0.0 - 2026-09-30
 
 - Fixed clicks not detecting right

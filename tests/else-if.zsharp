@@ -1,0 +1,33 @@
+zsharp = type.script
+noticed room Main[] (
+ noticed brain Shutdown[] (
+  Print("CONSOLE SHUTDOWN"):
+ )
+ noticed brain Start[] (
+  if [dead] (
+   Print("WRONG"):
+  ) else if [alive] (
+   Print("SECOND"):
+  ) else if [alive] (
+   Print("WRONG"):
+  ) else (
+   Print("WRONG"):
+  )
+  if[alive] (
+   Print("FIRST"):
+  ) else if[alive] (
+   Print("WRONG"):
+  )
+  if[dead] (
+   Print("WRONG"):
+  ) else if[dead] (
+   Print("WRONG"):
+  ) else (
+   Print("FALLBACK"):
+  )
+  if[dead] () else if[dead] () else ()
+  Print("CONTINUES"):
+  if[dead] () else if[dead] ()
+  Print("WRONG"):
+ )
+)

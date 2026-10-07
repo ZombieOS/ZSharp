@@ -36,7 +36,64 @@ static int ignored_project_directory(const char *name) {
     return strcmp(name, ".git") == 0 || strcmp(name, ".gradle") == 0 ||
            strcmp(name, ".idea") == 0 || strcmp(name, ".vscode") == 0 ||
            strcmp(name, "build") == 0 || strcmp(name, "target") == 0 ||
-           strcmp(name, "Packages") == 0 || strcmp(name, "node_modules") == 0;
+           strcmp(name, "Packages") == 0 || strcmp(name, "Dependencies") == 0 || strcmp(name, "node_modules") == 0;
+}
+
+char *zsharp_project_dependency_root(const char *root, const char *id, char *error, size_t error_size) {
+    ZSharpSettings owner, installed;
+    ZSharpDiagnostic diagnostic;
+    const ZSharpDependency *dependency;
+    char *path = NULL;
+    size_t capacity;
+    if (!zsharp_settings_load(root, &owner, &diagnostic, error, error_size)) return NULL;
+    if (strcmp(id, owner.project_id) == 0) {
+        zsharp_settings_free(&owner);
+        return zsharp_copy_text(root, strlen(root));
+    }
+    dependency = zsharp_settings_find_dependency(&owner, id);
+    if (!dependency) {
+        snprintf(error, error_size, "project '%s' is not listed in Dependencies", id);
+        zsharp_settings_free(&owner); return NULL;
+    }
+    capacity = strlen(root) + strlen(id) + 96;
+    path = (char *)malloc(capacity);
+    if (path) snprintf(path, capacity, "%s/Dependencies/%s/%u.%u.%u.%u", root, id,
+        dependency->version[0], dependency->version[1], dependency->version[2], dependency->version[3]);
+    if (!path || !zsharp_settings_load(path, &installed, &diagnostic, error, error_size)) {
+        free(path); path = NULL;
+    } else {
+        if (strcmp(installed.project_id, id) != 0 || memcmp(installed.version, dependency->version, sizeof(installed.version)) != 0) {
+            snprintf(error, error_size, "installed dependency '%s' does not match its declared PID/version", id);
+            free(path); path = NULL;
+        }
+        zsharp_settings_free(&installed);
+    }
+    zsharp_settings_free(&owner);
+    return path;
+}
+
+int zsharp_project_foreign_root(const char *root, const char *module,
+    char **resolved_root, const char **local_module, char *error, size_t error_size) {
+    ZSharpSettings settings;
+    ZSharpDiagnostic diagnostic;
+    const char *dot = strchr(module, '.');
+    char id[256];
+    *resolved_root = NULL; *local_module = module;
+    if (!zsharp_settings_load(root, &settings, &diagnostic, error, error_size)) return 0;
+    if (dot && (size_t)(dot - module) < sizeof(id)) {
+        memcpy(id, module, (size_t)(dot - module)); id[dot - module] = '\0';
+        if (strcmp(id, settings.project_id) == 0) *local_module = dot + 1;
+        else if (zsharp_settings_find_dependency(&settings, id)) {
+            zsharp_settings_free(&settings);
+            *resolved_root = zsharp_project_dependency_root(root, id, error, error_size);
+            *local_module = dot + 1;
+            return *resolved_root != NULL;
+        }
+    }
+    zsharp_settings_free(&settings);
+    *resolved_root = zsharp_copy_text(root, strlen(root));
+    if (!*resolved_root) snprintf(error, error_size, "out of memory");
+    return *resolved_root != NULL;
 }
 
 static int has_extension(const char *name, const char *extension) {
@@ -45,6 +102,18 @@ static int has_extension(const char *name, const char *extension) {
     return name_length > extension_length &&
            memcmp(name + name_length - extension_length,
                   extension, extension_length) == 0;
+}
+
+static int search_extension_matches(const char *name,const char *extension) {
+    size_t n=strlen(name),e=strlen(extension),i;
+    if(n<e)return 0;
+    for(i=0;i<e;i++) {
+        unsigned char a=(unsigned char)name[n-e+i],b=(unsigned char)extension[i];
+        if(a>='A'&&a<='Z')a+=(unsigned char)('a'-'A');
+        if(b>='A'&&b<='Z')b+=(unsigned char)('a'-'A');
+        if(a!=b)return 0;
+    }
+    return 1;
 }
 
 static int append_source_path(ZSharpSourceList *sources, char *path,
@@ -161,7 +230,8 @@ static void search_directory(const char *directory, SearchState *state) {
             break;
         }
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+            if (strcmp(entry.cFileName, "Dependencies") != 0 &&
+                (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
                 search_directory(path, state);
             }
             free(path);
@@ -207,7 +277,7 @@ static void search_directory(const char *directory, SearchState *state) {
             continue;
         }
         if (S_ISDIR(status.st_mode)) {
-            search_directory(path, state);
+            if (strcmp(entry->d_name, "Dependencies") != 0) search_directory(path, state);
             free(path);
         } else if (S_ISREG(status.st_mode) &&
                    source_name_matches(entry->d_name, state->file_name)) {
@@ -418,11 +488,13 @@ int zsharp_project_find_source(const char *project_root, const char *file_name,
 static int list_source_directory(const char *directory,
                                  ZSharpSourceList *sources,
                                  const char *extension,
+                                 unsigned search_depth,
                                  char *error, size_t error_size) {
     WIN32_FIND_DATAA entry;
     char *pattern = join_path(directory, "*");
     HANDLE search;
     int ok = 1;
+    if(search_depth>256){set_error(error,error_size,"File.searchExtension directory nesting exceeds 256");return 0;}
     if (pattern == NULL) {
         set_error(error, error_size, "out of memory");
         return 0;
@@ -439,7 +511,8 @@ static int list_source_directory(const char *directory,
     }
     do {
         char *path;
-        if (strcmp(entry.cFileName, ".") == 0 ||
+        if ((search_depth && (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) ||
+            strcmp(entry.cFileName, ".") == 0 ||
             strcmp(entry.cFileName, "..") == 0) continue;
         path = join_path(directory, entry.cFileName);
         if (path == NULL) {
@@ -449,12 +522,12 @@ static int list_source_directory(const char *directory,
         }
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
-                !ignored_project_directory(entry.cFileName)) {
-                ok = list_source_directory(path, sources, extension, error,
+                (search_depth || !ignored_project_directory(entry.cFileName))) {
+                ok = list_source_directory(path, sources, extension, search_depth?search_depth+1:0, error,
                                            error_size);
             }
             free(path);
-        } else if (has_extension(entry.cFileName, extension)) {
+        } else if (search_depth ? search_extension_matches(entry.cFileName,extension) : has_extension(entry.cFileName, extension)) {
             ok = append_source_path(sources, path, error, error_size);
         } else {
             free(path);
@@ -467,10 +540,12 @@ static int list_source_directory(const char *directory,
 static int list_source_directory(const char *directory,
                                  ZSharpSourceList *sources,
                                  const char *extension,
+                                 unsigned search_depth,
                                  char *error, size_t error_size) {
     DIR *stream = opendir(directory);
     struct dirent *entry;
     int ok = 1;
+    if(search_depth>256){if(stream)closedir(stream);set_error(error,error_size,"File.searchExtension directory nesting exceeds 256");return 0;}
     if (stream == NULL) {
         if (errno == EACCES || errno == ENOENT) return 1;
         set_error(error, error_size,
@@ -493,12 +568,12 @@ static int list_source_directory(const char *directory,
             continue;
         }
         if (S_ISDIR(status.st_mode)) {
-            if (!ignored_project_directory(entry->d_name))
-                ok = list_source_directory(path, sources, extension, error,
+            if (search_depth || !ignored_project_directory(entry->d_name))
+                ok = list_source_directory(path, sources, extension, search_depth?search_depth+1:0, error,
                                            error_size);
             free(path);
         } else if (S_ISREG(status.st_mode) &&
-                   has_extension(entry->d_name, extension)) {
+                   (search_depth ? search_extension_matches(entry->d_name,extension) : has_extension(entry->d_name, extension))) {
             ok = append_source_path(sources, path, error, error_size);
         } else {
             free(path);
@@ -524,13 +599,27 @@ int zsharp_project_list_files(const char *project_root, const char *extension,
         set_error(error, error_size, "project file extension must start with '.'");
         return 0;
     }
-    if (!list_source_directory(project_root, sources, extension, error,
+    if (!list_source_directory(project_root, sources, extension, 0, error,
                                error_size)) {
         zsharp_project_source_list_free(sources);
         return 0;
     }
     qsort(sources->items, sources->count, sizeof(*sources->items),
           compare_source_paths);
+    return 1;
+}
+
+int zsharp_project_search_files(const char *project_root, const char *extension,
+                               ZSharpSourceList *sources, char *error, size_t error_size) {
+    memset(sources,0,sizeof(*sources));
+    if(!extension || extension[0]!='.' || !extension[1] ||
+       strpbrk(extension,"/\\:*?[]") || strstr(extension,"..")) {
+        set_error(error,error_size,"File.searchExtension requires an extension such as '.png'");return 0;
+    }
+    if(!list_source_directory(project_root,sources,extension,1,error,error_size)) {
+        zsharp_project_source_list_free(sources);return 0;
+    }
+    qsort(sources->items,sources->count,sizeof(*sources->items),compare_source_paths);
     return 1;
 }
 
@@ -1123,7 +1212,8 @@ static int validate_file_function(const ZSharpProgram *program,
         snprintf(error, error_size,
                  "Function.call target '%s.%s' is not visible", room_name,
                  function_name);
-    } else if (function->parameter_count != argument_count) {
+    } else if (argument_count != UINT32_MAX &&
+               function->parameter_count != argument_count) {
         snprintf(error, error_size,
                  "function '%s.%s' expects %zu argument(s), but received %u",
                  room_name, function_name, function->parameter_count,
@@ -1180,6 +1270,7 @@ static int validate_foreign_call(const ZSharpProgram *program,
     char qualified[1024];
     char relative[1024];
     char absolute[2048];
+    char *resolved_root = NULL;
     const char *module = instruction->call_file;
     const char *local_module = module;
     size_t project_length = strlen(settings->project_id);
@@ -1197,8 +1288,15 @@ static int validate_foreign_call(const ZSharpProgram *program,
         local_module = module + project_length + 1;
         snprintf(qualified, sizeof(qualified), "%s:%s", language, module);
     } else {
-        snprintf(qualified, sizeof(qualified), "%s:%s.%s", language,
-                 settings->project_id, module);
+        const char *dot = strchr(module, '.');
+        char id[256];
+        int dependency_module = 0;
+        if (dot && (size_t)(dot - module) < sizeof(id)) {
+            memcpy(id, module, (size_t)(dot - module)); id[dot - module] = '\0';
+            dependency_module = zsharp_settings_find_dependency(settings, id) != NULL;
+        }
+        if (dependency_module) snprintf(qualified, sizeof(qualified), "%s:%s", language, module);
+        else snprintf(qualified, sizeof(qualified), "%s:%s.%s", language, settings->project_id, module);
     }
     for (index = 0; index < room->import_count; index++) {
         const char *candidate = room->imports[index].path;
@@ -1218,9 +1316,11 @@ static int validate_foreign_call(const ZSharpProgram *program,
                  settings->project_id, module);
         return 0;
     }
+    if (!zsharp_project_foreign_root(project_root, module, &resolved_root, &local_module, error, error_size)) return 0;
     if (strchr(local_module, '/') != NULL || strchr(local_module, '\\') != NULL ||
         strstr(local_module, "..") != NULL) {
         snprintf(error, error_size, "invalid %s module path '%s'", label, module);
+        free(resolved_root);
         return 0;
     }
     snprintf(relative, sizeof(relative), "%s.%s", local_module, extension);
@@ -1234,13 +1334,14 @@ static int validate_foreign_call(const ZSharpProgram *program,
     /* Restore the extension separator replaced by the loop. */
     if (strlen(relative) >= strlen(extension) + 1)
         relative[strlen(relative) - strlen(extension) - 1] = '.';
-    snprintf(absolute, sizeof(absolute), "%s%c%s", project_root,
+    snprintf(absolute, sizeof(absolute), "%s%c%s", resolved_root,
 #ifdef _WIN32
              '\\',
 #else
              '/',
 #endif
              relative);
+    free(resolved_root);
     file = fopen(absolute, "rb");
     if (file == NULL) {
         snprintf(error, error_size,
@@ -1253,18 +1354,94 @@ static int validate_foreign_call(const ZSharpProgram *program,
     return 1;
 }
 
+int zsharp_project_authorize_call(const ZSharpProgram *program,
+                                 const ZSharpSettings *settings,
+                                 const ZSharpRoom *room,
+                                 const ZSharpInstruction *target,
+                                 char *error, size_t error_size) {
+    if (target->operand != NULL && target->operand[0] == '@') {
+        char qualified[8192];
+        const char *module = target->call_file;
+        size_t length = strlen(settings->project_id), i;
+        const char *dot = strchr(module, '.');
+        char id[256];
+        int dependency_module = 0;
+        if (dot && (size_t)(dot - module) < sizeof(id)) {
+            memcpy(id, module, (size_t)(dot - module)); id[dot - module] = '\0';
+            dependency_module = zsharp_settings_find_dependency(settings, id) != NULL;
+        }
+        if (dependency_module || (strncmp(module, settings->project_id, length) == 0 && module[length] == '.'))
+            snprintf(qualified, sizeof(qualified), "%s:%s", target->operand + 1, module);
+        else
+            snprintf(qualified, sizeof(qualified), "%s:%s.%s", target->operand + 1, settings->project_id, module);
+        for (i = 0; i < room->import_count; i++) {
+            const char *candidate = room->imports[i].path;
+            size_t n = strlen(candidate);
+            if (strcmp(candidate, qualified) == 0 ||
+                (n >= 2 && candidate[n - 2] == '.' && candidate[n - 1] == '*' &&
+                 strncmp(candidate, qualified, n - 1) == 0)) return 1;
+        }
+        snprintf(error, error_size, "callback requires import %s() in room '%s'", qualified, room->name);
+        return 0;
+    }
+    if (target->operand != NULL && target->operand[0] != 0)
+        return require_project_import(room, settings, target->operand, target->call_file, error, error_size);
+    return require_file_import(program, settings, room, target->call_file, error, error_size);
+}
+
+int zsharp_project_validation_game(ZSharpValidationContext *context,
+                                  const char *project_root,
+                                  char *error, size_t error_size) {
+    if (context->game != NULL) {
+        if (strcmp(context->game->project_root, project_root) != 0) {
+            snprintf(error, error_size, "validation context cannot be reused for another project");
+            return 0;
+        }
+        return 1;
+    }
+    context->game = (ZSharpGameModel *)calloc(1, sizeof(*context->game));
+    if (context->game == NULL) {
+        snprintf(error, error_size, "out of memory"); return 0;
+    }
+    context->game_model_loads++;
+    if (!zsharp_game_model_load(project_root, context->game, error, error_size)) {
+        free(context->game); context->game = NULL; return 0;
+    }
+    context->game->validation_mode = 1;
+    return 1;
+}
+
+void zsharp_project_validation_free(ZSharpValidationContext *context) {
+    if (context->game != NULL) {
+        zsharp_game_model_free(context->game);
+        free(context->game);
+    }
+    memset(context, 0, sizeof(*context));
+}
+
 static int validate_instruction(const ZSharpProgram *program,
                                 const ZSharpSettings *settings,
                                 const ZSharpRoom *room,
                                 const ZSharpFunction *function,
                                 size_t instruction_index,
                                 const ZSharpInstruction *instruction,
-                                const char *project_root, char *error,
+                                const char *project_root,
+                                ZSharpValidationContext *context, char *error,
                                 size_t error_size) {
     char *storage = NULL;
     char *parts[5] = {0};
     size_t count = 0;
     int ok = 1;
+    if (instruction->op == ZOP_PUSH_FUNCTION) {
+        ZSharpInstruction target = {0};
+        char target_storage[8192];
+        target.op = ZOP_CALL_QUALIFIED;
+        target.argument_count = UINT32_MAX; /* Binding is not invocation. */
+        if (!zsharp_call_target_decode(instruction->operand, &target,
+                target_storage, sizeof(target_storage), error, error_size)) return 0;
+        return validate_instruction(program, settings, room, function,
+            instruction_index, &target, project_root, context, error, error_size);
+    }
     if ((program->script_type == ZSCRIPT_GAME ||
          program->script_type == ZSCRIPT_LEGACY_GAME) &&
         instruction->op == ZOP_UI_SET && instruction->operand != NULL &&
@@ -1293,19 +1470,21 @@ static int validate_instruction(const ZSharpProgram *program,
          instruction->op == ZOP_UI_SET_VALUE ||
          instruction->op == ZOP_LOAD_PATH ||
          instruction->op == ZOP_STORE_PATH)) {
-        ZSharpGameModel game;
+        ZSharpGameModel *game;
         const char *path = instruction->operand;
-        if (!zsharp_game_model_load(project_root, &game, error,
-                                    error_size)) return 0;
-        if (path != NULL && zsharp_game_model_owns_property(&game, path)) {
+        if (!zsharp_project_validation_game(context, project_root, error, error_size)) return 0;
+        game = context->game;
+        if(path && !zsharp_game_model_validate_instance_path(game,path,error,error_size)) {
+            return 0;
+        }
+        if (path != NULL && zsharp_game_model_owns_property(game, path)) {
             if (instruction->op == ZOP_UI_SET &&
-                zsharp_game_animation_has_command(&game, path)) {
+                zsharp_game_animation_has_command(game, path)) {
                 const char *separator = strchr(path, '.');
                 char animation_file[256];
                 size_t length = separator == NULL ? 0 :
                     (size_t)(separator - path);
                 if (length == 0 || length >= sizeof(animation_file)) {
-                    zsharp_game_model_free(&game);
                     snprintf(error, error_size,
                              "invalid animation clip command '%s'", path);
                     return 0;
@@ -1314,20 +1493,16 @@ static int validate_instruction(const ZSharpProgram *program,
                 animation_file[length] = '\0';
                 if (!require_file_import(program, settings, room,
                                          animation_file, error, error_size)) {
-                    zsharp_game_model_free(&game);
                     return 0;
                 }
             }
             if (strcmp(path, "Game.scene") == 0 &&
                 !require_game_scene_import(room, settings, error,
                                            error_size)) {
-                zsharp_game_model_free(&game);
                 return 0;
             }
-            zsharp_game_model_free(&game);
             return 1;
         }
-        zsharp_game_model_free(&game);
         if (instruction->op == ZOP_UI_SET ||
             instruction->op == ZOP_UI_SET_VALUE ||
             instruction->op == ZOP_STORE_PATH) {
@@ -1338,6 +1513,8 @@ static int validate_instruction(const ZSharpProgram *program,
     }
     if (instruction->op == ZOP_CALL_QUALIFIED ||
         instruction->op == ZOP_CALL_QUALIFIED_VALUE) {
+        if (instruction->operand != NULL && strcmp(instruction->operand, "@callback") == 0)
+            return 1; /* The LOAD_NAME and runtime resolver validate this target. */
         if (instruction->operand != NULL &&
             strcmp(instruction->operand, "@py") == 0) {
             return validate_foreign_call(program, settings, room, instruction,
@@ -1391,9 +1568,22 @@ static int validate_instruction(const ZSharpProgram *program,
                                          "kt", 0, error, error_size);
         }
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
-            return require_project_import(room, settings, instruction->operand,
-                                          instruction->call_file, error,
-                                          error_size);
+            char lookup_error[512] = {0};
+            char *dependency_root;
+            ZSharpSettings scope = *settings;
+            ZSharpProgram caller_program = *program;
+            int valid;
+            if (!require_project_import(room, settings, instruction->operand, instruction->call_file, error, error_size)) return 0;
+            dependency_root = zsharp_project_dependency_root(project_root, instruction->operand, lookup_error, sizeof(lookup_error));
+            if (!dependency_root) return 1; /* Legacy native provider: validated at runtime. */
+            scope.project_id = instruction->operand;
+            caller_program.source_name = ""; /* Same filename in another project is still external. */
+            valid = validate_file_function(&caller_program, &scope, room, dependency_root,
+                instruction->call_file, instruction->call_room, instruction->call_function,
+                instruction->argument_count, instruction->op == ZOP_CALL_QUALIFIED_VALUE,
+                instruction->call_outcome, error, error_size);
+            free(dependency_root);
+            return valid;
         }
         return validate_file_function(
             program, settings, room, project_root, instruction->call_file,
@@ -1512,7 +1702,8 @@ static int function_knows_name(const ZSharpRoom *room,
             &function->instructions[index];
         if ((instruction->op == ZOP_STORE_LOCAL ||
              instruction->op == ZOP_STORE_LOCAL_TEXT ||
-             instruction->op == ZOP_STORE_LOCAL_VALUE) &&
+             instruction->op == ZOP_STORE_LOCAL_FUNCTION ||
+             instruction->op == ZOP_STORE_LOCAL_VALUE || instruction->op == ZOP_STORE_LOCAL_TEXT_ARRAY) &&
             strcmp(instruction->operand, name) == 0) {
             return 1;
         }
@@ -1528,7 +1719,8 @@ static int function_has_prior_local(const ZSharpFunction *function,
         const ZSharpInstruction *instruction = &function->instructions[index];
         if ((instruction->op == ZOP_STORE_LOCAL ||
              instruction->op == ZOP_STORE_LOCAL_TEXT ||
-             instruction->op == ZOP_STORE_LOCAL_VALUE) &&
+             instruction->op == ZOP_STORE_LOCAL_FUNCTION ||
+             instruction->op == ZOP_STORE_LOCAL_VALUE || instruction->op == ZOP_STORE_LOCAL_TEXT_ARRAY) &&
             strcmp(instruction->operand, name) == 0) return 1;
     }
     return 0;
@@ -1552,6 +1744,17 @@ static int validate_feature_version(const ZSharpSettings *settings,
                                     size_t error_size) {
     const ZSharpInstruction *instruction =
         &function->instructions[instruction_index];
+    if((instruction->op==ZOP_FILE_SEARCH_EXTENSION || instruction->op==ZOP_STORE_LOCAL_TEXT_ARRAY) && project_version_before(settings,1,2,1,0)) {
+        snprintf(error,error_size,"File.searchExtension requires ZSharp: [1.2.1.0]: or newer");return 0;
+    }
+    if ((instruction->op == ZOP_PUSH_FUNCTION ||
+         instruction->op == ZOP_STORE_LOCAL_FUNCTION ||
+         ((instruction->op == ZOP_CALL_QUALIFIED || instruction->op == ZOP_CALL_QUALIFIED_VALUE) &&
+          instruction->operand != NULL && strcmp(instruction->operand, "@callback") == 0)) &&
+        project_version_before(settings, 1, 2, 1, 0)) {
+        snprintf(error, error_size, "function references and callbacks require ZSharp: [1.2.1.0]: or newer");
+        return 0;
+    }
     int requires_1023 = instruction->op == ZOP_UI_SET_VALUE ||
                         instruction->op == ZOP_RANDOM ||
                         ((instruction->op == ZOP_STORE_GLOBAL ||
@@ -1589,6 +1792,15 @@ static int validate_feature_version(const ZSharpSettings *settings,
                  settings->zsharp_version[2], settings->zsharp_version[3]);
         return 0;
     }
+    if (instruction->op == ZOP_REGEX && project_version_before(settings, 1, 2, 1, 0)) {
+        snprintf(error, error_size, "Regex requires ZSharp: [1.2.1.0]: or newer");
+        return 0;
+    }
+    if (instruction->op == ZOP_MATH && instruction->number_operand == 10 &&
+        project_version_before(settings, 1, 2, 1, 0)) {
+        snprintf(error, error_size, "Math.pow requires ZSharp: [1.2.1.0]: or newer");
+        return 0;
+    }
     if (instruction->op == ZOP_MATH &&
         project_version_before(settings, 1, 1, 2, 2)) {
         snprintf(error, error_size,
@@ -1601,6 +1813,12 @@ static int validate_feature_version(const ZSharpSettings *settings,
         project_version_before(settings, 1, 2, 0, 1)) {
         snprintf(error, error_size,
                  "Print(...).update requires ZSharp: [1.2.0.1]: or newer");
+        return 0;
+    }
+    if (instruction->op == ZOP_APPLICATION_QUIT &&
+        project_version_before(settings, 1, 2, 1, 0)) {
+        snprintf(error, error_size,
+                 "Application.Quit requires ZSharp: [1.2.1.0]: or newer");
         return 0;
     }
     if (instruction->op == ZOP_UI_SET &&
@@ -1829,6 +2047,18 @@ int zsharp_project_validate(const ZSharpProgram *program,
                             const ZSharpSettings *settings,
                             const char *project_root, char *error,
                             size_t error_size) {
+    ZSharpValidationContext context = {0};
+    int ok = zsharp_project_validate_with_context(program, settings, project_root,
+                                                 &context, error, error_size);
+    zsharp_project_validation_free(&context);
+    return ok;
+}
+
+int zsharp_project_validate_with_context(const ZSharpProgram *program,
+                            const ZSharpSettings *settings,
+                            const char *project_root,
+                            ZSharpValidationContext *context, char *error,
+                            size_t error_size) {
     size_t room_index;
     if (program->script_type == ZSCRIPT_WINDOW) {
         return validate_window_program(program, settings, project_root, error,
@@ -1877,6 +2107,18 @@ int zsharp_project_validate(const ZSharpProgram *program,
              variable_index++) {
             const ZSharpVariable *variable = &room->variables[variable_index];
             const ZSharpRoom *object_room;
+            if (variable->type == ZVALUE_FUNCTION) {
+                ZSharpInstruction reference = {0};
+                if (project_version_before(settings, 1, 2, 1, 0)) {
+                    snprintf(error, error_size, "function references require ZSharp: [1.2.1.0]: or newer");
+                    return 0;
+                }
+                reference.op = ZOP_PUSH_FUNCTION;
+                reference.operand = variable->text_value;
+                if (!validate_instruction(program, settings, room, NULL, 0, &reference,
+                        project_root, context, error, error_size)) return 0;
+                continue;
+            }
             if (variable->type != ZVALUE_OBJECT &&
                 variable->type != ZVALUE_OBJECT_ARRAY) continue;
             if (variable->type == ZVALUE_OBJECT &&
@@ -1906,6 +2148,13 @@ int zsharp_project_validate(const ZSharpProgram *program,
              function_index++) {
             const ZSharpFunction *function = &room->functions[function_index];
             size_t instruction_index;
+            for (instruction_index = 0; instruction_index < function->parameter_count; instruction_index++) {
+                if (function->parameters[instruction_index].type == ZVALUE_FUNCTION &&
+                    project_version_before(settings, 1, 2, 1, 0)) {
+                    snprintf(error, error_size, "function parameters require ZSharp: [1.2.1.0]: or newer");
+                    return 0;
+                }
+            }
             for (instruction_index = 0;
                  instruction_index < function->instruction_count;
                  instruction_index++) {
@@ -1918,7 +2167,7 @@ int zsharp_project_validate(const ZSharpProgram *program,
                     !validate_instruction(
                         program, settings, room, function, instruction_index,
                         &function->instructions[instruction_index],
-                        project_root, error, error_size)) {
+                        project_root, context, error, error_size)) {
                     return 0;
                 }
             }

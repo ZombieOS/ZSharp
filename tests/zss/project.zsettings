@@ -1,0 +1,13 @@
+zsharp = type.settings
+Project: "ZSS test":
+PID: "zss_test":
+Version: [1.0.0.0]:
+Authors: ["ZSharp"]:
+Description: "ZSS test":
+ZSharp: [1.2.1.0]:
+Dependencies (
+ zsharpwindow:1.0.0.0
+):
+Window (
+ Startup: "Window.zsharp":
+):

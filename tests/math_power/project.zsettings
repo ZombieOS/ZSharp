@@ -1,0 +1,9 @@
+zsharp = type.settings
+Project: "Power Regression":
+PID: "power_regression":
+Version: [1.2.1.0]:
+Authors: ["Z# Tests"]:
+Description: "Native power expressions.":
+ZSharp: [1.2.1.0]:
+Dependencies (
+):

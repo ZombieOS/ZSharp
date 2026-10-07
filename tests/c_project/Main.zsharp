@@ -8,8 +8,39 @@ noticed room Main[] (
   number Total = Function.call(c:C.Utilities:add[20, 22]):
   Print(Greeting):
   Print(Total):
+  number CounterFirst = NativeCounter():
+  number CounterSecond = NativeCounter():
+  if[CounterFirst == 1 and CounterSecond == 2] (
+   Print("C STATE RETAINED"):
+  )
+  if[Discord.Client] (
+   Print("EXPRESSION CLIENT"):
+  ) else (
+   Print("WRONG CLIENT"):
+  )
+  number ExpressionSum = NativeSum(20, 22) + 1:
+  Print(ExpressionSum):
+  if[Discord.Client == alive and NativeSum(1, 2) == 3] (
+   Print("EXPRESSION COMBINED"):
+  )
+  if[Discord.Client("main") and Discord.Client("missing") == dead] (
+   Print("EXPRESSION OVERLOAD"):
+  )
   move "Tester" to "Spawn":
   Movement.move("Tester", "Hub"):
+  Movement.move(File.read("inline-name.txt"), "Inline" + "Destination"):
+  move File.read("inline-name.txt") to "WordDestination":
+  number Nested = NativeSum(Math.abs(0 - 20), NativeSum(10, 12)):
+  if[Nested == 42 and Discord.Client("ma" + "in")] (
+   Print("C NESTED EXPRESSIONS"):
+  )
+  number NestedCall = NativeSum(Function.call(c:C.Utilities:add[10, 10]), 22):
+  number Once = NativeSum(NativeCounter(), 0):
+  number Adjacent = NativeAdjacent 20 22:
+  number Separated = NativeSeparated((10 + 10) + 22):
+  if[NestedCall == 42 and Once == 3 and Adjacent == 42 and Separated == 42] (
+   Print("C CAPTURE EVALUATED ONCE"):
+  )
   Detections(
    Windows: true:
    Linux: false:

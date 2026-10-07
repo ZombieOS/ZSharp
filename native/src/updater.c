@@ -835,7 +835,7 @@ done:
     child = fork();
     if (child == 0) {
         execlp("curl", "curl", "--fail", "--location", "--silent",
-               "--show-error", "--proto", "=https", "--tlsv1.2",
+               "--show-error", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2",
                "--connect-timeout", "20", "--max-time", "600",
                "--max-filesize", maximum_text, "--output", destination,
                url, (char *)NULL);

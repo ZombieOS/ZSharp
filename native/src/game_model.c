@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "game_model.h"
+#include "game_instances.h"
 
 #include "lexer.h"
 #include "project.h"
@@ -339,6 +340,22 @@ static ZSharpGameScene *add_scene(ModelParser *parser, char *name) {
     return scene;
 }
 
+static int reserve_scene_objects(ZSharpGameModel *model, size_t needed) {
+    size_t capacity = model->object_capacity == 0 ? 32 : model->object_capacity;
+    ZSharpGameObject *resized;
+    if (needed <= model->object_capacity) return 1;
+    while (capacity < needed) {
+        if (capacity > SIZE_MAX / 2) return 0;
+        capacity *= 2;
+    }
+    if (capacity > SIZE_MAX / sizeof(*resized)) return 0;
+    resized = (ZSharpGameObject *)realloc(model->objects, capacity * sizeof(*resized));
+    if (resized == NULL) return 0;
+    model->objects = resized;
+    model->object_capacity = capacity;
+    return 1;
+}
+
 static ZSharpGameObject *add_object(ModelParser *parser, char *name) {
     ZSharpGameObject *resized;
     ZSharpGameObject *object;
@@ -355,8 +372,10 @@ static ZSharpGameObject *add_object(ModelParser *parser, char *name) {
             return NULL;
         }
     }
-    resized = (ZSharpGameObject *)realloc(
-        *items, (*count + 1) * sizeof(*resized));
+    if (parser->definition_mode)
+        resized = (ZSharpGameObject *)realloc(*items, (*count + 1) * sizeof(*resized));
+    else
+        resized = reserve_scene_objects(parser->model, *count + 1) ? parser->model->objects : NULL;
     if (resized == NULL) {
         free(name);
         parser_fail(parser, &parser->current, "out of memory");
@@ -575,11 +594,52 @@ static int apply_object_field(ModelParser *parser, ZSharpGameObject *object,
         object->layer = (int)number;
         return 1;
     }
+    if (strcmp(field, "fontSize") == 0) {
+        if (object->shape != ZGAME_SHAPE_BUTTON && object->shape != ZGAME_SHAPE_TEXT) {
+            parser_fail(parser, &parser->current, "font-size requires text or button"); return 0;
+        }
+        if (!value_number(parser, value, &number)) return 0;
+        if (!isfinite(number) || number <= 0 || number > 4096) {
+            parser_fail(parser, &parser->current, "font-size must be greater than 0 and at most 4096"); return 0;
+        }
+        object->font_size = number;
+        return 1;
+    }
+    if (strcmp(field, "background") == 0) {
+        /* Background and font size are independent from the button label. */
+        if (object->shape != ZGAME_SHAPE_BUTTON) {
+            parser_fail(parser, &parser->current, "background styling requires shape: button");
+            return 0;
+        }
+        if (strcmp(value->text, "transparent") == 0) {
+            object->transparent_background = 1;
+            return 1;
+        }
+        if (!value_color(parser, value, &object->color)) return 0;
+        object->transparent_background = 0;
+        return 1;
+    }
     if (strcmp(field, "color") == 0)
         return value_color(parser, value, &object->color);
     if (strcmp(field, "hoverColor") == 0) {
         object->hover_color_explicit = 1;
         return value_color(parser, value, &object->hover_color);
+    }
+    if (strcmp(field, "opacity") == 0) {
+        if (!value_number(parser, value, &number)) return 0;
+        if (number < 0 || number > 1) {
+            parser_fail(parser, &parser->current, "ZSS opacity must be between 0 and 1");
+            return 0;
+        }
+        object->opacity = number;
+        return 1;
+    }
+    if (strcmp(field,"transition")==0) {
+        if (object->shape != ZGAME_SHAPE_BUTTON || !zsharp_style_transition_parse(value->text,
+            &object->style_transition_duration,&object->style_transition_easing)) {
+            parser_fail(parser,&parser->current,"button transition requires 'all <duration> [timing]' or none"); return 0;
+        }
+        return 1;
     }
 #define STATUS_FIELD(name, member)                                             \
     if (strcmp(field, name) == 0)                                              \
@@ -760,9 +820,8 @@ static ZSharpGameObject *place_object(ModelParser *parser,
                                       const char *scene, char *display_name,
                                       float x, float y, float z,
                                       int has_z) {
-    ZSharpGameObject *resized = (ZSharpGameObject *)realloc(
-        parser->model->objects,
-        (parser->model->object_count + 1) * sizeof(*resized));
+    ZSharpGameObject *resized = reserve_scene_objects(parser->model,
+        parser->model->object_count + 1) ? parser->model->objects : NULL;
     ZSharpGameObject *object;
     size_t index;
     if (resized == NULL) goto memory_error;
@@ -770,6 +829,7 @@ static ZSharpGameObject *place_object(ModelParser *parser,
     object = &resized[parser->model->object_count++];
     *object = *definition;
     object->name = object->display_name = object->source_file = NULL;
+    object->instance_id = NULL;
     object->scene = object->text = object->asset_path = object->audio_path = NULL;
     object->click_left = object->click_right = NULL;
     object->mesh_path = NULL;
@@ -995,7 +1055,14 @@ static int parse_scene_object_override(ModelParser *parser,
         free(field);
         return 0;
     }
-    if (strcmp(field, "width") == 0) {
+    if (strcmp(field, "instanceId") == 0) {
+        if(object->instance_id) {
+            parser_fail(parser,&parser->current,"duplicate instanceId field");free(field);return 0;
+        }
+        object->instance_id=json_text(parser,"instance identifier");
+        ok=object->instance_id!=NULL && zsharp_game_instance_identifier(object->instance_id);
+        if(!ok)parser_fail(parser,&parser->current,"invalid instanceId: expected a letter or underscore followed by letters, digits, or underscores");
+    } else if (strcmp(field, "width") == 0) {
         ok = json_location_number(parser, &object->width);
     } else if (strcmp(field, "height") == 0) {
         ok = json_location_number(parser, &object->height);
@@ -1778,6 +1845,37 @@ static int parse_zss_value(const char *text, ModelValue *value) {
     return value->text != NULL;
 }
 
+static int apply_game_state_style(ModelParser *parser, ZSharpGameObject *object,
+                                  int focus, const char *field, const ModelValue *value) {
+    float number;
+    unsigned *mask = focus ? &object->focus_style_mask : &object->hover_style_mask;
+    if (object->shape != ZGAME_SHAPE_BUTTON) {
+        parser_fail(parser, &parser->current, "game :hover/:focus selectors currently target buttons"); return 0;
+    }
+    if (strcmp(field,"color") == 0) {
+        if (!value_color(parser,value,focus ? &object->focus_color : &object->hover_color)) return 0;
+        if (focus) object->focus_color_explicit = 1; else object->hover_color_explicit = 1;
+        return 1;
+    }
+    if (strcmp(field,"opacity") == 0 || strcmp(field,"scaleX") == 0 || strcmp(field,"scaleY") == 0) {
+        if (!value_number(parser,value,&number)) return 0;
+        if (strcmp(field,"opacity") == 0) {
+            if (number < 0 || number > 1) return 0;
+            if (focus) object->focus_opacity = number; else object->hover_opacity = number;
+            *mask |= 1;
+        } else if (strcmp(field,"scaleX") == 0) {
+            if (focus) object->focus_scale_x = number; else object->hover_scale_x = number;
+            *mask |= 2;
+        } else {
+            if (focus) object->focus_scale_y = number; else object->hover_scale_y = number;
+            *mask |= 4;
+        }
+        return 1;
+    }
+    parser_fail(parser,&parser->current,"game state styles support color, opacity, scale-x, and scale-y");
+    return 0;
+}
+
 static int parse_style_file(const char *path, const char *source,
                             ZSharpGameModel *model, char *error,
                             size_t error_size) {
@@ -1790,13 +1888,14 @@ static int parse_style_file(const char *path, const char *source,
         const char *file_name = NULL;
         size_t match_count = 0;
         size_t object_index;
+        int pseudo = 0;
         skip_zss_space(&cursor, &line);
         if (*cursor == '\0') return 1;
         if (*cursor++ != '.') goto selector_error;
         first = zss_name(&cursor);
         if (first == NULL) goto selector_error;
         skip_zss_space(&cursor, &line);
-        if (*cursor != '{') {
+        if (*cursor != '{' && *cursor != ':') {
             second = zss_name(&cursor);
             if (second == NULL) goto selector_error;
             file_name = first;
@@ -1804,6 +1903,16 @@ static int parse_style_file(const char *path, const char *source,
             skip_zss_space(&cursor, &line);
         } else {
             object_name = first;
+        }
+        if (*cursor == ':') {
+            char *state;
+            cursor++;
+            state = zss_name(&cursor);
+            if (state == NULL) goto selector_error;
+            pseudo = strcmp(state,"hover") == 0 ? 1 : strcmp(state,"focus") == 0 ? 2 : 0;
+            free(state);
+            if (!pseudo) goto selector_error;
+            skip_zss_space(&cursor,&line);
         }
         if (*cursor++ != '{') goto selector_error;
         for (object_index = 0; object_index < model->object_count;
@@ -1847,6 +1956,11 @@ static int parse_style_file(const char *path, const char *source,
                 cursor++;
             }
             raw_value = trimmed_text(value_start, cursor);
+            if (raw_value != NULL && strcmp(field, "fontSize") == 0) {
+                size_t length = strlen(raw_value);
+                if (length >= 2 && strcmp(raw_value + length - 2, "px") == 0)
+                    raw_value[length - 2] = '\0';
+            }
             if (raw_value == NULL || raw_value[0] == '\0' ||
                 !parse_zss_value(raw_value, &value)) {
                 free(raw_value);
@@ -1866,7 +1980,8 @@ static int parse_style_file(const char *path, const char *source,
                 if (strcmp(object->name, object_name) != 0 ||
                     (file_name != NULL &&
                      strcmp(object->source_file, file_name) != 0)) continue;
-                if (!apply_object_field(&parser, object, field, &value)) {
+                if (!(pseudo ? apply_game_state_style(&parser,object,pseudo == 2,field,&value) :
+                    apply_object_field(&parser, object, field, &value))) {
                     free(value.text);
                     free(field);
                     free(first);
@@ -1906,28 +2021,6 @@ static ZSharpGameScene *find_scene(const ZSharpGameModel *model,
     for (index = 0; index < model->scene_count; index++)
         if (strcmp(model->scenes[index].name, name) == 0)
             return &model->scenes[index];
-    return NULL;
-}
-
-static ZSharpGameObject *find_object(const ZSharpGameModel *model,
-                                     const char *name) {
-    size_t index;
-    for (index = 0; index < model->object_count; index++)
-        if (strcmp(model->objects[index].name, name) == 0 &&
-            model->active_scene != NULL && model->objects[index].scene != NULL &&
-            strcmp(model->objects[index].scene, model->active_scene) == 0)
-            return &model->objects[index];
-    /* Built-in lights all have id "light". A unique identifier-style scene
-       name gives scripts a way to move or toggle a particular light. */
-    for (index = 0; index < model->object_count; index++)
-        if (model->objects[index].display_name != NULL &&
-            strcmp(model->objects[index].display_name, name) == 0 &&
-            model->active_scene != NULL && model->objects[index].scene != NULL &&
-            strcmp(model->objects[index].scene, model->active_scene) == 0)
-            return &model->objects[index];
-    for (index = 0; index < model->object_count; index++)
-        if (strcmp(model->objects[index].name, name) == 0)
-            return &model->objects[index];
     return NULL;
 }
 
@@ -2131,6 +2224,13 @@ int zsharp_game_model_load(const char *project_root,
         model->active_scene = zsharp_copy_text(startup->name,
                                                 strlen(startup->name));
     }
+    if(settings.zsharp_version[0]<1 ||
+       (settings.zsharp_version[0]==1 && settings.zsharp_version[1]<2) ||
+       (settings.zsharp_version[0]==1 && settings.zsharp_version[1]==2 && settings.zsharp_version[2]<1)) {
+        for(index=0;index<model->object_count;index++)if(model->objects[index].instance_id) {
+            model_error(error,error_size,"scene instanceId requires ZSharp: [1.2.1.0]: or newer");goto failed;
+        }
+    }
     zsharp_settings_free(&settings);
     if (model->active_scene == NULL) goto out_of_memory;
     for (index = 0; index < model->object_count; index++) {
@@ -2242,6 +2342,17 @@ int zsharp_game_model_load(const char *project_root,
             goto failed;
         }
     }
+    /* No runtime object pointers/index exist yet. Release construction slack
+     * once, instead of reallocating/copying the entire array per placement. */
+    if (model->object_count != 0 && model->object_capacity > model->object_count) {
+        ZSharpGameObject *trimmed = (ZSharpGameObject *)realloc(model->objects,
+            model->object_count * sizeof(*model->objects));
+        if (trimmed != NULL) {
+            model->objects = trimmed;
+            model->object_capacity = model->object_count;
+        }
+    }
+    if (!zsharp_game_instances_build(model, error, error_size)) goto failed;
     return 1;
 out_of_memory:
     model_error(error, error_size, "out of memory");
@@ -2263,6 +2374,7 @@ static void free_game_object(ZSharpGameObject *object) {
     size_t index;
     free(object->name);
     free(object->display_name);
+    free(object->instance_id);
     free(object->source_file);
     free(object->scene);
     free(object->text);
@@ -2296,6 +2408,7 @@ void zsharp_game_model_free(ZSharpGameModel *model) {
     size_t index;
     ZSharpMeshCollision *collision;
     if (model == NULL) return;
+    zsharp_game_instances_free(model);
     collision = model->mesh_collisions;
     while (collision != NULL) {
         ZSharpMeshCollision *next = collision->next;
@@ -2484,6 +2597,15 @@ static void collision_box(const ZSharpGameObject *object, CollisionBox *box) {
 static int box_contact(const ZSharpGameObject *a, const ZSharpGameObject *b,
                        float normal[3], float *penetration) {
     CollisionBox first, second;
+    /* Conservative sphere rejection before building both OBB bases and
+       testing 15 axes. Keep pair order and the exact contact solver intact. */
+    {
+        float ax=a->width*a->scale_x*.5f,ay=a->height*a->scale_y*.5f,az=a->depth*a->scale_z*.5f;
+        float bx=b->width*b->scale_x*.5f,by=b->height*b->scale_y*.5f,bz=b->depth*b->scale_z*.5f;
+        float radius=sqrtf(ax*ax+ay*ay+az*az)+sqrtf(bx*bx+by*by+bz*bz)+.001f;
+        float x=a->x-b->x,y=a->y-b->y,z=a->z-b->z;
+        if(x*x+y*y+z*z>radius*radius)return 0;
+    }
     float delta[3], best = INFINITY;
     int axis_index;
     collision_box(a, &first);
@@ -2541,6 +2663,7 @@ static void resolve_collision(ZSharpGameObject *dynamic,
         dynamic->velocity_x *= 1.0f - fminf(fmaxf(dynamic->friction, 0.0f),
                                              1.0f);
         if (above) {
+            dynamic->ground_support=other;
             dynamic->x += other->motion_x;
             dynamic->z += other->motion_z;
         }
@@ -2600,15 +2723,29 @@ static int round_box_contact(const ZSharpGameObject *a,
     float low = -segment, high = segment, distance, length;
     int axis, iteration;
     if (radius <= 0.0f) return 0;
+    /* Rotation-independent enclosing volumes reject distant pairs before
+       constructing the box basis or running the segment-distance solver. */
+    {
+        float hx=other->width*other->scale_x*.5f;
+        float hy=other->height*other->scale_y*.5f;
+        float hz=other->depth*other->scale_z*.5f;
+        float reach=sqrtf(hx*hx+hy*hy+hz*hz)+radius+segment+.001f;
+        float dx=round->x-other->x,dy=round->y-other->y,dz=round->z-other->z;
+        if(dx*dx+dy*dy+dz*dz>reach*reach)return 0;
+    }
     collision_box(other, &box);
     for (axis = 0; axis < 3; axis++) {
         origin[axis] = (round->x-box.center[0])*box.axis[axis][0] +
                        (round->y-box.center[1])*box.axis[axis][1] +
                        (round->z-box.center[2])*box.axis[axis][2];
         direction[axis] = box.axis[axis][1];
+        /* A capsule segment cannot touch the box outside this expanded
+           local interval. This also cheaply rejects long rotated walls. */
+        if(fabsf(origin[axis])>box.half[axis]+radius+
+           fabsf(direction[axis])*segment+.001f)return 0;
     }
     /* Squared distance from a line segment to a convex box is convex. */
-    for (iteration = 0; iteration < 28; iteration++) {
+    for (iteration = 0; segment > 0.0f && iteration < 28; iteration++) {
         float first = low + (high-low)/3.0f;
         float second = high - (high-low)/3.0f;
         float unused_a[3], unused_b[3];
@@ -2738,6 +2875,7 @@ static void resolve_round_collision(ZSharpGameObject *dynamic,
     dynamic->z += normal[2] * penetration;
     if (normal[1] > 0.5f && dynamic->velocity_y <= 0.0f) {
         dynamic->grounded = 1;
+        dynamic->ground_support=other;
         dynamic->velocity_x *= 1.0f - collision_clamp(dynamic->friction, 0, 1);
         dynamic->velocity_z *= 1.0f - collision_clamp(dynamic->friction, 0, 1);
         dynamic->x += other->motion_x;
@@ -2901,39 +3039,90 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
     float delta = (float)fmin(delta_seconds, 0.05);
     size_t index;
     size_t other_index;
+    size_t *next_moving = NULL;
     if (scene == NULL) return;
     model->delta = delta;
     model->elapsed += delta;
+    {
+        const ZSharpGameObject *hover = model->input.mouse_captured ? NULL :
+            zsharp_game_model_button_at(model,model->input.mouse_x,model->input.mouse_y);
+        size_t k;
+        for(k=0;k<model->object_count;k++) {
+            ZSharpGameObject *object=&model->objects[k];
+            unsigned color=object->color; float opacity=object->opacity,sx=object->scale_x,sy=object->scale_y;
+            double target[6];
+            if(object->shape!=ZGAME_SHAPE_BUTTON || object->style_transition_duration<=0)continue;
+            if(!model->input.mouse_captured && model->focused_button==k+1) {
+                if(object->focus_color_explicit)color=object->focus_color;
+                if(object->focus_style_mask&1)opacity=object->focus_opacity;
+                if(object->focus_style_mask&2)sx=object->focus_scale_x;
+                if(object->focus_style_mask&4)sy=object->focus_scale_y;
+            }
+            if(hover==object) {
+                if(object->hover_color_explicit)color=object->hover_color;
+                if(object->hover_style_mask&1)opacity=object->hover_opacity;
+                if(object->hover_style_mask&2)sx=object->hover_scale_x;
+                if(object->hover_style_mask&4)sy=object->hover_scale_y;
+            }
+            target[0]=(color>>16)&255;target[1]=(color>>8)&255;target[2]=color&255;
+            target[3]=opacity;target[4]=sx;target[5]=sy;
+            zsharp_style_tween(&object->style_tween,target,model->elapsed,object->style_transition_duration,
+                object->style_transition_easing,object->style_output);
+        }
+    }
     zsharp_game_animation_update(model, delta);
     zsharp_game_navigation_update(model, delta);
+    for(index=0;index<model->object_count;index++) {
+        ZSharpGameObject *rider=&model->objects[index];
+        const ZSharpGameObject *support=rider->ground_support;
+        if(rider->grounded && rider->body==ZGAME_BODY_DYNAMIC && rider->velocity_y<=0 &&
+           support && same_active_scene(model,rider) && same_active_scene(model,support) &&
+           support->body!=ZGAME_BODY_DYNAMIC) {
+            rider->y+=support->pending_motion_y+
+                (support->body==ZGAME_BODY_KINEMATIC?support->velocity_y*delta:0);
+        }
+    }
     for (index = 0; index < model->object_count; index++) {
         ZSharpGameObject *object = &model->objects[index];
         if (!same_active_scene(model, object)) continue;
         object->grounded = 0;
+        object->ground_support=NULL;
         object->colliding = 0;
-        object->motion_x = 0.0f;
-        object->motion_y = 0.0f;
-        object->motion_z = 0.0f;
+        object->motion_x = object->pending_motion_x;
+        object->motion_y = object->pending_motion_y;
+        object->motion_z = object->pending_motion_z;
+        object->pending_motion_x=object->pending_motion_y=object->pending_motion_z=0;
         if (object->body == ZGAME_BODY_DYNAMIC) {
             object->velocity_x += scene->gravity_x * object->gravity_scale * delta;
             object->velocity_y += scene->gravity_y * object->gravity_scale * delta;
             object->velocity_z += scene->gravity_z * object->gravity_scale * delta;
         }
         if (object->body != ZGAME_BODY_STATIC) {
-            object->motion_x = object->velocity_x * delta;
-            object->motion_y = object->velocity_y * delta;
-            object->motion_z = object->velocity_z * delta;
-            object->x += object->motion_x;
-            object->y += object->motion_y;
-            object->z += object->motion_z;
+            object->motion_x += object->velocity_x * delta;
+            object->motion_y += object->velocity_y * delta;
+            object->motion_z += object->velocity_z * delta;
+            object->x += object->velocity_x * delta;
+            object->y += object->velocity_y * delta;
+            object->z += object->velocity_z * delta;
+        }
+    }
+    next_moving = malloc((model->object_count + 1) * sizeof(*next_moving));
+    if (next_moving != NULL) {
+        next_moving[model->object_count] = model->object_count;
+        for (index = model->object_count; index > 0; index--) {
+            ZSharpGameObject *candidate = &model->objects[index - 1];
+            next_moving[index - 1] = same_active_scene(model, candidate) &&
+                candidate->collider != ZGAME_COLLIDER_NONE && candidate->body != ZGAME_BODY_STATIC
+                ? index - 1 : next_moving[index];
         }
     }
     for (index = 0; index < model->object_count; index++) {
         ZSharpGameObject *a = &model->objects[index];
         if (!same_active_scene(model, a) ||
             a->collider == ZGAME_COLLIDER_NONE) continue;
-        for (other_index = index + 1; other_index < model->object_count;
-             other_index++) {
+        for (other_index = a->body == ZGAME_BODY_STATIC && next_moving ? next_moving[index + 1] : index + 1;
+             other_index < model->object_count;
+             other_index = a->body == ZGAME_BODY_STATIC && next_moving ? next_moving[other_index + 1] : other_index + 1) {
             ZSharpGameObject *b = &model->objects[other_index];
             float overlap_x = 0.0f, overlap_y = 0.0f, overlap_z = 0.0f;
             float normal[3] = {0.0f, 0.0f, 0.0f}, penetration = 0.0f;
@@ -2995,6 +3184,7 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
                                   overlap_x, overlap_y, overlap_z);
         }
     }
+    free(next_moving);
 }
 
 static int split_path(const char *path, char *storage, size_t storage_size,
@@ -3111,7 +3301,18 @@ int zsharp_game_model_owns_property(const ZSharpGameModel *model,
                strcmp(parts[1], "fps") == 0;
     if (count == 2 && find_scene(model, parts[0]) != NULL)
         return valid_scene_field(parts[1]);
-    object = find_object(model, count == 2 ? parts[0] : parts[1]);
+    {
+        int ambiguous=0;
+        object=zsharp_game_instance(model,count==3?parts[0]:NULL,count==2?parts[0]:parts[1],&ambiguous);
+        if(!object && !ambiguous && count==2 && model->validation_mode) {
+            size_t scene_index;
+            for(scene_index=0;scene_index<model->scene_count;scene_index++) {
+                object=zsharp_game_instance(model,model->scenes[scene_index].name,parts[0],&ambiguous);
+                if(object || ambiguous)break;
+            }
+        }
+        if(ambiguous)return valid_object_field(parts[count-1]);
+    }
     if (object == NULL || !valid_object_field(parts[count - 1])) return 0;
     return count == 2 || strcmp(parts[0], object->scene) == 0;
 }
@@ -3121,6 +3322,26 @@ static int copy_property_text(const char *source, char **output, char *error,
     *output = zsharp_copy_text(source, strlen(source));
     if (*output == NULL) {
         model_error(error, error_size, "out of memory");
+        return 0;
+    }
+    return 1;
+}
+
+int zsharp_game_model_validate_instance_path(const ZSharpGameModel *model,
+    const char *path,char *error,size_t error_size) {
+    char storage[512],*parts[3];size_t count;
+    int ambiguous=0;
+    if(!split_path(path,storage,sizeof(storage),parts,&count)||!valid_object_field(parts[count-1]))return 1;
+    if((count==2 && !strcmp(parts[0],"Game"))||!strcmp(parts[0],"input"))return 1;
+    {
+        ZSharpGameObject *object=zsharp_game_instance(model,count==3?parts[0]:NULL,count==2?parts[0]:parts[1],&ambiguous);
+        if(!object && !ambiguous && count==3 && find_scene(model,parts[0])) {
+            if(error&&error_size)snprintf(error,error_size,"unknown scene instance '%s.%s'",parts[0],parts[1]);
+            return 0;
+        }
+    }
+    if(ambiguous) {
+        if(error&&error_size)snprintf(error,error_size,"ambiguous scene instance in '%s': use a unique placement name or instanceId",path);
         return 0;
     }
     return 1;
@@ -3209,7 +3430,7 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
         return number_property(
             strcmp(field, "delta") == 0 ? (float)model->delta :
             strcmp(field, "elapsed") == 0 ? (float)model->elapsed :
-            model->delta > 0.0 ? (float)(1.0 / model->delta) : 0.0f,
+            model->render_delta > 0.0 ? (float)(1.0 / model->render_delta) : 0.0f,
             text, error, error_size);
     }
     scene = count == 2 ? find_scene(model, parts[0]) : NULL;
@@ -3234,7 +3455,11 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
                                                     : scene->camera_fov,
             text, error, error_size);
     }
-    object = find_object(model, count == 2 ? parts[0] : parts[1]);
+    object=zsharp_game_instance(model,count==3?parts[0]:NULL,count==2?parts[0]:parts[1],NULL);
+    if(!object) {
+        if(error&&error_size)snprintf(error,error_size,"ambiguous scene instance in '%s': use a unique placement name or instanceId",path);
+        return 0;
+    }
     if (strcmp(field, "navStatus") == 0) {
         *type = ZWINDOW_READ_TEXT;
         return copy_property_text(object->nav_reachable ?
@@ -3391,6 +3616,8 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
             scene_object->velocity_y = 0.0f;
             scene_object->velocity_z = 0.0f;
             scene_object->grounded = 0;
+            scene_object->ground_support=NULL;
+            scene_object->pending_motion_x=scene_object->pending_motion_y=scene_object->pending_motion_z=0;
             scene_object->colliding = 0;
             scene_object->was_colliding = 0;
             if (scene_object->audio_autoplay)
@@ -3449,7 +3676,11 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
         else scene->camera_fov = number;
         return 1;
     }
-    object = find_object(model, count == 2 ? parts[0] : parts[1]);
+    object=zsharp_game_instance(model,count==3?parts[0]:NULL,count==2?parts[0]:parts[1],NULL);
+    if(!object) {
+        if(error&&error_size)snprintf(error,error_size,"ambiguous scene instance in '%s': use a unique placement name or instanceId",path);
+        return 0;
+    }
     if (strcmp(field, "text") == 0)
         return replace_text(&object->text, value);
     if (strcmp(field, "texture") == 0) {
@@ -3564,9 +3795,12 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
     }
 #define SET_NUMBER(name, member)                                               \
     if (strcmp(field, name) == 0) { object->member = number; return 1; }
-    SET_NUMBER("positionX", x)
-    SET_NUMBER("positionY", y)
-    SET_NUMBER("positionZ", z)
+#define SET_POSITION(name,member,pending) \
+    if(strcmp(field,name)==0) {object->pending+=number-object->member;object->member=number;return 1;}
+    SET_POSITION("positionX",x,pending_motion_x)
+    SET_POSITION("positionY",y,pending_motion_y)
+    SET_POSITION("positionZ",z,pending_motion_z)
+#undef SET_POSITION
     SET_NUMBER("width", width)
     SET_NUMBER("height", height)
     SET_NUMBER("depth", depth)
@@ -3617,6 +3851,21 @@ const ZSharpGameObject *zsharp_game_model_button_at(const ZSharpGameModel *model
     return selected;
 }
 
+void zsharp_game_model_focus_next(ZSharpGameModel *model, int backwards) {
+    size_t i, start = model->focused_button ? model->focused_button - 1 :
+        (backwards ? 0 : model->object_count ? model->object_count - 1 : 0);
+    for (i = 1; i <= model->object_count; i++) {
+        size_t index = backwards ? (start + model->object_count - i) % model->object_count :
+            (start+i) % model->object_count;
+        const ZSharpGameObject *object = &model->objects[index];
+        if (object->shape == ZGAME_SHAPE_BUTTON && object->visible && object->opacity > 0 &&
+            object->scene && model->active_scene && strcmp(object->scene,model->active_scene) == 0) {
+            model->focused_button = index+1; return;
+        }
+    }
+    model->focused_button = 0;
+}
+
 void zsharp_game_model_frame(const ZSharpGameModel *model,
                              ZSharpGameRenderFrame *frame,
                              ZSharpGameRenderObject **objects) {
@@ -3650,11 +3899,34 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
         target->scale_y = source->scale_y;
         target->scale_z = source->scale_z;
         target->color = source->color;
+        target->transparent_background = source->transparent_background;
+        target->font_size = source->font_size;
         if (source->shape == ZGAME_SHAPE_BUTTON && source->hover_color_explicit &&
             hovered_button == source)
             target->color = source->hover_color;
         target->opacity = source->opacity;
+        if (source->shape == ZGAME_SHAPE_BUTTON && !model->input.mouse_captured) {
+            int focus = model->focused_button == index+1;
+            if (focus && source->focus_color_explicit) target->color = source->focus_color;
+            if (focus) {
+                if (source->focus_style_mask & 1) target->opacity = source->focus_opacity;
+                if (source->focus_style_mask & 2) target->scale_x = source->focus_scale_x;
+                if (source->focus_style_mask & 4) target->scale_y = source->focus_scale_y;
+            }
+            if (hovered_button == source) {
+                if (source->hover_color_explicit) target->color = source->hover_color;
+                if (source->hover_style_mask & 1) target->opacity = source->hover_opacity;
+                if (source->hover_style_mask & 2) target->scale_x = source->hover_scale_x;
+                if (source->hover_style_mask & 4) target->scale_y = source->hover_scale_y;
+            }
+        }
         target->roughness = source->roughness;
+        if(source->shape==ZGAME_SHAPE_BUTTON && source->style_transition_duration>0 && source->style_tween.initialized) {
+            target->color=((unsigned)(source->style_output[0]+.5)<<16)|
+                ((unsigned)(source->style_output[1]+.5)<<8)|(unsigned)(source->style_output[2]+.5);
+            target->opacity=(float)source->style_output[3];
+            target->scale_x=(float)source->style_output[4];target->scale_y=(float)source->style_output[5];
+        }
         target->emissive = source->emissive;
         target->metallic = source->metallic;
         target->light_type = source->light_type;

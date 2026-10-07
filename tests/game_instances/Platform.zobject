@@ -1,0 +1,10 @@
+zsharp = type.object
+noticed object Platform[] (
+ shape: cube:
+ width: 10:
+ height: 1:
+ depth: 10:
+ color: #FFFFFF:
+ body: kinematic:
+ collider: box:
+)

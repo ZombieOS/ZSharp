@@ -39,6 +39,8 @@ typedef struct ZSharpGameRenderObject {
     float scale_y;
     float scale_z;
     unsigned color;
+    int transparent_background;
+    float font_size;
     float opacity;
     float roughness;
     float emissive;
@@ -73,6 +75,12 @@ typedef struct ZSharpGameRenderFrame {
     const char *project_root;
     const ZSharpGameRenderObject *objects;
     size_t object_count;
+    const ZSharpGameRenderObject **lights;
+    size_t light_count;
+    int indexed_lights;
+    const void *shadow_index; /* renderer-owned, valid only during this draw */
+    int projection_prepared;
+    float view_basis[9], projection_focal, projection_tangent;
 } ZSharpGameRenderFrame;
 
 #ifdef ZSHARP_HAS_GAME_RUNTIME

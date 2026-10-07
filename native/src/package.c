@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "package.h"
+#include "package_ignore.h"
 
 #include "game_model.h"
 
@@ -8,6 +9,7 @@
 #include "project.h"
 #include "settings.h"
 #include "zsharp.h"
+#include "updater.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -22,6 +24,7 @@
 #include <windows.h>
 #else
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -52,6 +55,7 @@ typedef struct PackageFileList {
 static int make_directories(const char *path, char *error,
                             size_t error_size);
 static int safe_relative_path(const char *path);
+static int remove_tree(const char *directory, char *error, size_t error_size);
 
 static void package_error(char *error, size_t error_size,
                           const char *format, ...) {
@@ -111,14 +115,15 @@ static int ends_with(const char *text, const char *suffix) {
 }
 
 static int ignored_directory(const char *name) {
-    return strcmp(name, ".git") == 0 || strcmp(name, ".godot") == 0 || strcmp(name, "build") == 0 ||
+    return strstr(name, ".install-") != NULL || strcmp(name, ".git") == 0 || strcmp(name, ".godot") == 0 || strcmp(name, "build") == 0 ||
            strcmp(name, "Packages") == 0 || strcmp(name, ".gradle") == 0 ||
            strcmp(name, ".idea") == 0;
 }
 
 static int ignored_file(const char *name) {
-    return ends_with(name, ".zapp") || ends_with(name, ".zgame") ||
-           ends_with(name, ".tmp");
+    return strcmp(name, ".zignore") == 0 || ends_with(name, ".zapp") || ends_with(name, ".zgame") ||
+           ends_with(name, ".zpackage") || ends_with(name, ".zbc") ||
+           strncmp(name, ".zsharp-dependency-lock-", 24) == 0 || ends_with(name, ".tmp");
 }
 
 static int get_file_size(const char *path, uint64_t *size) {
@@ -179,7 +184,7 @@ static int file_list_append(PackageFileList *list, char *relative,
 
 #ifdef _WIN32
 static int collect_files(const char *root, const char *relative,
-                         PackageFileList *list, char *error,
+                         const ZSharpPackageIgnore *ignore, PackageFileList *list, char *error,
                          size_t error_size) {
     char *directory = relative[0] == '\0' ? copy_text(root)
                                            : join_path(root, relative);
@@ -213,6 +218,7 @@ static int collect_files(const char *root, const char *relative,
             ignored_directory(entry.cFileName)) continue;
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
             ignored_file(entry.cFileName)) continue;
+        if (relative[0] == '\0' && strcmp(entry.cFileName, ".zsharp-dependency-complete") == 0) continue;
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
             continue;
         child_relative = append_relative(relative, entry.cFileName);
@@ -224,8 +230,17 @@ static int collect_files(const char *root, const char *relative,
             ok = 0;
             break;
         }
+        {
+            int excluded = zsharp_package_ignore_match(ignore, child_relative,
+                (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0);
+            if (excluded) {
+                free(child_relative); free(child_absolute);
+                if (excluded < 0) { package_error(error, error_size, "out of memory applying .zignore"); ok = 0; break; }
+                continue;
+            }
+        }
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            ok = collect_files(root, child_relative, list, error, error_size);
+            ok = collect_files(root, child_relative, ignore, list, error, error_size);
             free(child_relative);
             free(child_absolute);
         } else if (!file_list_append(list, child_relative, child_absolute,
@@ -241,7 +256,7 @@ static int collect_files(const char *root, const char *relative,
 }
 #else
 static int collect_files(const char *root, const char *relative,
-                         PackageFileList *list, char *error,
+                         const ZSharpPackageIgnore *ignore, PackageFileList *list, char *error,
                          size_t error_size) {
     char *directory = relative[0] == '\0' ? copy_text(root)
                                            : join_path(root, relative);
@@ -264,6 +279,7 @@ static int collect_files(const char *root, const char *relative,
         struct stat status;
         if (strcmp(entry->d_name, ".") == 0 ||
             strcmp(entry->d_name, "..") == 0) continue;
+        if (relative[0] == '\0' && strcmp(entry->d_name, ".zsharp-dependency-complete") == 0) continue;
         child_relative = append_relative(relative, entry->d_name);
         child_absolute = join_path(root, child_relative == NULL ? "" : child_relative);
         if (child_relative == NULL || child_absolute == NULL) {
@@ -278,9 +294,17 @@ static int collect_files(const char *root, const char *relative,
             free(child_absolute);
             continue;
         }
+        {
+            int excluded = zsharp_package_ignore_match(ignore, child_relative, S_ISDIR(status.st_mode));
+            if (excluded) {
+                free(child_relative); free(child_absolute);
+                if (excluded < 0) { package_error(error, error_size, "out of memory applying .zignore"); ok = 0; break; }
+                continue;
+            }
+        }
         if (S_ISDIR(status.st_mode)) {
             if (!ignored_directory(entry->d_name))
-                ok = collect_files(root, child_relative, list, error, error_size);
+                ok = collect_files(root, child_relative, ignore, list, error, error_size);
             free(child_relative);
             free(child_absolute);
         } else if (S_ISREG(status.st_mode) && !ignored_file(entry->d_name)) {
@@ -300,6 +324,34 @@ static int collect_files(const char *root, const char *relative,
     return ok;
 }
 #endif
+
+static int require_packaged_file(const PackageFileList *files, const char *relative,
+                                  char *error, size_t error_size) {
+    size_t i;
+    for (i = 0; i < files->count; i++)
+        if (!strcmp(files->items[i].relative, relative)) return 1;
+    package_error(error, error_size, "required package file '%s' is missing or excluded by .zignore", relative);
+    return 0;
+}
+
+static int collect_package_files(const char *root, const ZSharpSettings *settings,
+                                 PackageFileList *files, char *error, size_t error_size) {
+    ZSharpPackageIgnore ignore = {0};
+    size_t i;
+    int ok = zsharp_package_ignore_load(&ignore, root, error, error_size) &&
+        collect_files(root, "", &ignore, files, error, error_size);
+    zsharp_package_ignore_free(&ignore);
+    if (!ok || !require_packaged_file(files, "project.zsettings", error, error_size)) return 0;
+    if (settings->has_window && settings->window_startup &&
+        !require_packaged_file(files, settings->window_startup, error, error_size)) return 0;
+    if (settings->has_window && settings->window_uninstall &&
+        !require_packaged_file(files, settings->window_uninstall, error, error_size)) return 0;
+    if (settings->game_start_scene &&
+        !require_packaged_file(files, settings->game_start_scene, error, error_size)) return 0;
+    for (i = 0; i < settings->native_target_count; i++)
+        if (!require_packaged_file(files, settings->native_targets[i].start, error, error_size)) return 0;
+    return 1;
+}
 
 static int compare_files(const void *left, const void *right) {
     return strcmp(((const PackageFile *)left)->relative,
@@ -420,7 +472,8 @@ static int crc32_file(const char *path, uint32_t *crc) {
 
 static int validate_sources(const PackageFileList *files,
                             const ZSharpSettings *settings,
-                            const char *root, int force_game, char *error,
+                            const char *root, int force_game,
+                            ZSharpValidationContext *validation, char *error,
                             size_t error_size) {
     size_t index;
     for (index = 0; index < files->count; index++) {
@@ -439,9 +492,22 @@ static int validate_sources(const PackageFileList *files,
             else package_error(error, error_size, "%s", parse_error);
             return 0;
         }
+        if (strncmp(files->items[index].relative, "Dependencies/", 13) == 0) {
+            ZSharpSettings dependency_settings;
+            char *dependency_root = zsharp_project_find_root(files->items[index].absolute, error, error_size);
+            int valid = dependency_root && zsharp_settings_load(dependency_root, &dependency_settings, &diagnostic, error, error_size);
+            if (valid) {
+                valid = zsharp_project_validate(&program, &dependency_settings, dependency_root, error, error_size);
+                zsharp_settings_free(&dependency_settings);
+            }
+            free(dependency_root);
+            zsharp_program_free(&program);
+            if (!valid) return 0;
+            continue;
+        }
         if (force_game && program.script_type == ZSCRIPT_NORMAL)
             program.script_type = ZSCRIPT_GAME;
-        if (!zsharp_project_validate(&program, settings, root, error,
+        if (!zsharp_project_validate_with_context(&program, settings, root, validation, error,
                                      error_size)) {
             zsharp_program_free(&program);
             return 0;
@@ -459,6 +525,7 @@ static char *find_game_startup(const PackageFileList *files, char *error,
         ZSharpProgram program;
         ZSharpDiagnostic diagnostic;
         char parse_error[512] = {0};
+        if (strncmp(files->items[index].relative, "Dependencies/", 13) == 0) continue;
         if (!ends_with(files->items[index].relative,
                        ZSHARP_SOURCE_EXTENSION))
             continue;
@@ -497,9 +564,10 @@ static int validate_game_objects(const PackageFileList *files,
                                  const ZSharpSettings *settings,
                                  const char *root,
                                  const char *startup_relative,
+                                 ZSharpValidationContext *validation,
                                  char *error, size_t error_size) {
     size_t index;
-    if (!zsharp_game_model_validate(root, error, error_size)) return 0;
+    if (!zsharp_project_validation_game(validation, root, error, error_size)) return 0;
     for (index = 0; index < files->count; index++) {
         if (strcmp(files->items[index].relative, startup_relative) == 0) {
             ZSharpProgram program;
@@ -516,7 +584,7 @@ static int validate_game_objects(const PackageFileList *files,
                 return 0;
             }
             program.script_type = ZSCRIPT_GAME;
-            ok = zsharp_project_validate(&program, settings, root, error,
+            ok = zsharp_project_validate_with_context(&program, settings, root, validation, error,
                                          error_size);
             zsharp_program_free(&program);
             return ok;
@@ -531,6 +599,7 @@ static int append_startup_bytecode(PackageFileList *files,
                                    const char *root,
                                    const char *startup_relative,
                                    int force_game,
+                                   ZSharpValidationContext *validation,
                                    const char *output_path,
                                    char **temporary_path, char *error,
                                    size_t error_size) {
@@ -556,7 +625,7 @@ static int append_startup_bytecode(PackageFileList *files,
         goto done;
     }
     if (force_game) program.script_type = ZSCRIPT_GAME;
-    if (!zsharp_project_validate(&program, settings, root, error,
+    if (!zsharp_project_validate_with_context(&program, settings, root, validation, error,
                                  error_size)) {
         zsharp_program_free(&program);
         goto done;
@@ -754,7 +823,7 @@ static int zip_local_header(FILE *file, char **relative, uint32_t *size,
         return 0;
     }
     name[name_length] = '\0';
-    if (!safe_relative_path(name) || name[name_length - 1] == '/') {
+    if (memchr(name, '\0', name_length) != NULL || !safe_relative_path(name) || name[name_length - 1] == '/') {
         free(name);
         package_error(error, error_size,
                       "unbytecoded package contains an unsafe ZIP path");
@@ -767,6 +836,7 @@ static int zip_local_header(FILE *file, char **relative, uint32_t *size,
 static ZSharpPackageKind package_kind(const char *path) {
     if (ends_with(path, ".zapp")) return ZSHARP_PACKAGE_APP;
     if (ends_with(path, ".zgame")) return ZSHARP_PACKAGE_GAME;
+    if (ends_with(path, ".zpackage")) return ZSHARP_PACKAGE_PACK;
     return 0;
 }
 
@@ -892,13 +962,14 @@ int zsharp_package_create(const char *project_path, const char *output_path,
     char *game_startup = NULL;
     const char *startup_relative = NULL;
     PackageFileList files = {0};
+    ZSharpValidationContext validation = {0};
     ZSharpSettings settings;
     ZSharpDiagnostic diagnostic;
     FILE *output = NULL;
     uint64_t total = 0;
     size_t index;
     int ok = 0;
-    if (kind == 0) {
+    if (kind == 0 || kind == ZSHARP_PACKAGE_PACK) {
         package_error(error, error_size,
                       "package output must end in .zapp or .zgame");
         return 0;
@@ -928,14 +999,15 @@ int zsharp_package_create(const char *project_path, const char *output_path,
         free(root);
         return 0;
     }
-    if (!collect_files(root, "", &files, error, error_size) ||
+    if (!zsharp_package_prepare_dependencies(root, NULL, 0, error, error_size) ||
+        !collect_package_files(root, &settings, &files, error, error_size) ||
         !validate_sources(&files, &settings, root,
-                          kind == ZSHARP_PACKAGE_GAME, error, error_size))
+                          kind == ZSHARP_PACKAGE_GAME, &validation, error, error_size))
         goto done;
     if (kind == ZSHARP_PACKAGE_GAME) {
         game_startup = find_game_startup(&files, error, error_size);
         if (game_startup == NULL) goto done;
-        if (!validate_game_objects(&files, &settings, root, game_startup, error,
+        if (!validate_game_objects(&files, &settings, root, game_startup, &validation, error,
                                    error_size)) goto done;
         startup_relative = game_startup;
     } else if (settings.native_target_count == 0) {
@@ -943,7 +1015,7 @@ int zsharp_package_create(const char *project_path, const char *output_path,
     }
     if (startup_relative != NULL &&
         !append_startup_bytecode(&files, &settings, root, startup_relative,
-                                 kind == ZSHARP_PACKAGE_GAME, output_path,
+                                 kind == ZSHARP_PACKAGE_GAME, &validation, output_path,
                                  &bytecode_temporary, error, error_size))
         goto done;
     qsort(files.items, files.count, sizeof(*files.items), compare_files);
@@ -1010,6 +1082,10 @@ done:
     free(temporary);
     free(bytecode_temporary);
     free(game_startup);
+    if (getenv("ZSHARP_PACKAGE_PROFILE") != NULL)
+        fprintf(stderr, "package validation: game model loads=%zu, placements=%zu\n",
+                validation.game_model_loads, validation.game == NULL ? 0 : validation.game->object_count);
+    zsharp_project_validation_free(&validation);
     file_list_free(&files);
     zsharp_settings_free(&settings);
     free(root);
@@ -1054,6 +1130,7 @@ static int create_source_zip(const char *project_path,
     char *temporary = NULL;
     char *game_startup = NULL;
     PackageFileList files = {0};
+    ZSharpValidationContext validation = {0};
     ZSharpSettings settings;
     ZSharpDiagnostic diagnostic;
     FILE *output = NULL;
@@ -1084,14 +1161,15 @@ static int create_source_zip(const char *project_path,
                       "app packages require a Window Startup entry or Native target");
         goto done;
     }
-    if (!collect_files(root, "", &files, error, error_size) ||
+    if (!zsharp_package_prepare_dependencies(root, NULL, 0, error, error_size) ||
+        !collect_package_files(root, &settings, &files, error, error_size) ||
         !validate_sources(&files, &settings, root,
-                          kind == ZSHARP_PACKAGE_GAME, error, error_size))
+                          kind == ZSHARP_PACKAGE_GAME, &validation, error, error_size))
         goto done;
     if (kind == ZSHARP_PACKAGE_GAME) {
         game_startup = find_game_startup(&files, error, error_size);
         if (game_startup == NULL) goto done;
-        if (!validate_game_objects(&files, &settings, root, game_startup, error,
+        if (!validate_game_objects(&files, &settings, root, game_startup, &validation, error,
                                    error_size)) goto done;
     }
     if (files.count == 0 || files.count > UINT16_MAX) {
@@ -1181,6 +1259,10 @@ done:
     if (!ok && temporary != NULL) remove(temporary);
     free(temporary);
     free(game_startup);
+    if (getenv("ZSHARP_PACKAGE_PROFILE") != NULL)
+        fprintf(stderr, "package validation: game model loads=%zu, placements=%zu\n",
+                validation.game_model_loads, validation.game == NULL ? 0 : validation.game->object_count);
+    zsharp_project_validation_free(&validation);
     file_list_free(&files);
     zsharp_settings_free(&settings);
     free(root);
@@ -1210,9 +1292,9 @@ static int valid_package_name(const char *name, char *error,
                       "package filename cannot end with a space or period");
         return 0;
     }
-    if (ends_with(name, ".zapp") || ends_with(name, ".zgame")) {
+    if (ends_with(name, ".zapp") || ends_with(name, ".zgame") || ends_with(name, ".zpackage")) {
         package_error(error, error_size,
-                      "use the filename without .zapp or .zgame");
+                      "use the filename without .zapp or .zgame (or .zpackage)");
         return 0;
     }
     return 1;
@@ -1231,8 +1313,8 @@ int zsharp_package_create_named(const char *project_path,
     size_t filename_length;
     int ok = 0;
     if (output_path != NULL) *output_path = NULL;
-    if (kind != ZSHARP_PACKAGE_APP && kind != ZSHARP_PACKAGE_GAME) {
-        package_error(error, error_size, "package type must be app or game");
+    if (kind != ZSHARP_PACKAGE_APP && kind != ZSHARP_PACKAGE_GAME && kind != ZSHARP_PACKAGE_PACK) {
+        package_error(error, error_size, "package type must be app, game or pack");
         return 0;
     }
     if (!valid_package_name(package_name, error, error_size)) return 0;
@@ -1241,7 +1323,7 @@ int zsharp_package_create_named(const char *project_path,
     packages = join_path(root, "Packages");
     if (packages == NULL ||
         !make_directories(packages, error, error_size)) goto done;
-    extension = kind == ZSHARP_PACKAGE_APP ? ".zapp" : ".zgame";
+    extension = kind == ZSHARP_PACKAGE_APP ? ".zapp" : kind == ZSHARP_PACKAGE_GAME ? ".zgame" : ".zpackage";
     filename_length = strlen(package_name) + strlen(extension);
     filename = (char *)malloc(filename_length + 1);
     if (filename == NULL) {
@@ -1254,7 +1336,9 @@ int zsharp_package_create_named(const char *project_path,
         package_error(error, error_size, "out of memory");
         goto done;
     }
-    if (!zsharp_package_create(root, destination, error, error_size)) goto done;
+    if (!(kind == ZSHARP_PACKAGE_PACK
+          ? create_source_zip(root, destination, error, error_size)
+          : zsharp_package_create(root, destination, error, error_size))) goto done;
     if (output_path != NULL) {
         *output_path = destination;
         destination = NULL;
@@ -1334,13 +1418,29 @@ static int safe_relative_path(const char *path) {
     const char *segment = path;
     const char *cursor;
     if (path[0] == '\0' || path[0] == '/' || path[0] == '\\' ||
-        strchr(path, ':') != NULL || strchr(path, '\\') != NULL) return 0;
+        strpbrk(path, ":\\*?\"<>|") != NULL) return 0;
     for (cursor = path;; cursor++) {
+        if (*cursor != '\0' && (unsigned char)*cursor < 32) return 0;
         if (*cursor == '/' || *cursor == '\0') {
             size_t length = (size_t)(cursor - segment);
+            char device[10] = {0};
+            size_t device_length = 0, index;
             if (length == 0 || (length == 1 && segment[0] == '.') ||
-                (length == 2 && segment[0] == '.' && segment[1] == '.'))
+                (length == 2 && segment[0] == '.' && segment[1] == '.') ||
+                segment[length - 1] == '.' || segment[length - 1] == ' ')
                 return 0;
+            while (device_length < length && segment[device_length] != '.') device_length++;
+            if (device_length < sizeof(device)) {
+                for (index = 0; index < device_length; index++) {
+                    char c = segment[index];
+                    device[index] = c >= 'a' && c <= 'z' ? (char)(c - 'a' + 'A') : c;
+                }
+                if (strcmp(device, "CON") == 0 || strcmp(device, "PRN") == 0 ||
+                    strcmp(device, "AUX") == 0 || strcmp(device, "NUL") == 0 ||
+                    strcmp(device, "CONIN$") == 0 || strcmp(device, "CONOUT$") == 0 ||
+                    (device_length == 4 && (memcmp(device, "COM", 3) == 0 || memcmp(device, "LPT", 3) == 0) &&
+                     device[3] >= '1' && device[3] <= '9')) return 0;
+            }
             if (*cursor == '\0') return 1;
             segment = cursor + 1;
         }
@@ -1658,6 +1758,391 @@ done:
     free(root);
     if (!ok) zsharp_package_info_free(info);
     return ok;
+}
+
+/* Dependencies are installed transactionally below their owning project.
+ * Metadata is inspected before any dependency native code can be loaded. */
+static int dependency_directory_safe(const char *path, char *error, size_t error_size) {
+#ifdef _WIN32
+    DWORD attributes = GetFileAttributesA(path);
+    if (attributes != INVALID_FILE_ATTRIBUTES &&
+        ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) || !(attributes & FILE_ATTRIBUTE_DIRECTORY))) {
+#else
+    struct stat status;
+    if (lstat(path, &status) == 0 && (!S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode))) {
+#endif
+        package_error(error, error_size, "dependency directory is not a real directory: '%s'", path);
+        return 0;
+    }
+    return 1;
+}
+
+static int dependency_matches(const ZSharpPackageInfo *info, const ZSharpDependency *dependency) {
+    return info->kind == ZSHARP_PACKAGE_PACK &&
+        strcmp(info->project_id, dependency->project_id) == 0 &&
+        memcmp(info->version, dependency->version, sizeof(info->version)) == 0;
+}
+
+static int dependency_archive_candidate(const char *directory, const char *name,
+    const ZSharpDependency *dependency, char **selected, char *error, size_t error_size) {
+    ZSharpPackageInfo info = {0};
+    char *path;
+    int matches;
+    if (!ends_with(name, ".zpackage")) return 1;
+    path = join_path(directory, name);
+    if (!path) { package_error(error, error_size, "out of memory"); return 0; }
+#ifdef _WIN32
+    if (GetFileAttributesA(path) & FILE_ATTRIBUTE_REPARSE_POINT) {
+#else
+    { struct stat status; if (lstat(path, &status) != 0 || !S_ISREG(status.st_mode)) {
+#endif
+        package_error(error, error_size, "unsafe dependency archive '%s'", path);
+        free(path); return 0;
+    }
+#ifndef _WIN32
+    }
+#endif
+    if (!zsharp_package_read_info(path, &info, error, error_size)) {
+        free(path); return 0;
+    }
+    if (info.kind != ZSHARP_PACKAGE_PACK) {
+        package_error(error, error_size, "dependency archive '%s' is not a source .zpackage", path);
+        zsharp_package_info_free(&info); free(path); return 0;
+    }
+    matches = dependency_matches(&info, dependency);
+    zsharp_package_info_free(&info);
+    if (matches && *selected != NULL) {
+        package_error(error, error_size, "multiple .zpackage files match dependency '%s'", dependency->project_id);
+        free(path); return 0;
+    }
+    if (matches) *selected = path; else free(path);
+    return 1;
+}
+
+static int find_dependency_archive(const char *directory, const ZSharpDependency *dependency,
+    char **selected, char *error, size_t error_size) {
+    int ok = 1;
+    *selected = NULL;
+#ifdef _WIN32
+    char *pattern = join_path(directory, "*");
+    WIN32_FIND_DATAA entry;
+    HANDLE search;
+    if (!pattern) return 0;
+    search = FindFirstFileA(pattern, &entry);
+    free(pattern);
+    if (search == INVALID_HANDLE_VALUE) {
+        DWORD code = GetLastError();
+        if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) return 1;
+        package_error(error, error_size, "could not scan dependency folder '%s'", directory); return 0;
+    }
+    do {
+        if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            !dependency_archive_candidate(directory, entry.cFileName, dependency, selected, error, error_size)) {
+            ok = 0; break;
+        }
+    } while (FindNextFileA(search, &entry));
+    FindClose(search);
+#else
+    DIR *search = opendir(directory);
+    struct dirent *entry;
+    if (!search) {
+        if (errno == ENOENT) return 1;
+        package_error(error, error_size, "could not scan dependency folder '%s'", directory); return 0;
+    }
+    while ((entry = readdir(search)) != NULL)
+        if (!dependency_archive_candidate(directory, entry->d_name, dependency, selected, error, error_size)) {
+            ok = 0; break;
+        }
+    closedir(search);
+#endif
+    return ok;
+}
+
+static int dependency_root_matches(const char *root, const ZSharpDependency *dependency,
+    char *error, size_t error_size) {
+    ZSharpSettings settings;
+    ZSharpDiagnostic diagnostic;
+    int ok;
+    if (!zsharp_settings_load(root, &settings, &diagnostic, error, error_size)) return 0;
+    ok = strcmp(settings.project_id, dependency->project_id) == 0 &&
+        memcmp(settings.version, dependency->version, sizeof(settings.version)) == 0;
+    zsharp_settings_free(&settings);
+    if (!ok) package_error(error, error_size, "installed dependency '%s' has incorrect PID/version", dependency->project_id);
+    return ok;
+}
+
+static int compare_dependency_names(const void *a, const void *b) {
+#ifdef _WIN32
+    return _stricmp(*(const char *const *)a, *(const char *const *)b);
+#else
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+#endif
+}
+
+typedef struct DependencyLock {
+#ifdef _WIN32
+    HANDLE handle;
+#else
+    int descriptor;
+#endif
+} DependencyLock;
+
+static int dependency_lock_acquire(const char *directory, const char *id, const char *version,
+    DependencyLock *lock, char *error, size_t error_size) {
+    char name[256];
+    char *path;
+    int ok = 0;
+    snprintf(name, sizeof(name), ".zsharp-dependency-lock-%s-%s", id, version);
+    path = join_path(directory, name);
+    if (!path || !make_directories(directory, error, error_size)) { free(path); return 0; }
+#ifdef _WIN32
+    lock->handle = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (lock->handle != INVALID_HANDLE_VALUE) {
+        BY_HANDLE_FILE_INFORMATION information;
+        OVERLAPPED overlapped = {0};
+        if (GetFileInformationByHandle(lock->handle, &information) &&
+            !(information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            ok = LockFileEx(lock->handle, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped) != 0;
+        if (!ok) { CloseHandle(lock->handle); lock->handle = INVALID_HANDLE_VALUE; }
+    }
+#else
+    lock->descriptor = open(path, O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
+    if (lock->descriptor >= 0) {
+        struct flock request = {0};
+        request.l_type = F_WRLCK; request.l_whence = SEEK_SET; request.l_len = 1;
+        do { ok = fcntl(lock->descriptor, F_SETLKW, &request) == 0; } while (!ok && errno == EINTR);
+        if (!ok) { close(lock->descriptor); lock->descriptor = -1; }
+    }
+#endif
+    if (!ok) package_error(error, error_size, "could not lock dependency '%s'", id);
+    free(path);
+    return ok;
+}
+
+static void dependency_lock_release(DependencyLock *lock) {
+#ifdef _WIN32
+    if (lock->handle != INVALID_HANDLE_VALUE) {
+        OVERLAPPED overlapped = {0};
+        UnlockFileEx(lock->handle, 0, 1, 0, &overlapped);
+        CloseHandle(lock->handle);
+    }
+#else
+    if (lock->descriptor >= 0) close(lock->descriptor);
+#endif
+}
+
+static int install_dependency_archive(const char *archive, const char *destination,
+    const ZSharpDependency *dependency, char *error, size_t error_size) {
+    ZSharpPackageInfo info = {0};
+    unsigned char digest[ZSHARP_SHA256_SIZE];
+    char hex[ZSHARP_SHA256_SIZE * 2 + 1], existing[66] = {0};
+    char *marker = NULL, *stage = NULL;
+    FILE *file = NULL, *complete = NULL;
+    char **names = NULL;
+    uint16_t count = 0, index;
+    uint32_t central_offset;
+    int ok = 0;
+    unsigned attempt;
+    int stage_created = 0;
+    if (!zsharp_package_read_info(archive, &info, error, error_size)) return 0;
+    if (!dependency_matches(&info, dependency)) {
+        package_error(error, error_size, "downloaded package does not match dependency '%s' and its requested release", dependency->project_id);
+        goto done;
+    }
+    if (!zsharp_sha256_file(archive, digest)) goto done;
+    zsharp_hash_hex(digest, hex);
+    marker = join_path(destination, ".zsharp-dependency-complete");
+    if (!marker) goto done;
+    complete = fopen(marker, "rb");
+    if (complete) {
+        size_t bytes = fread(existing, 1, 64, complete);
+        fclose(complete); complete = NULL;
+        if (bytes != 64 || strcmp(existing, hex) != 0) {
+            package_error(error, error_size, "dependency '%s' release already installed from different contents; move its installed directory aside before replacing it", dependency->project_id);
+            goto done;
+        }
+        ok = dependency_root_matches(destination, dependency, error, error_size);
+        goto done;
+    }
+    stage = (char *)malloc(strlen(destination) + 112);
+    if (!stage) goto done;
+    for (attempt = 0; attempt < 100; attempt++) {
+#ifdef _WIN32
+        snprintf(stage, strlen(destination) + 112, "%s.install-%s-%lu-%u", destination, hex, (unsigned long)GetCurrentProcessId(), attempt);
+        if (CreateDirectoryA(stage, NULL)) break;
+        if (GetLastError() != ERROR_ALREADY_EXISTS) goto done;
+#else
+        snprintf(stage, strlen(destination) + 112, "%s.install-%s-%lu-%u", destination, hex, (unsigned long)getpid(), attempt);
+        if (mkdir(stage, 0700) == 0) break;
+        if (errno != EEXIST) goto done;
+#endif
+    }
+    if (attempt == 100) goto done;
+    stage_created = 1;
+    file = fopen(archive, "rb");
+    if (!file || !zip_eocd(file, &count, &central_offset, error, error_size) ||
+        fseek(file, 0, SEEK_SET) != 0) goto done;
+    names = (char **)calloc(count, sizeof(*names));
+    if (!names) goto done;
+    for (index = 0; index < count; index++) {
+        uint32_t size, crc;
+        char *target;
+        if (!zip_local_header(file, &names[index], &size, &crc, error, error_size)) goto done;
+        if (ends_with(names[index], ".zbc") || ends_with(names[index], ".zpackage") ||
+            strcmp(names[index], ".zsharp-dependency-complete") == 0) {
+            package_error(error, error_size, "source dependency contains forbidden entry '%s'", names[index]); goto done;
+        }
+        target = join_path(stage, names[index]);
+        if (!target) goto done;
+        ok = write_zip_entry(file, target, size, crc, error, error_size);
+        free(target);
+        if (!ok) goto done;
+        ok = 0;
+    }
+    qsort(names, count, sizeof(*names), compare_dependency_names);
+    for (index = 1; index < count; index++)
+        if (compare_dependency_names(&names[index - 1], &names[index]) == 0) {
+            package_error(error, error_size, "duplicate dependency archive entry '%s'", names[index]); goto done;
+        }
+    if (ftell(file) != (long)central_offset || !dependency_root_matches(stage, dependency, error, error_size)) goto done;
+    fclose(file); file = NULL;
+    {
+        char *stage_marker = join_path(stage, ".zsharp-dependency-complete");
+        complete = stage_marker ? fopen(stage_marker, "wb") : NULL;
+        free(stage_marker);
+        if (!complete) goto done;
+        ok = fputs(hex, complete) >= 0;
+        if (fclose(complete) != 0) ok = 0;
+        complete = NULL;
+        if (!ok) goto done;
+        ok = 0;
+    }
+#ifdef _WIN32
+    ok = MoveFileExA(stage, destination, MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    ok = rename(stage, destination) == 0;
+#endif
+    if (!ok) package_error(error, error_size, "could not finalize dependency directory '%s' (it may already exist)", destination);
+done:
+    if (complete) fclose(complete);
+    if (file) fclose(file);
+    if (!ok && stage_created) {
+        char cleanup_error[256] = {0};
+        remove_tree(stage, cleanup_error, sizeof(cleanup_error));
+    }
+    if (names) { for (index = 0; index < count; index++) free(names[index]); free(names); }
+    free(stage); free(marker);
+    zsharp_package_info_free(&info);
+    if (!ok && error[0] == '\0') package_error(error, error_size, "could not install dependency '%s'", dependency->project_id);
+    return ok;
+}
+
+static int prepare_dependencies(const char *root, const char *const *providers, size_t provider_count,
+    const char **stack, unsigned depth, unsigned *visits, char *error, size_t error_size) {
+    ZSharpSettings settings;
+    ZSharpDiagnostic diagnostic;
+    char *directory = NULL;
+    size_t index;
+    int ok = 0;
+    if (depth >= 32 || ++*visits > 512) {
+        package_error(error, error_size, "dependency graph exceeds 32 levels or 512 projects"); return 0;
+    }
+    if (!zsharp_settings_load(root, &settings, &diagnostic, error, error_size)) {
+        if (diagnostic.message[0]) package_error(error, error_size, "project.zsettings:%u:%u: %s", diagnostic.line, diagnostic.column, diagnostic.message);
+        return 0;
+    }
+    for (index = 0; index < depth; index++) {
+        if (strcmp(stack[index], settings.project_id) == 0) {
+            package_error(error, error_size, "cyclic dependency involving '%s'", settings.project_id); goto done;
+        }
+    }
+    stack[depth] = settings.project_id;
+    directory = join_path(root, "Dependencies");
+    if (!directory || !dependency_directory_safe(directory, error, error_size)) goto done;
+    for (index = 0; index < settings.dependency_count; index++) {
+        const ZSharpDependency *dependency = &settings.dependencies[index];
+        char version[64], filename[256], url[512];
+        char *parent = NULL, *destination = NULL, *archive = NULL, *temporary = NULL, *marker = NULL;
+        size_t provider;
+        int installed = 0, step_ok = 0;
+        DependencyLock lock;
+        int locked = 0;
+#ifdef _WIN32
+        lock.handle = INVALID_HANDLE_VALUE;
+#else
+        lock.descriptor = -1;
+#endif
+        if (strcmp(dependency->project_id, "zsharpwindow") == 0 || strcmp(dependency->project_id, "zsharpgame") == 0 ||
+            strcmp(dependency->project_id, "zsharp") == 0 || strcmp(dependency->project_id, "zos") == 0) continue;
+        for (provider = 0; provider < provider_count; provider++)
+            if (strcmp(providers[provider], dependency->project_id) == 0) break;
+        if (provider != provider_count) continue;
+        if (!safe_project_id(dependency->project_id) || strlen(dependency->project_id) > 128) {
+            package_error(error, error_size, "invalid dependency project ID"); goto done;
+        }
+        snprintf(version, sizeof(version), "%u.%u.%u.%u", dependency->version[0], dependency->version[1], dependency->version[2], dependency->version[3]);
+        if (!dependency_lock_acquire(directory, dependency->project_id, version, &lock, error, error_size)) goto dependency_done;
+        locked = 1;
+        parent = join_path(directory, dependency->project_id);
+        destination = parent ? join_path(parent, version) : NULL;
+        if (!destination || !dependency_directory_safe(parent, error, error_size) ||
+            !dependency_directory_safe(destination, error, error_size)) goto dependency_done;
+        if (!find_dependency_archive(directory, dependency, &archive, error, error_size)) goto dependency_done;
+        marker = join_path(destination, ".zsharp-dependency-complete");
+        if (marker) { FILE *probe = fopen(marker, "rb"); if (probe) { installed = 1; fclose(probe); } }
+        if (archive == NULL && installed) {
+            /* A packaged application contains installed sources, not duplicate archives. */
+            if (!dependency_root_matches(destination, dependency, error, error_size)) goto dependency_done;
+        } else {
+            if (!make_directories(parent, error, error_size)) goto dependency_done;
+            if (archive == NULL) {
+                snprintf(filename, sizeof(filename), "%s-%s.zpackage", dependency->project_id, version);
+                archive = join_path(directory, filename);
+                if (!archive) goto dependency_done;
+                temporary = (char *)malloc(strlen(archive) + 5);
+                if (!temporary) goto dependency_done;
+                sprintf(temporary, "%s.tmp", archive);
+                snprintf(url, sizeof(url), "https://zos-store-api.zos-store-api.workers.dev/?action=download&project=%s&release=%s", dependency->project_id, version);
+                fprintf(stderr, "downloading dependency %s:%s\n", dependency->project_id, version);
+                if (!zsharp_update_download_component(url, temporary, (size_t)1024 * 1024 * 1024, error, error_size)) goto dependency_done;
+                /* The reader selects the source format from its final extension. */
+                {
+                    char *validated = (char *)malloc(strlen(archive) + 32);
+                    if (!validated) goto dependency_done;
+                    sprintf(validated, "%s.download.zpackage", archive);
+                    if (rename(temporary, validated) != 0) { free(validated); goto dependency_done; }
+                    if (!install_dependency_archive(validated, destination, dependency, error, error_size)) {
+                        remove(validated); free(validated); goto dependency_done;
+                    }
+                    if (rename(validated, archive) != 0) {
+                        package_error(error, error_size, "could not finalize downloaded dependency '%s'", archive);
+                        remove(validated);
+                        free(validated); goto dependency_done;
+                    }
+                    free(validated);
+                }
+            } else if (!install_dependency_archive(archive, destination, dependency, error, error_size)) goto dependency_done;
+        }
+        step_ok = prepare_dependencies(destination, providers, provider_count, stack, depth + 1, visits, error, error_size);
+dependency_done:
+        if (locked) dependency_lock_release(&lock);
+        if (temporary) remove(temporary);
+        free(parent); free(destination); free(archive); free(temporary); free(marker);
+        if (!step_ok) goto done;
+    }
+    ok = 1;
+done:
+    free(directory);
+    zsharp_settings_free(&settings);
+    return ok;
+}
+
+int zsharp_package_prepare_dependencies(const char *root,
+    const char *const *providers, size_t provider_count, char *error, size_t error_size) {
+    const char *stack[32];
+    unsigned visits = 0;
+    return prepare_dependencies(root, providers, provider_count, stack, 0, &visits, error, error_size);
 }
 
 int zsharp_package_extract(const char *package_path, char **project_root,

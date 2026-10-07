@@ -8,7 +8,8 @@
 
 typedef enum ZSharpPackageKind {
     ZSHARP_PACKAGE_APP = 1,
-    ZSHARP_PACKAGE_GAME = 2
+    ZSHARP_PACKAGE_GAME = 2,
+    ZSHARP_PACKAGE_PACK = 3
 } ZSharpPackageKind;
 
 typedef struct ZSharpPackageInfo {
@@ -20,6 +21,12 @@ typedef struct ZSharpPackageInfo {
 } ZSharpPackageInfo;
 
 void zsharp_package_info_free(ZSharpPackageInfo *info);
+
+/* Resolve source dependencies before parsing user code. Provider IDs supplied
+ * by the CLI retain their existing native-provider behavior. */
+int zsharp_package_prepare_dependencies(const char *project_root,
+    const char *const *provider_ids, size_t provider_count,
+    char *error, size_t error_size);
 
 int zsharp_package_read_info(const char *package_path, ZSharpPackageInfo *info,
                              char *error, size_t error_size);

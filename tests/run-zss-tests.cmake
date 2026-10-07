@@ -1,0 +1,25 @@
+set(FIXTURE "${OUT}/zss-project")
+file(MAKE_DIRECTORY "${FIXTURE}")
+file(COPY "${ROOT}/tests/zss/" DESTINATION "${FIXTURE}")
+execute_process(COMMAND "${BIN}" check "${FIXTURE}/Window.zsharp"
+ RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+ message(FATAL_ERROR "ZSS check failed: ${output} ${error}")
+endif()
+execute_process(COMMAND "${BIN}" compile "${FIXTURE}/Window.zsharp" -o "${FIXTURE}/zss.zbc"
+ RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+ message(FATAL_ERROR "ZSS bytecode compile failed: ${output} ${error}")
+endif()
+execute_process(COMMAND "${BIN}" check-bytecode "${FIXTURE}/zss.zbc" WORKING_DIRECTORY "${FIXTURE}" RESULT_VARIABLE result ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+ message(FATAL_ERROR "ZSS bytecode validation failed: ${error}")
+endif()
+if(WIN32)
+ execute_process(COMMAND "${CMAKE_COMMAND}" -E env ZSHARP_WINDOW_AUTOCLOSE_MS=150 ZSHARP_DISABLE_PROJECT_STARTS=1
+  "${BIN}" run-bytecode "${FIXTURE}/zss.zbc"
+  WORKING_DIRECTORY "${FIXTURE}" TIMEOUT 15 RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+ if(NOT result EQUAL 0)
+  message(FATAL_ERROR "ZSS window smoke failed: ${output} ${error}")
+ endif()
+endif()

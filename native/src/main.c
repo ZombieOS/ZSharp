@@ -158,6 +158,7 @@ static void print_help(void) {
     puts("  zsharp check-bytecode <file.zbc>");
     puts("  zsharp compile <file.zsharp> -o <output.zbc>");
     puts("  zsharp package <app|game> <project> <filename> [--unbytecode]");
+    puts("  zsharp package pack <project> <filename> (source-only dependency)");
     puts("  zsharp open <file.zapp|file.zgame>");
     puts("  zsharp uninstall <file.zapp|file.zgame>");
     puts("  zsharp associate");
@@ -179,7 +180,7 @@ static int is_package_file(const char *path) {
     const char *extension = strrchr(path, '.');
     return extension != NULL &&
            (strcmp(extension, ".zapp") == 0 ||
-            strcmp(extension, ".zgame") == 0);
+            strcmp(extension, ".zgame") == 0 || strcmp(extension, ".zpackage") == 0);
 }
 
 static int is_settings_file(const char *path) {
@@ -595,9 +596,31 @@ static int load_providers(int argc, char **argv, int first,
     return 1;
 }
 
+static int prepare_run_dependencies(const char *root, int argc, char **argv,
+                                    int first_option, char *error, size_t error_size) {
+    char **ids = (char **)calloc((size_t)argc + 1, sizeof(*ids));
+    size_t count = 0, index;
+    int option, ok;
+    if (!ids) { snprintf(error, error_size, "out of memory"); return 0; }
+    for (option = first_option; option + 1 < argc; option++) {
+        if (strcmp(argv[option], "--provider") == 0) {
+            const char *equal = strchr(argv[++option], '=');
+            if (equal) {
+                ids[count] = zsharp_copy_text(argv[option], (size_t)(equal - argv[option]));
+                if (!ids[count]) { for (index = 0; index < count; index++) free(ids[index]); free(ids); return 0; }
+                count++;
+            }
+        }
+    }
+    ok = zsharp_package_prepare_dependencies(root, (const char *const *)ids, count, error, error_size);
+    for (index = 0; index < count; index++) free(ids[index]);
+    free(ids);
+    return ok;
+}
+
 static int run_source_command(const char *source_path, int argc, char **argv,
                               int first_option, int force_game) {
-    ZSharpProgram program;
+    ZSharpProgram program = {0};
     ZSharpLoadedProvider *loaded = NULL;
     ZSharpProviderBinding *bindings = NULL;
     size_t provider_count = 0;
@@ -606,10 +629,6 @@ static int run_source_command(const char *source_path, int argc, char **argv,
     ZSharpSettings settings;
     int ok;
     command_failure[0] = '\0';
-    if (!parse_file(source_path, &program)) {
-        return 1;
-    }
-    if (force_game) program.script_type = ZSCRIPT_GAME;
     project_root = zsharp_project_find_root(source_path, error, sizeof(error));
     if (project_root == NULL) {
         zsharp_program_free(&program);
@@ -617,6 +636,13 @@ static int run_source_command(const char *source_path, int argc, char **argv,
         fprintf(stderr, "runtime error: %s\n", error);
         return 1;
     }
+    if (!prepare_run_dependencies(project_root, argc, argv, first_option, error, sizeof(error))) {
+        remember_failure(error);
+        fprintf(stderr, "dependency error: %s\n", error);
+        free(project_root); return 1;
+    }
+    if (!parse_file(source_path, &program)) { free(project_root); return 1; }
+    if (force_game) program.script_type = ZSCRIPT_GAME;
     if (!load_settings_or_report(project_root, &settings)) {
         free(project_root);
         zsharp_program_free(&program);
@@ -687,6 +713,11 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
         remember_failure(error);
         fprintf(stderr, "runtime error: %s\n", error);
         return 1;
+    }
+    if (!prepare_run_dependencies(project_root, argc, argv, first_option, error, sizeof(error))) {
+        remember_failure(error);
+        fprintf(stderr, "dependency error: %s\n", error);
+        free(project_root); zsharp_program_free(&program); return 1;
     }
     if (!load_settings_or_report(project_root, &settings)) {
         free(project_root);
@@ -777,8 +808,14 @@ static int package_command(const char *kind_text, const char *project_path,
         kind = ZSHARP_PACKAGE_APP;
     else if (strcmp(kind_text, "game") == 0)
         kind = ZSHARP_PACKAGE_GAME;
+    else if (strcmp(kind_text, "pack") == 0)
+        kind = ZSHARP_PACKAGE_PACK;
     else {
-        fputs("package error: package type must be 'app' or 'game'\n", stderr);
+        fputs("package error: package type must be 'app', 'game' or 'pack'\n", stderr);
+        return 2;
+    }
+    if (kind == ZSHARP_PACKAGE_PACK && include_unbytecoded) {
+        fputs("package error: pack is always source-only; --unbytecode is not allowed\n", stderr);
         return 2;
     }
     if (!zsharp_package_create_named(project_path, kind, package_name,
@@ -792,7 +829,8 @@ static int package_command(const char *kind_text, const char *project_path,
         return 1;
     }
     zsharp_hash_hex(hash, hash_hex);
-    printf("created bytecoded package %s\nbytecoded package SHA-256: %s\n",
+    printf(kind == ZSHARP_PACKAGE_PACK ? "created source dependency package %s\npackage SHA-256: %s\n" :
+           "created bytecoded package %s\nbytecoded package SHA-256: %s\n",
            output_path, hash_hex);
     if (include_unbytecoded) {
         if (!zsharp_package_create_unbytecoded_named(
@@ -1015,6 +1053,11 @@ static int open_package_command(const char *package_path, int argc,
         return 1;
     }
     package_kind = preview.kind;
+    if (package_kind == ZSHARP_PACKAGE_PACK) {
+        zsharp_package_info_free(&preview);
+        fputs("package error: .zpackage dependencies cannot be launched as applications\n", stderr);
+        return 1;
+    }
     app_name = zsharp_copy_text(preview.project_name,
                                 strlen(preview.project_name));
     zsharp_package_info_free(&preview);

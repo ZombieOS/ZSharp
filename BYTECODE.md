@@ -1,5 +1,22 @@
 # Z# bytecode identity and integrity
 
+Format `0.21` adds `ZOP_REGEX` (65), carrying a u32 operation selector
+(1=test, 2=matches, 3=replace) and u32 argument count. Arguments are pushed
+in source order; an optional final text argument supplies flags. The reader
+retains support for `0.20` and previously supported older formats.
+
+Format `0.20` adds `ZOP_FILE_SEARCH_EXTENSION` (63, no payload) and
+`ZOP_STORE_LOCAL_TEXT_ARRAY` (64, string local name). Readers retain support
+for format `0.19` and previously supported older formats.
+
+Format `0.19` adds the `function` value type (9), `ZOP_PUSH_FUNCTION` (61),
+and `ZOP_STORE_LOCAL_FUNCTION` (62). References store a validated target name,
+not a process-specific pointer. Variable-based calls reuse qualified-call
+opcodes with the `@callback` marker: arguments are pushed first, followed by
+the callback value, then the call instruction resolves the target and checks
+the caller's imports/visibility. The reader continues to accept format `0.18`
+as well as its previously accepted legacy formats.
+
 Z# 1.0.2.1 automatically embeds two SHA-256 values in each compiled bytecode
 file. Neither value is written in `project.zsettings`.
 

@@ -10,6 +10,7 @@
 #define ZGAME_NEAR_DEPTH 0.05f
 
 static void rotate_x(float point[3], float radians) {
+    if(radians==0)return;
     float sine = sinf(radians), cosine = cosf(radians);
     float y = point[1] * cosine - point[2] * sine;
     float z = point[1] * sine + point[2] * cosine;
@@ -17,6 +18,7 @@ static void rotate_x(float point[3], float radians) {
 }
 
 static void rotate_y(float point[3], float radians) {
+    if(radians==0)return;
     float sine = sinf(radians), cosine = cosf(radians);
     float x = point[0] * cosine + point[2] * sine;
     float z = -point[0] * sine + point[2] * cosine;
@@ -24,6 +26,7 @@ static void rotate_y(float point[3], float radians) {
 }
 
 static void rotate_z(float point[3], float radians) {
+    if(radians==0)return;
     float sine = sinf(radians), cosine = cosf(radians);
     float x = point[0] * cosine - point[1] * sine;
     float y = point[0] * sine + point[1] * cosine;
@@ -36,6 +39,13 @@ static void camera_space(const ZSharpGameRenderFrame *frame,
     output[0] = world[0] - frame->camera_x;
     output[1] = world[1] - frame->camera_y;
     output[2] = world[2] - frame->camera_z;
+    if(frame->projection_prepared) {
+        float x=output[0],y=output[1],z=output[2];
+        int axis;
+        for(axis=0;axis<3;axis++)output[axis]=frame->view_basis[axis]*x+
+            frame->view_basis[3+axis]*y+frame->view_basis[6+axis]*z;
+        return;
+    }
     /* Apply the inverse camera transform in reverse Euler order. The camera's
        local-to-world orientation is yaw, then pitch, then roll, so view space
        must undo yaw before pitch and roll. Applying pitch first made it act
@@ -46,11 +56,42 @@ static void camera_space(const ZSharpGameRenderFrame *frame,
     rotate_z(output, -frame->camera_rotation_z * ZGAME_PI / 180.0f);
 }
 
+void zsharp_game_prepare_projection(ZSharpGameRenderFrame *frame) {
+    int axis;
+    for(axis=0;axis<3;axis++) {
+        float vector[3]={0,0,0};vector[axis]=1;
+        rotate_y(vector,-frame->camera_rotation_y*ZGAME_PI/180.0f);
+        rotate_x(vector,-frame->camera_rotation_x*ZGAME_PI/180.0f);
+        rotate_z(vector,-frame->camera_rotation_z*ZGAME_PI/180.0f);
+        memcpy(frame->view_basis+axis*3,vector,sizeof(vector));
+    }
+    frame->projection_tangent=tanf((frame->camera_fov<=1?70:frame->camera_fov)*.5f*ZGAME_PI/180.0f);
+    frame->projection_focal=ZGAME_LOGICAL_WIDTH*.5f/frame->projection_tangent;
+    frame->projection_prepared=1;
+}
+
+int zsharp_game_cube_in_view(const ZSharpGameRenderFrame *frame,
+                            const ZSharpGameRenderObject *object) {
+    float world[3] = {object->x, object->y, object->z}, point[3];
+    float hx = object->width * object->scale_x * .5f;
+    float hy = object->height * object->scale_y * .5f;
+    float hz = object->depth * object->scale_z * .5f;
+    float radius = sqrtf(hx*hx + hy*hy + hz*hz), depth;
+    float fov = frame->camera_fov <= 1 ? 70 : frame->camera_fov;
+    float tangent = frame->projection_prepared ? frame->projection_tangent : tanf(fov * .5f * ZGAME_PI / 180.0f);
+    float vertical = tangent * ZGAME_LOGICAL_HEIGHT / ZGAME_LOGICAL_WIDTH;
+    camera_space(frame, world, point);
+    depth = -point[2];
+    return depth + radius >= ZGAME_NEAR_DEPTH &&
+        fabsf(point[0]) - depth*tangent <= radius*sqrtf(1+tangent*tangent) &&
+        fabsf(point[1]) - depth*vertical <= radius*sqrtf(1+vertical*vertical);
+}
+
 static int project_camera_point(const ZSharpGameRenderFrame *frame,
                                 const float point[3], float output[2]) {
     float depth = -point[2];
     float fov = frame->camera_fov <= 1.0f ? 70.0f : frame->camera_fov;
-    float focal = (ZGAME_LOGICAL_WIDTH * 0.5f) /
+    float focal = frame->projection_prepared ? frame->projection_focal : (ZGAME_LOGICAL_WIDTH * 0.5f) /
                   tanf(fov * 0.5f * ZGAME_PI / 180.0f);
     if (depth < ZGAME_NEAR_DEPTH) return 0;
     output[0] = ZGAME_LOGICAL_WIDTH * 0.5f + point[0] * focal / depth;

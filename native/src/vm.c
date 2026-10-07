@@ -33,6 +33,10 @@
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <fcntl.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
@@ -105,17 +109,71 @@ typedef struct RuntimeHeap {
 
 typedef struct RuntimeModule {
     char *source_path;
+    char *project_root;
     ZSharpProgram *program;
     int objects_initialized;
 } RuntimeModule;
 
+typedef struct RuntimeForeignScope {
+    char *owner_root;
+    char *module;
+    char *resolved_root;
+    char *local_module;
+} RuntimeForeignScope;
+
 typedef struct RuntimeModuleCache {
     RuntimeModule *modules;
     size_t module_count;
+    RuntimeForeignScope *foreign_scopes;
+    size_t foreign_scope_count;
     const ZSharpWindowRuntime *window_runtime;
+    ZSharpSettings callback_settings;
+    int callback_settings_loaded;
+    struct RuntimeNativeService *services;
+    size_t service_count;
+    int pumping_services;
 } RuntimeModuleCache;
 
+typedef struct RuntimeNativeService {
+    ZSharpCServiceV1 entry;
+    ZSharpProgram *owner;
+    char *root;
+} RuntimeNativeService;
+
+static int pump_native_services(RuntimeHeap *heap, RuntimeModuleCache *cache,
+    const ZSharpProviderBinding *providers, size_t provider_count,
+    int *active, char *error, size_t error_size);
+
 static char *heap_add_text(RuntimeHeap *heap, char *text);
+
+static int resolve_foreign_scope(RuntimeModuleCache *cache, const char *root, const char *module,
+    const char **resolved_root, const char **local_module, char *error, size_t error_size) {
+    RuntimeForeignScope scope = {0}, *resized;
+    const char *local;
+    size_t index;
+    for (index = 0; index < cache->foreign_scope_count; index++) {
+        RuntimeForeignScope *item = &cache->foreign_scopes[index];
+        if (strcmp(item->owner_root, root) == 0 && strcmp(item->module, module) == 0) {
+            *resolved_root = item->resolved_root; *local_module = item->local_module;
+            return 1;
+        }
+    }
+    if (!zsharp_project_foreign_root(root, module, &scope.resolved_root, &local, error, error_size)) return 0;
+    scope.owner_root = zsharp_copy_text(root, strlen(root));
+    scope.module = zsharp_copy_text(module, strlen(module));
+    scope.local_module = zsharp_copy_text(local, strlen(local));
+    if (!scope.owner_root || !scope.module || !scope.local_module) goto failed;
+    resized = (RuntimeForeignScope *)realloc(cache->foreign_scopes,
+        (cache->foreign_scope_count + 1) * sizeof(*resized));
+    if (!resized) goto failed;
+    cache->foreign_scopes = resized;
+    resized[cache->foreign_scope_count++] = scope;
+    *resolved_root = scope.resolved_root; *local_module = scope.local_module;
+    return 1;
+failed:
+    free(scope.owner_root); free(scope.module); free(scope.local_module); free(scope.resolved_root);
+    snprintf(error, error_size, "out of memory"); return 0;
+}
 static ZSharpVariable *heap_add_array(RuntimeHeap *heap,
                                       ZSharpVariable *array);
 static void free_runtime_array(ZSharpVariable *array);
@@ -393,14 +451,182 @@ static int python_runtime_paths(char *python, size_t python_size,
     return bridge[0] != '\0' && runtime_file_exists(bridge);
 }
 
-static int execute_python_call(const ZSharpProgram *program,
+/* One serialized Python worker per ZVM process. Unlike a per-task cache this
+ * survives Start/Shutdown task boundaries and retains Python module globals. */
+#ifdef _WIN32
+static SRWLOCK python_worker_lock = SRWLOCK_INIT;
+static HANDLE python_worker_process, python_worker_input, python_worker_output;
+static HANDLE python_worker_job;
+#define PYTHON_LOCK() AcquireSRWLockExclusive(&python_worker_lock)
+#define PYTHON_UNLOCK() ReleaseSRWLockExclusive(&python_worker_lock)
+#else
+static pthread_mutex_t python_worker_lock = PTHREAD_MUTEX_INITIALIZER;
+static pid_t python_worker_process;
+static int python_worker_socket = -1;
+#define PYTHON_LOCK() pthread_mutex_lock(&python_worker_lock)
+#define PYTHON_UNLOCK() pthread_mutex_unlock(&python_worker_lock)
+#endif
+static int python_worker_cleanup_registered;
+
+static void python_worker_cleanup(void) {
+#ifdef _WIN32
+    if (python_worker_input) CloseHandle(python_worker_input);
+    if (python_worker_output) CloseHandle(python_worker_output);
+    if (python_worker_process) {
+        if (WaitForSingleObject(python_worker_process, 2000) == WAIT_TIMEOUT)
+            TerminateProcess(python_worker_process, 1);
+        WaitForSingleObject(python_worker_process, 2000);
+        CloseHandle(python_worker_process);
+    }
+    if (python_worker_job) CloseHandle(python_worker_job);
+    python_worker_input = python_worker_output = python_worker_process = python_worker_job = NULL;
+#else
+    int status, attempt;
+    if (python_worker_socket >= 0) close(python_worker_socket);
+    if (python_worker_process > 0) {
+        for (attempt = 0; attempt < 200; attempt++) {
+            pid_t done = waitpid(python_worker_process, &status, WNOHANG);
+            if (done != 0) break;
+            { struct timespec delay = {0, 10000000}; nanosleep(&delay, NULL); }
+        }
+        if (attempt == 200) {
+            kill(python_worker_process, SIGKILL);
+            while (waitpid(python_worker_process, &status, 0) < 0 && errno == EINTR) {}
+        }
+    }
+    python_worker_socket = -1;
+    python_worker_process = 0;
+#endif
+}
+
+static int python_worker_start(const char *python, const char *bridge) {
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
+    HANDLE child_input = NULL, child_output = NULL;
+    STARTUPINFOA startup = {0};
+    PROCESS_INFORMATION process = {0};
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    char command[5000];
+    if (python_worker_process) return 1;
+    if (!CreatePipe(&child_input, &python_worker_input, &security, 0) ||
+        !CreatePipe(&python_worker_output, &child_output, &security, 0)) goto fail;
+    SetHandleInformation(python_worker_input, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(python_worker_output, HANDLE_FLAG_INHERIT, 0);
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    startup.hStdInput = child_input;
+    startup.hStdOutput = child_output;
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    snprintf(command, sizeof(command), "\"%s\" -u \"%s\" --worker", python, bridge);
+    if (!CreateProcessA(NULL, command, NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &startup, &process)) goto fail;
+    python_worker_job = CreateJobObjectA(NULL, NULL);
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!python_worker_job ||
+        !SetInformationJobObject(python_worker_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) ||
+        !AssignProcessToJobObject(python_worker_job, process.hProcess)) {
+        TerminateProcess(process.hProcess, 1);
+        CloseHandle(process.hThread); CloseHandle(process.hProcess);
+        goto fail;
+    }
+    python_worker_process = process.hProcess;
+    ResumeThread(process.hThread);
+    CloseHandle(process.hThread);
+    CloseHandle(child_input); CloseHandle(child_output);
+#else
+    int sockets[2];
+    if (python_worker_process > 0) return 1;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) return 0;
+    fcntl(sockets[0], F_SETFD, FD_CLOEXEC);
+    fcntl(sockets[1], F_SETFD, FD_CLOEXEC);
+#ifdef SO_NOSIGPIPE
+    { int enabled = 1; setsockopt(sockets[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)); }
+#endif
+    python_worker_process = fork();
+    if (python_worker_process == 0) {
+        close(sockets[0]);
+        dup2(sockets[1], STDIN_FILENO); dup2(sockets[1], STDOUT_FILENO);
+        if (sockets[1] > STDERR_FILENO) close(sockets[1]);
+        execlp(python, python, "-u", bridge, "--worker", (char *)NULL);
+        _exit(127);
+    }
+    close(sockets[1]);
+    if (python_worker_process < 0) { close(sockets[0]); python_worker_process = 0; return 0; }
+    python_worker_socket = sockets[0];
+#endif
+    if (!python_worker_cleanup_registered) {
+        atexit(python_worker_cleanup);
+        python_worker_cleanup_registered = 1;
+    }
+    return 1;
+#ifdef _WIN32
+fail:
+    if (child_input) CloseHandle(child_input);
+    if (child_output) CloseHandle(child_output);
+    python_worker_cleanup();
+    return 0;
+#endif
+}
+
+static int python_worker_request(const char *python, const char *bridge,
+                                 const char *module, const char *function,
+                                 const char *input, const char *output) {
+    const char *fields[4] = {module, function, input, output};
+    const char *hex = "0123456789abcdef";
+    char request[22000], ack[5];
+    size_t used = 0, field, index, sent = 0;
+    if (!python_worker_start(python, bridge)) return 0;
+    for (field = 0; field < 4; field++) {
+        for (index = 0; fields[field][index]; index++) {
+            unsigned char c = (unsigned char)fields[field][index];
+            if (used + 3 >= sizeof(request)) return 0;
+            request[used++] = hex[c >> 4]; request[used++] = hex[c & 15];
+        }
+        request[used++] = field == 3 ? '\n' : '\t';
+    }
+    while (sent < used) {
+#ifdef _WIN32
+        DWORD count;
+        if (!WriteFile(python_worker_input, request + sent, (DWORD)(used - sent), &count, NULL) || !count) goto failed;
+#else
+        ssize_t count = send(python_worker_socket, request + sent, used - sent,
+#ifdef MSG_NOSIGNAL
+                             MSG_NOSIGNAL
+#else
+                             0
+#endif
+        );
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) goto failed;
+#endif
+        sent += count;
+    }
+    for (index = 0; index < sizeof(ack);) {
+#ifdef _WIN32
+        DWORD count;
+        if (!ReadFile(python_worker_output, ack + index, (DWORD)(sizeof(ack) - index), &count, NULL) || !count) goto failed;
+#else
+        ssize_t count = recv(python_worker_socket, ack + index, sizeof(ack) - index, 0);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) goto failed;
+#endif
+        index += count;
+    }
+    if (memcmp(ack, "DONE\n", sizeof(ack)) == 0) return 1;
+failed:
+    python_worker_cleanup();
+    return 0;
+}
+
+static int execute_python_call_unlocked(const ZSharpProgram *program,
                                const ZSharpInstruction *instruction,
                                const RuntimeValue *arguments,
                                const char *project_root, RuntimeHeap *heap,
                                RuntimeValue *result, char *error,
                                size_t error_size) {
     char python[2048] = {0}, bridge[2048] = {0};
-    char module[2048], input_path[2300], output_path[2300], command[9000];
+    char module[2048], input_path[2300], output_path[2300];
     char relative[1024];
     const char *module_name = instruction->call_file;
     size_t project_length = program->project_id == NULL ? 0
@@ -470,21 +696,13 @@ static int execute_python_call(const ZSharpProgram *program,
         fputc('\n', file);
     }
     fclose(file);
-#ifdef _WIN32
-    snprintf(command, sizeof(command), "\"\"%s\" \"%s\" \"%s\" \"%s\" \"%s\" \"%s\"\"",
-#else
-    snprintf(command, sizeof(command), "\"%s\" \"%s\" \"%s\" \"%s\" \"%s\" \"%s\"",
-#endif
-             python, bridge, module, instruction->call_function,
-             input_path, output_path);
-#ifdef _WIN32
-    process_result = run_bridge_command_hidden(command);
-#else
-    process_result = system(command);
-#endif
+    process_result = python_worker_request(python, bridge, module,
+        instruction->call_function, input_path, output_path) ? 0 : -1;
     file = fopen(output_path, "rb");
     remove(input_path);
-    if (file == NULL) {
+    if (file == NULL || process_result != 0) {
+        if (file != NULL) fclose(file);
+        remove(output_path);
         snprintf(error, error_size,
                  "Python runtime exited without a result (code %d)", process_result);
         return 0;
@@ -558,6 +776,19 @@ static int execute_python_call(const ZSharpProgram *program,
     return 1;
 }
 
+static int execute_python_call(const ZSharpProgram *program,
+                               const ZSharpInstruction *instruction,
+                               const RuntimeValue *arguments,
+                               const char *project_root, RuntimeHeap *heap,
+                               RuntimeValue *result, char *error, size_t error_size) {
+    int success;
+    PYTHON_LOCK();
+    success = execute_python_call_unlocked(program, instruction, arguments,
+        project_root, heap, result, error, error_size);
+    PYTHON_UNLOCK();
+    return success;
+}
+
 typedef struct KotlinLibraryCache {
     char *path;
     void *handle;
@@ -575,11 +806,11 @@ static pthread_mutex_t kotlin_library_lock = PTHREAD_MUTEX_INITIALIZER;
 #define KOTLIN_CACHE_UNLOCK() pthread_mutex_unlock(&kotlin_library_lock)
 #endif
 
-/* Kotlin/Native starts runtime work that can outlive a function call. Its DLL
- * must stay loaded until process exit; unloading it after one call can fault
- * asynchronously in Rules.zkt.dll_unloaded. Cache by full module path so
- * repeated calls do not leak another library reference each frame. */
-static void *load_kotlin_library(const char *path) {
+/* Stateful C++ SDKs and Kotlin/Native can keep callbacks/background threads
+ * alive after a call. Retain one reference per full module path until process
+ * exit, rather than unloading code still in use or leaking a ref per call.
+ * Modules remain responsible for their own explicit SDK shutdown. */
+static void *load_retained_native_library(const char *path) {
     KotlinLibraryCache *cached;
     void *handle;
     KOTLIN_CACHE_LOCK();
@@ -591,7 +822,8 @@ static void *load_kotlin_library(const char *path) {
         }
     }
 #ifdef _WIN32
-    handle = (void *)LoadLibraryA(path);
+    handle = (void *)LoadLibraryExA(path, NULL,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
 #else
     handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
 #endif
@@ -620,6 +852,7 @@ static int execute_native_bridge_call(const ZSharpProgram *program,
                             const ZSharpInstruction *instruction,
                             const RuntimeValue *arguments,
                             const char *project_root, RuntimeHeap *heap,
+                            RuntimeModuleCache *cache, const char *owner_root,
                             int native_language, RuntimeValue *result, char *error,
                             size_t error_size) {
     char relative[1024];
@@ -666,18 +899,36 @@ static int execute_native_bridge_call(const ZSharpProgram *program,
     snprintf(library_path, sizeof(library_path), "%s/%s.%s.so",
              project_root, relative, suffix);
 #endif
-    if (native_language == 3) library = load_kotlin_library(library_path);
+    if (native_language == 0 || native_language == 2 || native_language == 3)
+        library = load_retained_native_library(library_path);
     else {
 #ifdef _WIN32
-        library = (void *)LoadLibraryA(library_path);
+        library = (void *)LoadLibraryExA(
+            library_path, NULL,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
 #else
         library = dlopen(library_path, RTLD_NOW | RTLD_LOCAL);
 #endif
     }
     if (library == NULL) {
+#ifdef _WIN32
+        DWORD code = GetLastError();
+        char detail[256] = {0};
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM |
+                       FORMAT_MESSAGE_IGNORE_INSERTS, NULL, code, 0,
+                       detail, sizeof(detail), NULL);
+        detail[strcspn(detail, "\r\n")] = '\0';
+        snprintf(error, error_size,
+                 "could not load %s module '%s' (%s): Windows error %lu: %s",
+                 label, instruction->call_file, library_path,
+                 (unsigned long)code,
+                 detail[0] == '\0' ? "unknown loader error" : detail);
+#else
         snprintf(error, error_size,
                  "%s module '%s' is not compiled for this platform (%s)",
                  label, instruction->call_file, library_path);
+#endif
         return 0;
     }
 #ifdef _WIN32
@@ -691,6 +942,28 @@ static int execute_native_bridge_call(const ZSharpProgram *program,
                  "%s module '%s' does not export %s",
                  label, instruction->call_file, entry_name);
         goto cleanup;
+    }
+    if (native_language == 2) {
+        ZSharpCServiceV1 service;
+        #ifdef _WIN32
+        service = (ZSharpCServiceV1)(void *)GetProcAddress((HMODULE)library, ZSHARP_C_SERVICE_NAME);
+        #else
+        service = (ZSharpCServiceV1)dlsym(library, ZSHARP_C_SERVICE_NAME);
+        #endif
+        if (service != NULL) {
+            size_t s;
+            for (s = 0; s < cache->service_count; s++)
+                if (cache->services[s].entry == service && cache->services[s].owner == program) break;
+            if (s == cache->service_count) {
+                RuntimeNativeService *resized = (RuntimeNativeService *)realloc(cache->services,
+                    (s + 1) * sizeof(*resized));
+                char *root = zsharp_copy_text(owner_root, strlen(owner_root));
+                if (!resized || !root) { if (resized) cache->services = resized; free(root); snprintf(error, error_size, "out of memory"); goto cleanup; }
+                cache->services = resized;
+                resized[s].entry = service; resized[s].owner = (ZSharpProgram *)program; resized[s].root = root;
+                cache->service_count++;
+            }
+        }
     }
     if (instruction->argument_count > 0) {
         cpp_arguments = (ZSharpCppValue *)calloc(
@@ -781,9 +1054,9 @@ static int execute_native_bridge_call(const ZSharpProgram *program,
 cleanup:
     free(cpp_arguments);
 #ifdef _WIN32
-    if (native_language != 3) FreeLibrary((HMODULE)library);
+    if (native_language != 0 && native_language != 2 && native_language != 3) FreeLibrary((HMODULE)library);
 #else
-    if (native_language != 3) dlclose(library);
+    if (native_language != 0 && native_language != 2 && native_language != 3) dlclose(library);
 #endif
     return ok;
 }
@@ -1102,6 +1375,104 @@ static int javascript_interrupt(JSRuntime *runtime, void *opaque) {
     JavaScriptDeadline *deadline = (JavaScriptDeadline *)opaque;
     (void)runtime;
     return deadline != NULL && time(NULL) >= deadline->expires;
+}
+
+/* Reuse the bundled RegExp engine without evaluating user input as code.
+ * Each call owns its context, so concurrent Z# tasks cannot race JS state. */
+static int execute_regex(const ZSharpInstruction *instruction,
+                         const RuntimeValue *arguments, RuntimeHeap *heap,
+                         RuntimeValue *result, char *error, size_t error_size) {
+    static const char code[] =
+        "(function(text,pattern,replacement,flags,kind){"
+        "if(/[^gimsu]/.test(flags))throw new Error('supported flags: g, i, m, s, u');"
+        "if(kind!==1&&!flags.includes('g'))flags+='g';"
+        "const re=new RegExp(pattern,flags);"
+        "if(kind===1)return re.test(text);"
+        "if(kind===3)return text.replace(re,replacement);"
+        "const out=[];for(const m of text.matchAll(re)){"
+        "if(out.length===100000)throw new Error('too many matches (maximum 100000)');"
+        "out.push(m[0]);}return out;})";
+    JSRuntime *rt=NULL;
+    JSContext *ctx=NULL;
+    JSValue fn=JS_UNDEFINED, returned=JS_UNDEFINED, values[5];
+    JavaScriptDeadline deadline;
+    ZSharpVariable *array=NULL;
+    size_t i;
+    int ok=0;
+    for(i=0;i<5;i++) values[i]=JS_UNDEFINED;
+    for(i=0;i<instruction->argument_count;i++) {
+        if(arguments[i].type!=ZVALUE_TEXT) {
+            snprintf(error,error_size,"Regex arguments must be text");return 0;
+        }
+    }
+    rt=JS_NewRuntime();if(!rt)goto done;
+    JS_SetMemoryLimit(rt,16u*1024u*1024u);
+    JS_SetMaxStackSize(rt,1024u*1024u);
+    deadline.expires=time(NULL)+2;
+    JS_SetInterruptHandler(rt,javascript_interrupt,&deadline);
+    ctx=JS_NewContext(rt);if(!ctx)goto done;
+    fn=JS_Eval(ctx,code,sizeof(code)-1,"Regex",JS_EVAL_TYPE_GLOBAL);
+    if(JS_IsException(fn))goto exception;
+    values[0]=JS_NewString(ctx,arguments[0].text);
+    values[1]=JS_NewString(ctx,arguments[1].text);
+    values[2]=JS_NewString(ctx,instruction->number_operand==3?arguments[2].text:"");
+    values[3]=JS_NewString(ctx,instruction->argument_count==(instruction->number_operand==3?4u:3u)
+        ? arguments[instruction->argument_count-1].text:"");
+    values[4]=JS_NewInt32(ctx,instruction->number_operand);
+    for(i=0;i<5;i++)if(JS_IsException(values[i]))goto exception;
+    returned=JS_Call(ctx,fn,JS_UNDEFINED,5,values);
+    if(JS_IsException(returned))goto exception;
+    memset(result,0,sizeof(*result));
+    if(instruction->number_operand==1) {
+        result->type=ZVALUE_STATUS;result->number=JS_ToBool(ctx,returned);
+    } else if(instruction->number_operand==3) {
+        size_t length;
+        const char *text=JS_ToCStringLen(ctx,&length,returned);
+        if(!text)goto exception;
+        if(memchr(text,0,length)) {JS_FreeCString(ctx,text);snprintf(error,error_size,"Regex result contains an unsupported NUL character");goto done;}
+        result->text=heap_add_text(heap,zsharp_copy_text(text,length));
+        JS_FreeCString(ctx,text);
+        if(!result->text)goto done;
+        result->type=ZVALUE_TEXT;
+    } else {
+        uint32_t count;
+        JSValue length=JS_GetPropertyStr(ctx,returned,"length");
+        int converted=JS_ToUint32(ctx,&count,length);JS_FreeValue(ctx,length);
+        if(converted<0)goto exception;
+        if(count>100000){snprintf(error,error_size,"Regex returned too many matches");goto done;}
+        array=calloc(1,sizeof(*array));if(!array)goto done;
+        array->name="Regex.matches";array->type=ZVALUE_TEXT_ARRAY;
+        array->text_items=calloc(count?count:1,sizeof(char*));if(!array->text_items)goto done;
+        for(i=0;i<count;i++) {
+            JSValue item=JS_GetPropertyUint32(ctx,returned,(uint32_t)i);
+            size_t length;const char *text=JS_ToCStringLen(ctx,&length,item);
+            JS_FreeValue(ctx,item);
+            if(!text)goto exception;
+            if(memchr(text,0,length)){JS_FreeCString(ctx,text);snprintf(error,error_size,"Regex match contains an unsupported NUL character");goto done;}
+            array->text_items[i]=zsharp_copy_text(text,length);
+            JS_FreeCString(ctx,text);
+            if(!array->text_items[i])goto done;
+            array->text_item_count++;
+        }
+        result->array=heap_add_array(heap,array);array=NULL;
+        if(!result->array)goto done;
+        result->type=ZVALUE_TEXT_ARRAY;
+    }
+    ok=1;goto done;
+exception:
+    {
+        JSValue ex=JS_GetException(ctx);
+        const char *message=JS_ToCString(ctx,ex);
+        snprintf(error,error_size,"Regex failed: %s",message?message:"execution interrupted or out of memory");
+        if(message)JS_FreeCString(ctx,message);
+        JS_FreeValue(ctx,ex);
+    }
+done:
+    if(array)free_runtime_array(array);
+    if(ctx){for(i=0;i<5;i++)JS_FreeValue(ctx,values[i]);JS_FreeValue(ctx,returned);JS_FreeValue(ctx,fn);JS_FreeContext(ctx);}
+    if(rt)JS_FreeRuntime(rt);
+    if(!ok && !error[0])snprintf(error,error_size,"Regex could not allocate its result");
+    return ok;
 }
 
 /* Keep source offsets intact so QuickJS line/column diagnostics still point
@@ -1703,6 +2074,10 @@ static int project_file_exists(const char *project_root, const char *relative,
     return 1;
 }
 
+static int compare_search_paths(const void *a,const void *b) {
+    return strcmp(*(const char *const *)a,*(const char *const *)b);
+}
+
 static int write_project_text(const char *project_root, const char *relative,
                               const char *contents, int append,
                               char *error, size_t error_size) {
@@ -1905,7 +2280,7 @@ static RuntimeValue variable_value(ZSharpVariable *variable) {
     value.type = variable->type;
     if (variable->type == ZVALUE_NUMBER) {
         value.number_text = variable->number_text;
-    } else if (variable->type == ZVALUE_TEXT) {
+    } else if (variable->type == ZVALUE_TEXT || variable->type == ZVALUE_FUNCTION) {
         value.text = variable->text_value;
     } else if (variable->type == ZVALUE_TEXT_ARRAY) {
         value.array = variable;
@@ -1988,7 +2363,7 @@ static int runtime_field_assign(RuntimeField *field,
         field->definition->number_value = value->number;
         return 1;
     }
-    if (value->type == ZVALUE_TEXT) {
+    if (value->type == ZVALUE_TEXT || value->type == ZVALUE_FUNCTION) {
         char *copy = zsharp_copy_text(value->text, strlen(value->text));
         if (copy == NULL) {
             snprintf(error, error_size, "out of memory");
@@ -2235,6 +2610,8 @@ static ZSharpProgram *load_project_module_path(
     RuntimeModule *module;
     ZSharpDiagnostic diagnostic;
     char load_error[512] = {0};
+    ZSharpProgram *loaded_program;
+    (void)project_root;
     for (index = 0; index < cache->module_count; index++) {
         if (strcmp(cache->modules[index].source_path, source_path) == 0) {
             free(source_path);
@@ -2253,7 +2630,9 @@ static ZSharpProgram *load_project_module_path(
     module = &cache->modules[cache->module_count++];
     memset(module, 0, sizeof(*module));
     module->source_path = source_path;
-    module->program = (ZSharpProgram *)malloc(sizeof(*module->program));
+    module->project_root = zsharp_project_find_root(source_path, error, error_size);
+    if (!module->project_root) return NULL;
+    module->program = (ZSharpProgram *)calloc(1, sizeof(*module->program));
     if (module->program == NULL) {
         snprintf(error, error_size, "out of memory");
         return NULL;
@@ -2268,13 +2647,22 @@ static ZSharpProgram *load_project_module_path(
         }
         return NULL;
     }
+    {
+        ZSharpSettings settings;
+        if (!zsharp_settings_load(module->project_root, &settings, &diagnostic, error, error_size)) return NULL;
+        module->program->project_id = zsharp_copy_text(settings.project_id, strlen(settings.project_id));
+        zsharp_settings_free(&settings);
+        if (!module->program->project_id) return NULL;
+    }
     module->objects_initialized = 1;
+    loaded_program = module->program;
     if (!initialize_program_objects(
-            module->program, heap, project_root, providers, provider_count,
+            module->program, heap, module->project_root, providers, provider_count,
             cache, depth + 1, error, error_size)) {
         return NULL;
     }
-    return module->program;
+    /* Initializing an object can load another module and resize the cache. */
+    return loaded_program;
 }
 
 static ZSharpProgram *load_project_module(
@@ -2344,7 +2732,7 @@ static int resolve_value_path(
     if ((part_count == 2 &&
          !lookup_name(room, current_object, locals, local_count, parts[0],
                       value)) ||
-        (part_count == 3 && find_room(program, parts[0]) == NULL)) {
+        part_count == 3) {
         int window_read = read_runtime_property(
             module_cache, heap, instruction->operand, value, error,
             error_size);
@@ -2413,10 +2801,14 @@ static int resolve_value_path(
         char provider_error[512] = {0};
         memset(&provider_value, 0, sizeof(provider_value));
         if (binding == NULL) {
-            snprintf(error, error_size,
-                     "external project '%s' has no registered Z# provider; "
-                     "use --provider %s=path-to-library",
-                     parts[0], parts[0]);
+            char *dependency_root = zsharp_project_dependency_root(project_root, parts[0], error, error_size);
+            if (dependency_root) {
+                ZSharpProgram *target_program = load_project_module(module_cache, parts[1], heap,
+                    dependency_root, providers, provider_count, depth, error, error_size);
+                free(dependency_root);
+                if (target_program) ok = resolve_room_variable(target_program, room, parts[2], parts[3],
+                    1, heap, value, error, error_size);
+            }
         } else if (binding->provider->get_variable == NULL) {
             snprintf(error, error_size,
                      "provider for project '%s' does not expose variables",
@@ -2543,7 +2935,7 @@ static int assign_variable_value(ZSharpVariable *variable,
         variable->number_value = value->number;
         return 1;
     }
-    if (value->type == ZVALUE_TEXT) {
+    if (value->type == ZVALUE_TEXT || value->type == ZVALUE_FUNCTION) {
         char *copy = zsharp_copy_text(value->text, strlen(value->text));
         if (copy == NULL) {
             snprintf(error, error_size, "out of memory");
@@ -2656,9 +3048,14 @@ static int store_value_path(
         ZSharpProviderValue provider_value;
         char provider_error[512] = {0};
         if (binding == NULL) {
-            snprintf(error, error_size,
-                     "external project '%s' has no registered Z# provider",
-                     parts[0]);
+            char *dependency_root = zsharp_project_dependency_root(project_root, parts[0], error, error_size);
+            if (dependency_root) {
+                ZSharpProgram *target_program = load_project_module(module_cache, parts[1], heap,
+                    dependency_root, providers, provider_count, depth, error, error_size);
+                free(dependency_root);
+                if (target_program && find_visible_variable(target_program, room, parts[2], parts[3],
+                        1, &variable, error, error_size)) ok = assign_variable_value(variable, value, error, error_size);
+            }
         } else if (binding->provider->set_variable == NULL) {
             snprintf(error, error_size,
                      "provider for project '%s' does not allow variable "
@@ -2769,9 +3166,16 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
     size_t stack_count = 0;
     size_t local_count = 0;
     size_t instruction_index = 0;
+    char *callback_storage = NULL;
     size_t index;
     int ok = 1;
 
+    /* Calls within an imported project keep its own relative files/imports. */
+    for (index = 0; index < module_cache->module_count; index++)
+        if (module_cache->modules[index].program == program) {
+            project_root = module_cache->modules[index].project_root;
+            break;
+        }
     *did_return = 0;
     if (depth > ZSHARP_MAX_CALL_DEPTH) {
         snprintf(error, error_size,
@@ -2813,6 +3217,7 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
     while (instruction_index < function->instruction_count) {
         ZSharpInstruction *instruction =
             &function->instructions[instruction_index];
+        ZSharpInstruction callback_instruction;
         RuntimeValue left;
         RuntimeValue right;
         RuntimeValue value;
@@ -2825,6 +3230,12 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
             snprintf(error, error_size, "window task stopped");
             ok = 0;
             goto done;
+        }
+        if (!module_cache->pumping_services && module_cache->service_count &&
+            (instruction_index % 64 == 0)) {
+            int active;
+            if (!pump_native_services(heap, module_cache, providers, provider_count,
+                                       &active, error, error_size)) { ok = 0; goto done; }
         }
 
         switch (instruction->op) {
@@ -2847,7 +3258,8 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 break;
             case ZOP_PUSH_TEXT:
-                value.type = ZVALUE_TEXT;
+            case ZOP_PUSH_FUNCTION:
+                value.type = instruction->op == ZOP_PUSH_FUNCTION ? ZVALUE_FUNCTION : ZVALUE_TEXT;
                 value.text = instruction->operand;
                 if (!push(stack, stack_capacity, &stack_count, value, error,
                           error_size)) {
@@ -3166,9 +3578,20 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 break;
             }
+            case ZOP_STORE_LOCAL_FUNCTION:
+            case ZOP_STORE_LOCAL_TEXT_ARRAY:
             case ZOP_STORE_LOCAL_VALUE: {
                 size_t local_index;
                 if (!pop(stack, &stack_count, &value, error, error_size)) {
+                    ok = 0;
+                    goto done;
+                }
+                if (instruction->op == ZOP_STORE_LOCAL_TEXT_ARRAY && value.type != ZVALUE_TEXT_ARRAY) {
+                    snprintf(error,error_size,"local text array '%s' requires a text array value",instruction->operand);
+                    ok=0;goto done;
+                }
+                if (instruction->op == ZOP_STORE_LOCAL_FUNCTION && value.type != ZVALUE_FUNCTION) {
+                    snprintf(error, error_size, "function reference '%s' requires a function value", instruction->operand);
                     ok = 0;
                     goto done;
                 }
@@ -3207,6 +3630,46 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     goto done;
                 }
                 break;
+            case ZOP_REGEX: {
+                RuntimeValue regex_arguments[4];size_t i;
+                if(instruction->number_operand<1 || instruction->number_operand>3 ||
+                   instruction->argument_count<(instruction->number_operand==3?3u:2u) ||
+                   instruction->argument_count>(instruction->number_operand==3?4u:3u)) {
+                    snprintf(error,error_size,"invalid Regex bytecode");ok=0;goto done;
+                }
+                for(i=instruction->argument_count;i>0;i--)
+                    if(!pop(stack,&stack_count,&regex_arguments[i-1],error,error_size)){ok=0;goto done;}
+                if(!execute_regex(instruction,regex_arguments,heap,&value,error,error_size) ||
+                   !push(stack,stack_capacity,&stack_count,value,error,error_size)){ok=0;goto done;}
+                break;
+            }
+            case ZOP_FILE_SEARCH_EXTENSION: {
+                ZSharpSourceList files={0};
+                ZSharpVariable *array=NULL;
+                size_t i,root_length=strlen(project_root);
+                while(root_length && (project_root[root_length-1]=='/' || project_root[root_length-1]=='\\'))root_length--;
+                if(!pop(stack,&stack_count,&value,error,error_size)) {ok=0;goto done;}
+                if(value.type!=ZVALUE_TEXT) {
+                    snprintf(error,error_size,"File.searchExtension requires a text extension");ok=0;goto done;
+                }
+                if(!zsharp_project_search_files(project_root,value.text,&files,error,error_size)) {ok=0;goto done;}
+                array=calloc(1,sizeof(*array));
+                if(!array){zsharp_project_source_list_free(&files);snprintf(error,error_size,"out of memory");ok=0;goto done;}
+                array->type=ZVALUE_TEXT_ARRAY;
+                array->name="File.searchExtension";
+                array->text_items=files.items;array->text_item_count=files.count;
+                for(i=0;i<files.count;i++) {
+                    char *path=array->text_items[i],*cursor;
+                    memmove(path,path+root_length+1,strlen(path+root_length+1)+1);
+                    for(cursor=path;*cursor;cursor++)if(*cursor=='\\')*cursor='/';
+                }
+                if(array->text_item_count>1)
+                    qsort(array->text_items,array->text_item_count,sizeof(*array->text_items),compare_search_paths);
+                if(!heap_add_array(heap,array)) {snprintf(error,error_size,"out of memory");ok=0;goto done;}
+                memset(&value,0,sizeof(value));value.type=ZVALUE_TEXT_ARRAY;value.array=array;
+                if(!push(stack,stack_capacity,&stack_count,value,error,error_size)){ok=0;goto done;}
+                break;
+            }
             case ZOP_FILE_READ:
                 if (!pop(stack, &stack_count, &value, error, error_size) ||
                     value.type != ZVALUE_TEXT ||
@@ -3566,7 +4029,8 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 double first;
                 double second = 0.0;
                 double result = 0.0;
-                char buffer[384];
+                char buffer[768];
+                int precision = 17;
                 char *fraction_end;
                 if (!pop(stack, &stack_count, &right, error, error_size) ||
                     right.type != ZVALUE_NUMBER) {
@@ -3605,6 +4069,17 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     case 7: result = fmax(first, second); break;
                     case 8: result = first * 3.14159265358979323846 / 180.0; break;
                     case 9: result = first * 180.0 / 3.14159265358979323846; break;
+                    case 10:
+                        if (first < 0.0 && second != trunc(second)) {
+                            snprintf(error, error_size, "Math.pow: negative bases require an integer exponent");
+                            ok = 0; goto done;
+                        }
+                        if (first == 0.0 && second < 0.0) {
+                            snprintf(error, error_size, "Math.pow: zero cannot have a negative exponent");
+                            ok = 0; goto done;
+                        }
+                        result = pow(first, second);
+                        break;
                     default:
                         snprintf(error, error_size, "unknown Math function");
                         ok = 0;
@@ -3612,7 +4087,9 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 if (!isfinite(result)) {
                     snprintf(error, error_size,
-                             "Math function produced a non-finite result");
+                             instruction->number_operand == 10
+                             ? "Math.pow result exceeds the supported finite number range"
+                             : "Math function produced a non-finite result");
                     ok = 0;
                     goto done;
                 }
@@ -3621,8 +4098,10 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                    naturally emits it for trig residuals such as cos(pi / 2).
                    Collapse insignificant floating-point residue and always
                    serialize the remaining value in ordinary decimal form. */
-                if (fabs(result) < 1e-12) result = 0.0;
-                snprintf(buffer, sizeof(buffer), "%.17f", result);
+                if (instruction->number_operand != 10 && fabs(result) < 1e-12) result = 0.0;
+                if (instruction->number_operand == 10 && result != 0.0 && fabs(result) < 1.0)
+                    precision = (int)ceil(-log10(fabs(result))) + 17;
+                snprintf(buffer, sizeof(buffer), "%.*f", precision, result);
                 fraction_end = buffer + strlen(buffer);
                 while (fraction_end > buffer && fraction_end[-1] == '0')
                     *--fraction_end = '\0';
@@ -4140,6 +4619,15 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 break;
             }
+            case ZOP_APPLICATION_QUIT:
+                if (module_cache->window_runtime == NULL ||
+                    module_cache->window_runtime->request_close == NULL) {
+                    snprintf(error, error_size, "Application.Quit requires a running app or game");
+                    ok = 0;
+                } else {
+                    module_cache->window_runtime->request_close(module_cache->window_runtime->state);
+                }
+                goto done;
             case ZOP_PRINT:
             case ZOP_PRINT_UPDATE:
                 if (!pop(stack, &stack_count, &value, error, error_size)) {
@@ -4445,7 +4933,20 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 RuntimeValue *call_arguments = NULL;
                 int call_did_return = 0;
                 int external;
+                const char *foreign_root = NULL;
+                const char *foreign_module = NULL;
+                const char *call_root = project_root;
+                ZSharpInstruction scoped_instruction;
                 size_t argument_index = instruction->argument_count;
+                if (instruction->operand != NULL && strcmp(instruction->operand, "@callback") == 0) {
+                    if (!pop(stack, &stack_count, &value, error, error_size)) {
+                        ok = 0; goto done;
+                    }
+                    if (value.type != ZVALUE_TEXT && value.type != ZVALUE_FUNCTION) {
+                        snprintf(error, error_size, "Function.call callback requires text or a function reference");
+                        ok = 0; goto done;
+                    }
+                }
                 if (instruction->argument_count > 0) {
                     call_arguments = (RuntimeValue *)calloc(
                         instruction->argument_count,
@@ -4466,10 +4967,61 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                         goto done;
                     }
                 }
+                if (instruction->operand != NULL && strcmp(instruction->operand, "@callback") == 0) {
+                    ZSharpDiagnostic diagnostic;
+                    callback_instruction = *instruction;
+                    if (callback_storage == NULL) callback_storage = (char *)malloc(8192);
+                    if (callback_storage == NULL) {
+                        snprintf(error, error_size, "out of memory");
+                        free(call_arguments); ok = 0; goto done;
+                    }
+                    if (!zsharp_call_target_decode(value.text, &callback_instruction,
+                            callback_storage, 8192, error, error_size)) {
+                        free(call_arguments); ok = 0; goto done;
+                    }
+                    if (module_cache->callback_settings_loaded && program->project_id != NULL &&
+                        strcmp(module_cache->callback_settings.project_id, program->project_id) != 0) {
+                        zsharp_settings_free(&module_cache->callback_settings);
+                        module_cache->callback_settings_loaded = 0;
+                    }
+                    if (!module_cache->callback_settings_loaded) {
+                        zsharp_settings_init(&module_cache->callback_settings);
+                        if (project_root != NULL) {
+                            if (!zsharp_settings_load(project_root, &module_cache->callback_settings,
+                                    &diagnostic, error, error_size)) {
+                                free(call_arguments); ok = 0; goto done;
+                            }
+                        } else {
+                            module_cache->callback_settings.project_id = zsharp_copy_text(
+                                program->project_id == NULL ? "" : program->project_id,
+                                strlen(program->project_id == NULL ? "" : program->project_id));
+                            if (module_cache->callback_settings.project_id == NULL) {
+                                snprintf(error, error_size, "out of memory");
+                                free(call_arguments); ok = 0; goto done;
+                            }
+                        }
+                        module_cache->callback_settings_loaded = 1;
+                    }
+                    if (!zsharp_project_authorize_call(program, &module_cache->callback_settings,
+                            room, &callback_instruction, error, error_size)) {
+                        free(call_arguments); ok = 0; goto done;
+                    }
+                    instruction = &callback_instruction;
+                }
+                if (instruction->operand != NULL && instruction->operand[0] == '@') {
+                    if (!resolve_foreign_scope(module_cache, project_root, instruction->call_file,
+                            &foreign_root, &foreign_module, error, error_size)) {
+                        free(call_arguments); ok = 0; goto done;
+                    }
+                    scoped_instruction = *instruction;
+                    scoped_instruction.call_file = (char *)foreign_module;
+                    instruction = &scoped_instruction;
+                    call_root = foreign_root;
+                }
                 if (instruction->operand != NULL &&
                     strcmp(instruction->operand, "@py") == 0) {
                     if (!execute_python_call(program, instruction,
-                                             call_arguments, project_root,
+                                             call_arguments, call_root,
                                              heap, &call_return, error,
                                              error_size)) {
                         free(call_arguments);
@@ -4488,7 +5040,7 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 if (instruction->operand != NULL &&
                     strcmp(instruction->operand, "@js") == 0) {
                     if (!execute_javascript_call(program, instruction,
-                                                 call_arguments, project_root,
+                                                 call_arguments, call_root,
                                                  heap, &call_return, error,
                                                  error_size)) {
                         free(call_arguments);
@@ -4507,7 +5059,7 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 if (instruction->operand != NULL &&
                     strcmp(instruction->operand, "@lua") == 0) {
                     if (!execute_lua_call(program, instruction,
-                                          call_arguments, project_root,
+                                          call_arguments, call_root,
                                           heap, &call_return, error,
                                           error_size)) {
                         free(call_arguments);
@@ -4529,8 +5081,9 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                      strcmp(instruction->operand, "@kt") == 0 ||
                      strcmp(instruction->operand, "@rust") == 0)) {
                     if (!execute_native_bridge_call(program, instruction,
-                                          call_arguments, project_root,
+                                          call_arguments, call_root,
                                           heap,
+                                          module_cache, project_root,
                                           strcmp(instruction->operand, "@rust") == 0 ? 1 :
                                           strcmp(instruction->operand, "@c") == 0 ? 2 :
                                           strcmp(instruction->operand, "@kt") == 0 ? 3 : 0,
@@ -4554,6 +5107,17 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     const ZSharpProviderBinding *binding = find_provider(
                         providers, provider_count, instruction->operand);
                     char provider_error[512] = {0};
+                    if (binding == NULL) {
+                        char *dependency_root = zsharp_project_dependency_root(project_root,
+                            instruction->operand, error, error_size);
+                        if (dependency_root != NULL) {
+                            call_program = load_project_module(module_cache, instruction->call_file,
+                                heap, dependency_root, providers, provider_count, depth, error, error_size);
+                            free(dependency_root);
+                            if (!call_program) { free(call_arguments); ok = 0; goto done; }
+                            goto source_dependency_loaded;
+                        }
+                    }
                     if (binding == NULL) {
                         snprintf(error, error_size,
                                  "external project '%s' has no registered "
@@ -4612,6 +5176,8 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                         goto done;
                     }
                 }
+source_dependency_loaded:
+                external = call_program != program;
                 target_room = find_room(call_program, instruction->call_room);
                 target_function = target_room == NULL
                     ? NULL
@@ -4807,6 +5373,7 @@ done:
                      instruction_index + 1);
         }
     }
+    free(callback_storage);
     free(stack);
     free(locals);
     return ok;
@@ -4944,6 +5511,80 @@ static RuntimeObject *create_object(ZSharpProgram *program,
     return object;
 }
 
+static int pump_native_services(RuntimeHeap *heap, RuntimeModuleCache *cache,
+    const ZSharpProviderBinding *providers, size_t provider_count,
+    int *active, char *error, size_t error_size) {
+    size_t s;
+    int ok = 1;
+    *active = 0;
+    if (cache->pumping_services) return 1;
+    cache->pumping_services = 1;
+    for (s = 0; s < cache->service_count && ok; s++) {
+        RuntimeNativeService service = cache->services[s];
+        ZSharpCEventV1 event = {0};
+        int state = service.entry(ZSHARP_C_SERVICE_ACTIVE, &event, error, error_size);
+        int available;
+        if (state < 0) { ok = 0; break; }
+        *active |= state != 0;
+        event.target = service.owner->source_name;
+        available = service.entry(ZSHARP_C_SERVICE_POLL, &event, error, error_size);
+        if (available < 0) { ok = 0; break; }
+        if (available > 0) {
+            char *target = event.target ? zsharp_copy_text(event.target, strlen(event.target)) : NULL;
+            char *room_name, *function_name;
+            RuntimeValue *values = NULL, ignored = {0};
+            int returned = 0;
+            size_t i;
+            ZSharpRoom *room = NULL;
+            ZSharpFunction *function = NULL;
+            if (!target || !(room_name = strchr(target, ':'))) {
+                snprintf(error, error_size, "native event has an invalid callback target"); ok = 0;
+            } else {
+                *room_name++ = 0; function_name = strchr(room_name, ':');
+                if (function_name) {
+                    *function_name++ = 0;
+                    room = find_room(service.owner, room_name);
+                    function = room ? find_function(room, function_name) : NULL;
+                }
+                if (strcmp(target, service.owner->source_name) || !function ||
+                    !function->disable_auto_run || event.argument_count != function->parameter_count ||
+                    event.argument_count > 64 || (event.argument_count && !event.arguments)) {
+                    snprintf(error, error_size, "native event target is not an owned registered declaration"); ok = 0;
+                }
+            }
+            if (ok && event.argument_count) {
+                values = (RuntimeValue *)calloc(event.argument_count, sizeof(*values));
+                if (!values) { snprintf(error, error_size, "out of memory"); ok = 0; }
+            }
+            for (i = 0; ok && i < event.argument_count; i++) {
+                const ZSharpCValue *argument = &event.arguments[i];
+                if (argument->type == ZSHARP_C_TEXT && function->parameters[i].type == ZVALUE_TEXT) {
+                    values[i].type = ZVALUE_TEXT;
+                    values[i].text = heap_add_text(heap, zsharp_copy_text(argument->text ? argument->text : "", strlen(argument->text ? argument->text : "")));
+                    if (!values[i].text) ok = 0;
+                } else if (argument->type == ZSHARP_C_NUMBER && function->parameters[i].type == ZVALUE_NUMBER && isfinite(argument->number)) {
+                    char buffer[512];
+                    snprintf(buffer, sizeof(buffer), "%.17f", argument->number);
+                    values[i].type = ZVALUE_NUMBER;
+                    values[i].number_text = heap_add_text(heap, zsharp_copy_text(buffer, strlen(buffer)));
+                    if (!values[i].number_text) ok = 0;
+                } else if (argument->type == ZSHARP_C_STATUS && function->parameters[i].type == ZVALUE_STATUS) {
+                    values[i].type = ZVALUE_STATUS; values[i].number = argument->number != 0;
+                } else {
+                    snprintf(error, error_size, "native callback argument type mismatch"); ok = 0;
+                }
+            }
+            if (ok) ok = execute_function(service.owner, room, function, NULL, heap, service.root,
+                providers, provider_count, cache, 1, values, event.argument_count, NULL,
+                &ignored, &returned, error, error_size);
+            free(values); free(target);
+            if (!service.entry(ZSHARP_C_SERVICE_COMPLETE, &event, error, error_size)) ok = 0;
+        }
+    }
+    cache->pumping_services = 0;
+    return ok;
+}
+
 static int initialize_program_objects(ZSharpProgram *program,
                                       RuntimeHeap *heap,
                                       const char *project_root,
@@ -4953,6 +5594,19 @@ static int initialize_program_objects(ZSharpProgram *program,
                                       unsigned depth, char *error,
                                       size_t error_size) {
     size_t room_index;
+    for (room_index = 0; room_index < program->room_count; room_index++) {
+        ZSharpRoom *room = &program->rooms[room_index];
+        size_t f;
+        for (f = 0; f < room->function_count; f++) {
+            ZSharpFunction *function = &room->functions[f];
+            RuntimeValue ignored = {0};
+            int returned = 0;
+            if (strncmp(function->name, "__zsharp_c_init_", 16) != 0) continue;
+            if (!execute_function(program, room, function, NULL, heap, project_root,
+                providers, provider_count, module_cache, depth, NULL, 0, NULL,
+                &ignored, &returned, error, error_size)) return 0;
+        }
+    }
     for (room_index = 0; room_index < program->room_count; room_index++) {
         ZSharpRoom *room = &program->rooms[room_index];
         size_t variable_index;
@@ -5033,6 +5687,14 @@ static void cleanup_program_objects(ZSharpProgram *program) {
 
 static void cleanup_module_cache(RuntimeModuleCache *cache) {
     size_t index;
+    for (index = 0; index < cache->service_count; index++) {
+        ZSharpCEventV1 event = {0};
+        char ignored[256] = {0};
+        cache->services[index].entry(ZSHARP_C_SERVICE_SHUTDOWN, &event, ignored, sizeof(ignored));
+        free(cache->services[index].root);
+    }
+    free(cache->services);
+    zsharp_settings_free(&cache->callback_settings);
     for (index = 0; index < cache->module_count; index++) {
         RuntimeModule *module = &cache->modules[index];
         if (module->program != NULL) {
@@ -5041,8 +5703,14 @@ static void cleanup_module_cache(RuntimeModuleCache *cache) {
             free(module->program);
         }
         free(module->source_path);
+        free(module->project_root);
     }
     free(cache->modules);
+    for (index = 0; index < cache->foreign_scope_count; index++) {
+        RuntimeForeignScope *scope = &cache->foreign_scopes[index];
+        free(scope->owner_root); free(scope->module); free(scope->resolved_root); free(scope->local_module);
+    }
+    free(cache->foreign_scopes);
     memset(cache, 0, sizeof(*cache));
 }
 
@@ -5185,7 +5853,7 @@ static int restore_window_room_state(WindowRoomState *state,
             if (copy == NULL) goto out_of_memory;
             free(variable->number_text);
             variable->number_text = copy;
-        } else if (saved->type == ZVALUE_TEXT) {
+        } else if (saved->type == ZVALUE_TEXT || saved->type == ZVALUE_FUNCTION) {
             copy = zsharp_copy_text(saved->text, strlen(saved->text));
             if (copy == NULL) goto out_of_memory;
             free(variable->text_value);
@@ -5210,7 +5878,7 @@ static int save_window_room_state(WindowRoomState *state, ZSharpRoom *room,
         WindowSharedVariable *saved;
         const char *text = NULL;
         if (variable->type != ZVALUE_NUMBER && variable->type != ZVALUE_TEXT &&
-            variable->type != ZVALUE_STATUS) continue;
+            variable->type != ZVALUE_FUNCTION && variable->type != ZVALUE_STATUS) continue;
         resized = (WindowSharedVariable *)realloc(
             variables, (count + 1) * sizeof(*variables));
         if (resized == NULL) goto out_of_memory;
@@ -5221,7 +5889,7 @@ static int save_window_room_state(WindowRoomState *state, ZSharpRoom *room,
         saved->type = variable->type;
         saved->number = variable->number_value;
         if (variable->type == ZVALUE_NUMBER) text = variable->number_text;
-        else if (variable->type == ZVALUE_TEXT) text = variable->text_value;
+        else if (variable->type == ZVALUE_TEXT || variable->type == ZVALUE_FUNCTION) text = variable->text_value;
         if (saved->name == NULL) goto out_of_memory;
         if (text != NULL) {
             saved->text = zsharp_copy_text(text, strlen(text));
@@ -5335,7 +6003,14 @@ static void run_window_task(WindowTask *task) {
         task->context->providers, task->context->provider_count,
         &module_cache, 1, NULL, 0, NULL, &ignored_return,
         &ignored_did_return, task->error, sizeof(task->error));
-    if (ok && !save_window_room_state(task->room_state, room, task->error,
+    while (ok && module_cache.service_count && !window_task_cancelled(task)) {
+        int active = 0;
+        if (!pump_native_services(&heap, &module_cache, task->context->providers,
+            task->context->provider_count, &active, task->error, sizeof(task->error))) { ok = 0; break; }
+        if (!active) break;
+        if (!runtime_wait("10", task->error, sizeof(task->error))) { ok = 0; break; }
+    }
+    if ((ok || window_task_cancelled(task)) && !save_window_room_state(task->room_state, room, task->error,
                                       sizeof(task->error))) ok = 0;
 done:
     if (state_locked) unlock_window_room_state(task->room_state);
@@ -5424,6 +6099,9 @@ static int start_window_task(WindowExecutionContext *context,
     return 1;
 }
 
+static int execute_project_shutdowns(WindowExecutionContext *context,
+                                    char *error, size_t error_size);
+
 static int stop_window_tasks(WindowExecutionContext *context, char *error,
                              size_t error_size) {
     size_t index;
@@ -5451,7 +6129,70 @@ static int stop_window_tasks(WindowExecutionContext *context, char *error,
     free(context->tasks);
     context->tasks = NULL;
     context->task_count = 0;
+    {
+        char shutdown_error[512] = {0};
+        if (!execute_project_shutdowns(context, shutdown_error,
+                                      sizeof(shutdown_error))) {
+            if (ok) snprintf(error, error_size, "%s", shutdown_error);
+            ok = 0;
+        }
+    }
     cleanup_window_room_states(context);
+    return ok;
+}
+
+/* Cleanup runs serially after all normal tasks have stopped. No cancelled
+ * window runtime is supplied: cleanup must not interact with closing UI. */
+static int execute_project_shutdowns(WindowExecutionContext *context,
+                                    char *error, size_t error_size) {
+    ZSharpSourceList sources;
+    size_t i;
+    int ok = 1;
+    const char *disabled = getenv("ZSHARP_DISABLE_PROJECT_STARTS");
+    if (disabled != NULL) return 1;
+    if (!zsharp_project_list_sources(context->project_root, &sources,
+                                     error, error_size)) return 0;
+    for (i = 0; i < sources.count; i++) {
+        ZSharpProgram program;
+        ZSharpDiagnostic diagnostic;
+        char hook_error[512] = {0};
+        size_t r, f;
+        memset(&program, 0, sizeof(program));
+        memset(&diagnostic, 0, sizeof(diagnostic));
+        if (!zsharp_project_parse_file(sources.items[i], &program, &diagnostic,
+                                      hook_error, sizeof(hook_error))) {
+            if (ok) snprintf(error, error_size, "%s", hook_error);
+            ok = 0;
+            zsharp_program_free(&program);
+            continue;
+        }
+        for (r = 0; r < program.room_count; r++) {
+            ZSharpRoom *room = &program.rooms[r];
+            for (f = 0; f < room->function_count; f++) {
+                ZSharpFunction *function = &room->functions[f];
+                WindowTask task;
+                if (strcmp(function->name, "Shutdown") != 0 ||
+                    function->disable_auto_run) continue;
+                memset(&task, 0, sizeof(task));
+                task.context = context;
+                task.source_path = sources.items[i];
+                task.room_name = room->qualified_name == NULL
+                    ? room->name : room->qualified_name;
+                task.function_name = function->name;
+                task.room_state = find_or_add_window_room_state(
+                    context, task.source_path, task.room_name,
+                    hook_error, sizeof(hook_error));
+                if (task.room_state != NULL) run_window_task(&task);
+                if (task.room_state == NULL || task.failed) {
+                    if (ok) snprintf(error, error_size, "%s",
+                        task.failed ? task.error : hook_error);
+                    ok = 0;
+                }
+            }
+        }
+        zsharp_program_free(&program);
+    }
+    zsharp_project_source_list_free(&sources);
     return ok;
 }
 
@@ -5512,7 +6253,7 @@ static int execute_project_starts(WindowExecutionContext *context,
                  function_index < room->function_count; function_index++) {
                 ZSharpFunction *function = &room->functions[function_index];
                 if (strcmp(function->name, "Start") != 0 ||
-                    function->disable_auto_run) continue;
+                    function->disable_auto_run || function->parameter_count != 0) continue;
                 if (!start_window_task(
                         context, runtime, source_path,
                         room->qualified_name == NULL ? room->name
@@ -5664,7 +6405,7 @@ int zsharp_vm_run_with_providers(
              function_index++) {
             ZSharpFunction *function = &room->functions[function_index];
             if (strcmp(function->name, "Start") == 0 &&
-                !function->disable_auto_run) {
+                !function->disable_auto_run && function->parameter_count == 0) {
                 RuntimeValue ignored_return;
                 int ignored_did_return = 0;
                 if (!execute_function(program, room, function, NULL, &heap,
@@ -5678,7 +6419,37 @@ int zsharp_vm_run_with_providers(
             }
         }
     }
+    while (ok && module_cache.service_count) {
+        int active = 0;
+        if (!pump_native_services(&heap, &module_cache, providers, provider_count,
+                                   &active, error, error_size)) { ok = 0; break; }
+        if (!active) break;
+        if (!runtime_wait("10", error, error_size)) { ok = 0; break; }
+    }
 done:
+    if (program->script_type != ZSCRIPT_WINDOW &&
+        program->script_type != ZSCRIPT_GAME &&
+        program->script_type != ZSCRIPT_LEGACY_GAME) {
+        for (room_index = 0; room_index < program->room_count; room_index++) {
+            ZSharpRoom *room = &program->rooms[room_index];
+            size_t f;
+            for (f = 0; f < room->function_count; f++) {
+                ZSharpFunction *function = &room->functions[f];
+                RuntimeValue ignored_return;
+                int ignored_did_return = 0;
+                char shutdown_error[512] = {0};
+                if (strcmp(function->name, "Shutdown") != 0 ||
+                    function->disable_auto_run) continue;
+                if (!execute_function(program, room, function, NULL, &heap,
+                        project_root, providers, provider_count, &module_cache,
+                        1, NULL, 0, NULL, &ignored_return, &ignored_did_return,
+                        shutdown_error, sizeof(shutdown_error))) {
+                    if (ok) snprintf(error, error_size, "%s", shutdown_error);
+                    ok = 0;
+                }
+            }
+        }
+    }
     cleanup_module_cache(&module_cache);
     cleanup_program_objects(program);
     heap_free(&heap);

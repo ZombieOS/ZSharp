@@ -5,6 +5,7 @@
 #include "game_animation.h"
 #include "game_navigation.h"
 #include "window.h"
+#include "style_transition.h"
 
 #include <stddef.h>
 
@@ -67,11 +68,24 @@ typedef struct ZSharpGameScene {
 typedef struct ZSharpGameObject {
     char *name;
     char *display_name;
+    char *instance_id;
     char *source_file;
     char *scene;
     ZSharpGameShape shape;
     unsigned hover_color;
+    int transparent_background;
+    float font_size;
     int hover_color_explicit;
+    unsigned focus_color;
+    int focus_color_explicit;
+    /* State-only styles affect rendering, never collider dimensions. */
+    float hover_opacity, focus_opacity;
+    float hover_scale_x, hover_scale_y, focus_scale_x, focus_scale_y;
+    unsigned hover_style_mask, focus_style_mask;
+    double style_transition_duration;
+    int style_transition_easing;
+    ZSharpStyleTween style_tween;
+    double style_output[6];
     int event_defined;
     char *click_left;
     char *click_right;
@@ -102,6 +116,8 @@ typedef struct ZSharpGameObject {
     float motion_x;
     float motion_y;
     float motion_z;
+    float pending_motion_x, pending_motion_y, pending_motion_z;
+    const struct ZSharpGameObject *ground_support;
     float mass;
     float gravity_scale;
     float restitution;
@@ -173,12 +189,16 @@ typedef struct ZSharpGameInput {
 } ZSharpGameInput;
 
 typedef struct ZSharpGameModel {
+    size_t focused_button; /* Object index + 1, zero means no focus. */
     int is_3d;
     struct ZSharpMeshCollision *mesh_collisions;
     ZSharpGameScene *scenes;
     size_t scene_count;
     ZSharpGameObject *objects;
     size_t object_count;
+    size_t object_capacity; /* Amortized scene construction, trimmed after load. */
+    struct ZSharpGameInstanceIndex *instance_index;
+    int validation_mode; /* project checks may see aliases in inactive scenes */
     ZSharpGameObject *definitions;
     size_t definition_count;
     char *active_scene;
@@ -188,6 +208,7 @@ typedef struct ZSharpGameModel {
     ZSharpGameInput input;
     double elapsed;
     double delta;
+    double render_delta;
 } ZSharpGameModel;
 
 int zsharp_game_model_load(const char *project_root,
@@ -199,6 +220,8 @@ void zsharp_game_model_free(ZSharpGameModel *model);
 void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds);
 int zsharp_game_model_owns_property(const ZSharpGameModel *model,
                                     const char *path);
+int zsharp_game_model_validate_instance_path(const ZSharpGameModel *model,
+    const char *path, char *error, size_t error_size);
 int zsharp_game_model_get_property(const ZSharpGameModel *model,
                                    const char *path,
                                    ZSharpWindowReadType *type, char **text,
@@ -214,5 +237,6 @@ const char *zsharp_game_model_scene_title(const ZSharpGameModel *model);
 const char *zsharp_game_model_scene_icon(const ZSharpGameModel *model);
 const ZSharpGameObject *zsharp_game_model_button_at(const ZSharpGameModel *model,
                                                    float mouse_x, float mouse_y);
+void zsharp_game_model_focus_next(ZSharpGameModel *model, int backwards);
 
 #endif

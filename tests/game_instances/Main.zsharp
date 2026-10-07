@@ -1,0 +1,84 @@
+zsharp = type.script
+noticed room Floor1[] (
+ import scene_instance_tests.game.scene():
+ noticed brain Start[] (
+  Print("Scene instance test started"):
+  if[Floor1.LeftDoor.positionX != 100 or Floor1.RightDoor.positionX != 110] (
+   Print("FAIL initial transforms"):
+  ) else ()
+  Print("Initial transforms read"):
+  number.set:Floor1.LeftDoor.positionX = Floor1.LeftDoor.positionX - (Game.delta * 2):
+  Print("Expression transform set"):
+  number.set:Floor1.LeftDoor.positionX = 90:
+  number.set:Floor1.LeftDoor.positionY = 3:
+  number.set:Floor1.LeftDoor.positionZ = 4:
+  number.set:Floor1.LeftDoor.rotationX = 10:
+  number.set:Floor1.LeftDoor.rotationY = 20:
+  number.set:Floor1.LeftDoor.rotationZ = 30:
+  number.set:Floor1.LeftDoor.scaleX = 2:
+  number.set:Floor1.LeftDoor.scaleY = 3:
+  number.set:Floor1.LeftDoor.scaleZ = 4:
+  number.set:Floor1.LeftDoor.velocityX = 1:
+  number.set:Floor1.LeftDoor.velocityY = 2:
+  number.set:Floor1.LeftDoor.velocityZ = 3:
+  Floor1.LeftDoor.visible.set: dead:
+  Print("All transforms set"):
+  if[Floor1.LeftDoor.positionX != 90 or Floor1.LeftDoor.positionY != 3 or Floor1.LeftDoor.positionZ != 4 or Floor1.RightDoor.positionX != 110] (
+   Print("FAIL position isolation"):
+  ) else ()
+  if[Floor1.LeftDoor.rotationX != 10 or Floor1.LeftDoor.rotationY != 20 or Floor1.LeftDoor.rotationZ != 30] (
+   Print("FAIL rotation"):
+  ) else ()
+  if[Floor1.LeftDoor.scaleX != 2 or Floor1.LeftDoor.scaleY != 3 or Floor1.LeftDoor.scaleZ != 4] (
+   Print("FAIL scale"):
+  ) else ()
+  if[Floor1.LeftDoor.velocityX != 1 or Floor1.LeftDoor.velocityY != 2 or Floor1.LeftDoor.velocityZ != 3 or Floor1.LeftDoor.visible != dead] (
+   Print("FAIL state"):
+  ) else ()
+  wait(200ms):
+  number.set:Floor1.ElevatorCar.velocityY = 2:
+  number.set:Floor1.ElevatorCar.velocityX = 1:
+  wait(200ms):
+  if[Floor1.ElevatorCar.positionY <= 0.1 or Floor1.Player.positionY <= 1.6 or Floor1.Player.positionX <= 0.05] (
+   Print("FAIL kinematic rider"):
+  ) else ()
+  number.set:Floor1.ElevatorCar.velocityY = 0:
+  number.set:Floor1.ElevatorCar.velocityX = 0:
+  wait(50ms):
+  number BeforeY = Floor1.Player.positionY:
+  number BeforeX = Floor1.Player.positionX:
+  number.set:Floor1.ElevatorCar.positionX = Floor1.ElevatorCar.positionX + 0.5:
+  number.set:Floor1.ElevatorCar.positionY = Floor1.ElevatorCar.positionY - 0.2:
+  wait(200ms):
+  if[Floor1.Player.positionX < BeforeX + 0.4 or Floor1.Player.positionY > BeforeY - 0.1 or Floor1.Player.positionY < BeforeY - 0.3] (
+   Print("FAIL scripted kinematic rider"):
+  ) else ()
+  number.set:Floor1.RightDoor.positionX = 12:
+  number.set:Floor1.RightDoor.width = 10:
+  number.set:Floor1.RightDoor.height = 1:
+  number.set:Floor1.RightDoor.depth = 10:
+  number.set:Floor1.Player.positionX = 12:
+  number.set:Floor1.Player.positionY = 1.501:
+  number.set:Floor1.Player.positionZ = 0:
+  wait(200ms):
+  if[Floor1.Player.grounded != alive or Floor1.Player.positionY < 1.49] (
+   Print("FAIL moved collider"):
+  ) else ()
+  number.set:Floor1.RightDoor.positionX = 13:
+  number.set:Floor1.RightDoor.positionY = -0.3:
+  wait(200ms):
+  if[Floor1.Player.positionX < 12.9 or Floor1.Player.positionY > 1.21 or Floor1.Player.positionY < 1.19] (
+   Print("FAIL scripted static rider"):
+  ) else ()
+  Game.scene.set: "Floor2":
+  if[LeftDoor.positionX != 200 or Floor2.LeftDoor.positionX != 200 or Floor1.LeftDoor.positionX != 90] (
+   Print("FAIL scene lookup"):
+  ) else ()
+  number.set:Floor2.LeftDoor.positionX = 210:
+  if[Floor1.LeftDoor.positionX != 90 or Floor2.LeftDoor.positionX != 210] (
+   Print("FAIL scene isolation"):
+  ) else ()
+  Print("Scene instance runtime passed"):
+  Application.Quit:
+ )
+)

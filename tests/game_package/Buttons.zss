@@ -1,0 +1,11 @@
+.NewGame { background: transparent; font-size: 24px; transition: all 150ms ease-in-out; }
+.NewGame:hover {
+ color: #00FF00;
+ opacity: 0.8;
+ scale-x: 1.1;
+ scale-y: 1.1;
+}
+.NewGame:focus {
+ color: #0000FF;
+ opacity: 1;
+}

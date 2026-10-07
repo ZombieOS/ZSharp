@@ -1,0 +1,16 @@
+zsharp = type.scene
+noticed scene Floor1[] (
+ scene Floor1 (
+  background: #08080B:
+  gravityY: -10:
+  cameraZ: 20:
+ )
+ objects[JSON] (
+  [
+   {"id": "Cube", "name": "LeftDoor", "location": {"x": 100, "y": 0, "z": 0}},
+   {"id": "Cube", "name": "Right Door", "location": {"x": 110, "y": 0, "z": 0}, "instanceId": "RightDoor"},
+   {"id": "Platform", "name": "ElevatorCar", "location": {"x": 0, "y": 0, "z": 0}},
+   {"id": "Player", "name": "Player", "location": {"x": 0, "y": 1.501, "z": 0}}
+  ]
+ )
+)

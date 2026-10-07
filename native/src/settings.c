@@ -699,6 +699,7 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
                 }
                 if (!append_dependency(&parser, settings, project_id,
                                        version)) break;
+                settings_match_type(&parser, ZTOKEN_COLON);
                 settings_match_type(&parser, ZTOKEN_COMMA);
             }
             settings_consume_type(&parser, ZTOKEN_RIGHT_PAREN,

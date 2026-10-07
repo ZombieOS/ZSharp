@@ -1,0 +1,23 @@
+zsharp = type.script
+noticed room Cleanup[] (
+ noticed brain Shutdown[] (
+  Print("other file shutdown ran"):
+ )
+)
+noticed room CancelledCleanup[] (
+ noticed text State = "initial":
+ noticed brain Start[] (
+  text.set.State = "running":
+  loop (
+   wait(16ms):
+  )
+ )
+ noticed brain Shutdown[] (
+  Print("cancelled task cleanup: " + State):
+ )
+)
+noticed room DisabledCleanup[] (
+ noticed brain Shutdown[DR] (
+  Print("DISABLED CLEANUP RAN"):
+ )
+)

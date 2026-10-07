@@ -535,6 +535,8 @@ int zsharp_game_run(const char *title, const char *project_root,
     SDL_Event event;
     Uint64 started;
     Uint64 previous;
+    Uint64 profile_started = 0, profile_physics = 0, profile_snapshot = 0;
+    int profile = getenv("ZSHARP_GAME_PROFILE") != NULL;
     unsigned long long close_after = auto_close_after();
     int tasks_started = 0;
     int resized = 0;
@@ -609,7 +611,8 @@ int zsharp_game_run(const char *title, const char *project_root,
     if (callback != NULL && !callback(user_data, ZSHARP_WINDOW_PROJECT_STARTS,
                                       &runtime, error, error_size)) goto done;
     tasks_started = callback != NULL;
-    started = previous = SDL_GetTicks();
+    started = SDL_GetTicks();
+    previous = SDL_GetTicksNS();
     while (!game.cancelled) {
         Uint64 now;
         double delta;
@@ -632,7 +635,29 @@ int zsharp_game_run(const char *title, const char *project_root,
                 zsharp_mouse_transition(&game.mouse_edges, 1, 0);
                 game.model.input.mouse_left = 0;
                 game.model.input.mouse_right = 0;
+                game.model.focused_button = 0;
                 SDL_UnlockMutex(game.model_mutex);
+            }
+            else if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+                char *target = NULL;
+                SDL_LockMutex(game.model_mutex);
+                if (!game.model.input.mouse_captured) {
+                    if (event.key.key == SDLK_TAB)
+                        zsharp_game_model_focus_next(&game.model, (event.key.mod & SDL_KMOD_SHIFT) != 0);
+                    else if ((event.key.key == SDLK_RETURN || event.key.key == SDLK_SPACE) &&
+                        game.model.focused_button > 0 && game.model.focused_button <= game.model.object_count) {
+                        const ZSharpGameObject *button = &game.model.objects[game.model.focused_button-1];
+                        if (button->visible && button->opacity > 0 && button->scene &&
+                            strcmp(button->scene,game.model.active_scene) == 0 && button->click_left)
+                            target = zsharp_copy_text(button->click_left,strlen(button->click_left));
+                    }
+                }
+                SDL_UnlockMutex(game.model_mutex);
+                if (target != NULL) {
+                    int called = callback == NULL || callback(user_data,target,&runtime,error,error_size);
+                    free(target);
+                    if (!called) goto done;
+                }
             }
             else if (event.type == SDL_EVENT_MOUSE_MOTION) {
                 int width = 1280;
@@ -674,6 +699,7 @@ int zsharp_game_run(const char *title, const char *project_root,
                         height > 0 ? 360.0f - event.button.y * 720.0f / height : 0);
                     target = button == NULL ? NULL :
                         event.button.button == SDL_BUTTON_LEFT ? button->click_left : button->click_right;
+                    game.model.focused_button = button == NULL ? 0 : (size_t)(button-game.model.objects)+1;
                     if (target != NULL) {
                         click_target = zsharp_copy_text(target, strlen(target));
                         if (click_target == NULL) {
@@ -707,13 +733,15 @@ int zsharp_game_run(const char *title, const char *project_root,
         } else {
             SDL_UnlockMutex(game.model_mutex);
         }
-        now = SDL_GetTicks();
-        delta = (double)(now - previous) / 1000.0;
+        now = SDL_GetTicksNS();
+        profile_started = now;
+        delta = (double)(now - previous) / 1000000000.0;
         previous = now;
-        if (close_after != 0 && now - started >= close_after)
+        if (close_after != 0 && now / 1000000 - started >= close_after)
             game.cancelled = 1;
         if (game.cancelled) break;
         SDL_LockMutex(game.model_mutex);
+        game.model.render_delta = delta;
         refresh_input(&game);
         accumulator += fmin(delta, 0.25);
         while (accumulator >= 1.0 / 120.0) {
@@ -722,6 +750,7 @@ int zsharp_game_run(const char *title, const char *project_root,
         }
         update_audio(&game);
         SDL_UnlockMutex(game.model_mutex);
+        profile_physics = SDL_GetTicksNS();
         SDL_LockMutex(game.model_mutex);
         {
             const char *scene_title = zsharp_game_model_scene_title(&game.model);
@@ -779,12 +808,19 @@ int zsharp_game_run(const char *title, const char *project_root,
             frame.objects = objects;
             frame.object_count += 3;
         }
+        profile_snapshot = SDL_GetTicksNS();
         if (!zsharp_game_vulkan_draw(game.renderer, resized, &frame,
                                      error, error_size)) {
             free(objects);
             goto done;
         }
         free(objects);
+        if (profile) fprintf(stderr,
+            "[Z# frame] objects=%zu interval=%.3fms physics/input=%.3fms snapshot=%.3fms render/present=%.3fms\n",
+            frame.object_count, delta * 1000.0,
+            (profile_physics-profile_started)/1000000.0,
+            (profile_snapshot-profile_physics)/1000000.0,
+            (SDL_GetTicksNS()-profile_snapshot)/1000000.0);
         resized = 0;
         SDL_Delay(1);
     }

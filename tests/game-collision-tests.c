@@ -52,5 +52,24 @@ int main(void) {
     wall.rotation = 45;
     player = box(-7, 0, 7, 4, 4, 4, 0);
     if (!box_contact(&player, &wall, normal, &penetration)) return 11;
+    /* Capsule rejection must retain contacts with rotated/large boxes. */
+    player = box(-7, 0, 7, 2, 5, 2, 0);
+    player.collider = ZGAME_COLLIDER_CAPSULE;
+    if (!round_box_contact(&player,&wall,normal,&penetration)) return 12;
+    player.x=1000;
+    if (round_box_contact(&player,&wall,normal,&penetration)) return 13;
+    wall=box(0,0,0,1000,2,1000,0);
+    player=box(300,2.4f,300,2,3,2,0);
+    player.collider=ZGAME_COLLIDER_CAPSULE;
+    if (!round_box_contact(&player,&wall,normal,&penetration) || normal[1]<.9f) return 14;
+    player.velocity_y=-1;
+    resolve_round_collision(&player,&wall,normal,penetration);
+    if (!player.grounded) return 15;
+    /* Negative scaling and a tall capsule whose center is above the wall. */
+    wall=box(0,0,0,2,2,2,0);wall.scale_x=-1;wall.rotation_x=20;wall.rotation_z=35;
+    player=box(0,5,0,2,10,2,0);player.collider=ZGAME_COLLIDER_CAPSULE;
+    if (!round_box_contact(&player,&wall,normal,&penetration)) return 16;
+    player.x=20;
+    if (round_box_contact(&player,&wall,normal,&penetration)) return 17;
     return 0;
 }

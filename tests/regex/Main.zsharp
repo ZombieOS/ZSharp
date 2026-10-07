@@ -1,0 +1,23 @@
+zsharp = type.script
+noticed room RegexTests[] (
+ noticed brain Start[] (
+  if[Regex.test("Hello", "^hello$", "i") and Regex.test("abc", "[0-9]") == dead] (
+   Print("REGEX TEST"):
+  )
+  text() Matches = Regex.matches("a12 b34", "\\d+"):
+  if[Matches.Length == 2 and Matches[0] == "12" and Regex.matches("a12", "\\d+")[0] == "12"] (
+   Print("REGEX MATCHES"):
+  )
+  text() Empty = Regex.matches("abc", "[0-9]"):
+  text() ZeroWidth = Regex.matches("ab", "(?:)"):
+  if[Empty.Length == 0 and ZeroWidth.Length == 3] (
+   Print("REGEX EMPTY"):
+  )
+  if[Regex.replace("abc123 def456", "([a-z]+)([0-9]+)", "$2-$1") == "123-abc 456-def"] (
+   Print("REGEX REPLACE"):
+  )
+  if[Regex.test("a\nb", "a.b", "s") and Regex.test("a\nb", "^b$", "m")] (
+   Print("REGEX FLAGS"):
+  )
+ )
+)

@@ -1,0 +1,12 @@
+zsharp = type.scene
+noticed scene Floor2[] (
+ scene Floor2 (
+  background: #08080B:
+  gravityY: 0:
+ )
+ objects[JSON] (
+  [
+   {"id": "Cube", "name": "LeftDoor", "location": {"x": 200, "y": 0, "z": 0}}
+  ]
+ )
+)

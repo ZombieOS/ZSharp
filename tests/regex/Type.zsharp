@@ -1,0 +1,6 @@
+zsharp = type.script
+noticed room Invalid[] (
+ noticed brain Start[] (
+  Print(Regex.test(123, "[0-9]+")):
+ )
+)

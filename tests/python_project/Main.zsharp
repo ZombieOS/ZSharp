@@ -3,12 +3,28 @@ zsharp = type.script
 noticed room Main[] (
  import py:python_runtime_test.Python.Utilities():
 
+ noticed brain Shutdown[] (
+  number Final = Function.call(py:Python.Utilities:next_count []):
+  if[Final == 3] (
+   Print("Python shutdown state alive"):
+  ) else (
+   Print("Python shutdown state failed"):
+  )
+ )
+
  noticed brain Start[] (
   Print("Before Python"):
   text Greeting = Function.call(py:Python.Utilities:greet ["Tester"]):
   number Sum = Function.call(py:Python.Utilities:add [20, 22]):
   Print(Greeting):
   Print(Sum):
+  number First = Function.call(py:Python.Utilities:next_count []):
+  number Second = Function.call(py:Python.Utilities:next_count []):
+  if[First == 1 and Second == 2 and Function.call(py:Python.Utilities:same_process [])] (
+   Print("Python persistent state alive"):
+  ) else (
+   Print("Python persistent state failed"):
+  )
   if[Function.call(py:Python.Utilities:is_ready [])] (
    Print("Python status alive"):
   ) else (

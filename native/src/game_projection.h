@@ -2,6 +2,7 @@
 #define ZSHARP_GAME_PROJECTION_H
 
 #include "game_vulkan.h"
+void zsharp_game_prepare_projection(ZSharpGameRenderFrame *frame);
 
 #include <stddef.h>
 
@@ -38,6 +39,9 @@ int zsharp_game_project_mesh_triangle(
     ZSharpProjectedCubeFace *face);
 
 /* Returns the object's center depth in the rotated camera coordinate system. */
+int zsharp_game_cube_in_view(const ZSharpGameRenderFrame *frame,
+                            const ZSharpGameRenderObject *object);
+
 float zsharp_game_camera_depth(
     const ZSharpGameRenderFrame *frame,
     const ZSharpGameRenderObject *object);

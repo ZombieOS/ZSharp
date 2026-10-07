@@ -7,6 +7,10 @@ import pathlib
 import sys
 import traceback
 import types
+import contextlib
+import os
+
+modules = {}
 
 
 def export(function):
@@ -46,21 +50,27 @@ def encode_result(value) -> tuple[str, str]:
     )
 
 
-def main() -> int:
-    module_path = pathlib.Path(sys.argv[1]).resolve()
-    function_name = sys.argv[2]
-    input_path = pathlib.Path(sys.argv[3])
-    output_path = pathlib.Path(sys.argv[4])
+def call(module_name, function_name, input_name, output_name) -> int:
+    module_path = pathlib.Path(module_name).resolve()
+    input_path = pathlib.Path(input_name)
+    output_path = pathlib.Path(output_name)
     try:
         lines = input_path.read_text(encoding="utf-8").splitlines()
         arguments = [decode_argument(line) for line in lines]
-        specification = importlib.util.spec_from_file_location(
-            f"zsharp_user_{module_path.stem}", module_path
-        )
-        if specification is None or specification.loader is None:
-            raise ImportError(f"could not load Python module {module_path}")
-        module = importlib.util.module_from_spec(specification)
-        specification.loader.exec_module(module)
+        module = modules.get(module_path)
+        if module is None:
+            module_id = f"zsharp_user_{len(modules)}_{module_path.stem}"
+            specification = importlib.util.spec_from_file_location(module_id, module_path)
+            if specification is None or specification.loader is None:
+                raise ImportError(f"could not load Python module {module_path}")
+            module = importlib.util.module_from_spec(specification)
+            sys.modules[module_id] = module
+            try:
+                specification.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(module_id, None)
+                raise
+            modules[module_path] = module
         function = getattr(module, function_name, None)
         if not callable(function):
             raise AttributeError(f"Python function '{function_name}' was not found")
@@ -77,6 +87,25 @@ def main() -> int:
             "ERROR\t" + report.encode("utf-8").hex() + "\n", encoding="utf-8"
         )
         return 1
+
+
+def main():
+    if sys.argv[1:] != ["--worker"]:
+        return call(*sys.argv[1:])
+    # Keep protocol acknowledgements separate from user print() output.
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
+    protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="ascii", buffering=1, newline="\n")
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    for request in sys.stdin:
+        fields = [bytes.fromhex(value).decode("utf-8")
+                  for value in request.rstrip("\n").split("\t")]
+        with contextlib.redirect_stdout(sys.stderr):
+            call(*fields)
+        protocol.write("DONE\n")
+        protocol.flush()
+    # ZVM bounds shutdown even if a user-created non-daemon thread stays alive.
+    return 0
 
 
 if __name__ == "__main__":

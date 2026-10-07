@@ -2,6 +2,7 @@
 
 #include "paint.h"
 #include "window_runtime.h"
+#include "window_layout.h"
 
 #if defined(__APPLE__)
 
@@ -308,21 +309,18 @@ static int hex_digit(char value) {
 }
 
 static MacId ns_color(MacApi *api, const char *text, const char *fallback) {
-    int digits[6];
-    size_t index;
+    uint32_t rgb;
+    unsigned char alpha;
     double red, green, blue;
-    if (text == NULL || strlen(text) != 7 || text[0] != '#') text = fallback;
-    for (index = 0; index < 6; index++) {
-        digits[index] = hex_digit(text[index + 1]);
-        if (digits[index] < 0) return NULL;
-    }
-    red = (double)(digits[0] * 16 + digits[1]) / 255.0;
-    green = (double)(digits[2] * 16 + digits[3]) / 255.0;
-    blue = (double)(digits[4] * 16 + digits[5]) / 255.0;
+    if (!zsharp_color_parse(text, &rgb, &alpha) &&
+        !zsharp_color_parse(fallback, &rgb, &alpha)) return NULL;
+    red = ((rgb >> 16) & 255) / 255.0;
+    green = ((rgb >> 8) & 255) / 255.0;
+    blue = (rgb & 255) / 255.0;
     return ((MacId (*)(MacId, MacSelector, double, double, double, double))
         api->message)((MacId)api->get_class("NSColor"),
                       selector(api, "colorWithRed:green:blue:alpha:"),
-                      red, green, blue, 1.0);
+                      red, green, blue, alpha / 255.0);
 }
 
 static double points(const ZSharpUIProperty *value, double scale,
@@ -675,10 +673,13 @@ static void layout_controls(MacWindowState *state) {
     MacRect viewport = send_rect(&state->api, clip, "bounds");
     size_t index;
     double content_bottom = 0.0;
+    ZSharpWindow *window = &state->program->window;
+    ZSharpLayoutRect *rects = (ZSharpLayoutRect *)calloc(window->element_count, sizeof(*rects));
     double responsive_scale = state->layout_width > 0.0
         ? viewport.size.width / state->layout_width : 1.0;
     double origin_x;
     double origin_y;
+    if (rects == NULL) return;
     if (state->layout_height > 0.0) {
         double height_scale = viewport.size.height / state->layout_height;
         if (height_scale < responsive_scale) responsive_scale = height_scale;
@@ -741,10 +742,29 @@ static void layout_controls(MacWindowState *state) {
         else if (anchor_y != NULL &&
                  strcmp(anchor_y->text_value, "bottom") == 0)
             frame.origin.y = viewport.size.height - frame.size.height - offset_y;
+        rects[element - window->elements].x = frame.origin.x;
+        rects[element - window->elements].y = frame.origin.y;
+        rects[element - window->elements].width = frame.size.width;
+        rects[element - window->elements].height = frame.size.height;
+    }
+    zsharp_window_layout(window, viewport.size.width, viewport.size.height, 1.0/state->scale, rects);
+    for (index = 0; index < state->control_count; index++) {
+        MacControl *control = &state->controls[index];
+        ZSharpUIElement *element = control->element;
+        ZSharpLayoutRect *r = &rects[element - window->elements];
+        ZSharpUIProperty *opacity = property(element,"opacity");
+        MacRect frame;
+        frame.origin.x = r->x; frame.origin.y = r->y;
+        frame.size.width = r->width; frame.size.height = r->height;
+        ((void (*)(MacId, MacSelector, signed char))state->api.message)(control->widget,
+            selector(&state->api,"setHidden:"), (signed char)r->hidden);
+        ((void (*)(MacId, MacSelector, double))state->api.message)(control->widget,
+            selector(&state->api,"setAlphaValue:"), opacity == NULL ? 1 : strtod(opacity->text_value,NULL));
         send_void_rect(&state->api, control->widget, "setFrame:", frame);
-        if (frame.origin.y + frame.size.height > content_bottom)
+        if (!r->hidden && frame.origin.y + frame.size.height > content_bottom)
             content_bottom = frame.origin.y + frame.size.height;
     }
+    free(rects);
     {
         MacSize document_size;
         document_size.width = viewport.size.width;

@@ -14,7 +14,8 @@ typedef enum ZSharpValueType {
     ZVALUE_OBJECT = 5,
     ZVALUE_NUMBER_ARRAY = 6,
     ZVALUE_OBJECT_ARRAY = 7,
-    ZVALUE_NULL = 8
+    ZVALUE_NULL = 8,
+    ZVALUE_FUNCTION = 9
 } ZSharpValueType;
 
 typedef enum ZSharpVisibility {
@@ -208,7 +209,13 @@ typedef enum ZSharpOpCode {
     ZOP_FILE_WRITE = 56,
     ZOP_FILE_APPEND = 57,
     ZOP_MATH = 58,
-    ZOP_PRINT_UPDATE = 59
+    ZOP_PRINT_UPDATE = 59,
+    ZOP_APPLICATION_QUIT = 60,
+    ZOP_PUSH_FUNCTION = 61,
+    ZOP_STORE_LOCAL_FUNCTION = 62,
+    ZOP_FILE_SEARCH_EXTENSION = 63,
+    ZOP_STORE_LOCAL_TEXT_ARRAY = 64,
+    ZOP_REGEX = 65
 } ZSharpOpCode;
 
 typedef struct ZSharpInstruction {
@@ -222,6 +229,12 @@ typedef struct ZSharpInstruction {
     char *call_function;
     char *call_outcome;
 } ZSharpInstruction;
+
+/* Decodes a callback target without allocating. Instruction strings borrow
+ * storage; only native 3/4-part and existing foreign-language targets pass. */
+int zsharp_call_target_decode(const char *text, ZSharpInstruction *target,
+                             char *storage, size_t storage_size,
+                             char *error, size_t error_size);
 
 typedef struct ZSharpFunction {
     int is_public;

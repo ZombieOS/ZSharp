@@ -9,7 +9,64 @@
 
 static const unsigned char BYTECODE_MAGIC[4] = {'Z', 'S', 'B', 'C'};
 static const uint16_t BYTECODE_MAJOR = 0;
-static const uint16_t BYTECODE_MINOR = 18;
+static const uint16_t BYTECODE_MINOR = 21;
+
+int zsharp_call_target_decode(const char *text, ZSharpInstruction *target,
+                             char *storage, size_t storage_size,
+                             char *error, size_t error_size) {
+    char *parts[66], *cursor, *start;
+    size_t count = 0, i;
+    int foreign = 0;
+    if (text == NULL || *text == '\0' || strlen(text) >= storage_size)
+        goto invalid;
+    strcpy(storage, text);
+    start = storage;
+    for (cursor = storage;; cursor++) {
+        unsigned char ch = (unsigned char)*cursor;
+        if (ch == ':' || ch == '.' || ch == 0) {
+            if (cursor == start || count == 66) goto invalid;
+            parts[count++] = start;
+            if (ch == 0) break;
+            *cursor = 0;
+            start = cursor + 1;
+        } else if (!((ch >= 'a' && ch <= 'z') ||
+                     (ch >= 'A' && ch <= 'Z') || ch == '_' ||
+                     (cursor != start && ch >= '0' && ch <= '9'))) {
+            goto invalid;
+        }
+    }
+    foreign = strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
+              strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0 ||
+              strcmp(parts[0], "rust") == 0 || strcmp(parts[0], "c") == 0 ||
+              strcmp(parts[0], "kt") == 0;
+    if (foreign) {
+        if (count < 3) goto invalid;
+        target->operand = strcmp(parts[0], "py") == 0 ? "@py" :
+            strcmp(parts[0], "js") == 0 ? "@js" :
+            strcmp(parts[0], "lua") == 0 ? "@lua" :
+            strcmp(parts[0], "cpp") == 0 ? "@cpp" :
+            strcmp(parts[0], "rust") == 0 ? "@rust" :
+            strcmp(parts[0], "c") == 0 ? "@c" : "@kt";
+        for (i = 1; i + 2 < count; i++)
+            parts[i][strlen(parts[i])] = '.';
+        target->call_file = parts[1];
+        target->call_room = "";
+        target->call_function = parts[count - 1];
+    } else {
+        if (count != 3 && count != 4) goto invalid;
+        target->operand = count == 4 ? parts[0] : NULL;
+        target->call_file = parts[count - 3];
+        target->call_room = parts[count - 2];
+        target->call_function = parts[count - 1];
+    }
+    return 1;
+invalid:
+    snprintf(error, error_size,
+             "invalid callback target '%s': expected File:Room:Function, "
+             "Project:File:Room:Function, or LANGUAGE:Path:function",
+             text == NULL ? "" : text);
+    return 0;
+}
 
 static void set_error(char *error, size_t error_size, const char *message) {
     if (error != NULL && error_size > 0) {
@@ -274,11 +331,14 @@ static int write_instruction(FILE *file,
         case ZOP_PUSH_STATUS:
             return write_u32(file, (uint32_t)instruction->number_operand);
         case ZOP_PUSH_TEXT:
+        case ZOP_PUSH_FUNCTION:
+        case ZOP_STORE_LOCAL_FUNCTION:
         case ZOP_LOAD_NAME:
         case ZOP_STORE_GLOBAL:
         case ZOP_STORE_LOCAL:
         case ZOP_STORE_LOCAL_TEXT:
         case ZOP_STORE_LOCAL_VALUE:
+        case ZOP_STORE_LOCAL_TEXT_ARRAY:
         case ZOP_STORE_FIELD:
         case ZOP_GET_MEMBER:
         case ZOP_STORE_NAME:
@@ -331,6 +391,7 @@ static int write_instruction(FILE *file,
             return write_string(file, instruction->operand);
         case ZOP_RANDOM:
         case ZOP_MATH:
+        case ZOP_REGEX:
             return write_u32(file, (uint32_t)instruction->number_operand) &&
                    write_u32(file, instruction->argument_count);
         case ZOP_DELAY:
@@ -355,11 +416,13 @@ static int write_instruction(FILE *file,
         case ZOP_GET_INDEX:
         case ZOP_PRINT:
         case ZOP_PRINT_UPDATE:
+        case ZOP_APPLICATION_QUIT:
         case ZOP_RETURN_VALUE:
         case ZOP_RETURN_VOID:
         case ZOP_RETURN_IF_FALSE:
         case ZOP_PUSH_NULL:
         case ZOP_FILE_READ:
+        case ZOP_FILE_SEARCH_EXTENSION:
         case ZOP_FILE_EXISTS:
         case ZOP_FILE_WRITE:
         case ZOP_FILE_APPEND:
@@ -392,7 +455,7 @@ static int write_variable(FILE *file, const ZSharpVariable *variable) {
     if (ok && variable->type == ZVALUE_NUMBER) {
         return write_string(file, variable->number_text);
     }
-    if (ok && variable->type == ZVALUE_TEXT) {
+    if (ok && (variable->type == ZVALUE_TEXT || variable->type == ZVALUE_FUNCTION)) {
         return write_string(file, variable->text_value);
     }
     if (ok && variable->type == ZVALUE_STATUS) {
@@ -737,11 +800,14 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
             instruction->number_operand = (int32_t)value;
             return 1;
         case ZOP_PUSH_TEXT:
+        case ZOP_PUSH_FUNCTION:
+        case ZOP_STORE_LOCAL_FUNCTION:
         case ZOP_LOAD_NAME:
         case ZOP_STORE_GLOBAL:
         case ZOP_STORE_LOCAL:
         case ZOP_STORE_LOCAL_TEXT:
         case ZOP_STORE_LOCAL_VALUE:
+        case ZOP_STORE_LOCAL_TEXT_ARRAY:
         case ZOP_STORE_FIELD:
         case ZOP_GET_MEMBER:
         case ZOP_STORE_NAME:
@@ -796,6 +862,7 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
             return read_string(file, &instruction->operand);
         case ZOP_RANDOM:
         case ZOP_MATH:
+        case ZOP_REGEX:
             if (!read_u32(file, &value)) return 0;
             instruction->number_operand = (int32_t)value;
             return read_u32(file, &instruction->argument_count);
@@ -821,11 +888,13 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
         case ZOP_GET_INDEX:
         case ZOP_PRINT:
         case ZOP_PRINT_UPDATE:
+        case ZOP_APPLICATION_QUIT:
         case ZOP_RETURN_VALUE:
         case ZOP_RETURN_VOID:
         case ZOP_RETURN_IF_FALSE:
         case ZOP_PUSH_NULL:
         case ZOP_FILE_READ:
+        case ZOP_FILE_SEARCH_EXTENSION:
         case ZOP_FILE_EXISTS:
         case ZOP_FILE_WRITE:
         case ZOP_FILE_APPEND:
@@ -871,7 +940,7 @@ static int read_variable(FILE *file, ZSharpVariable *variable) {
     if (variable->type == ZVALUE_NUMBER) {
         return read_string(file, &variable->number_text);
     }
-    if (variable->type == ZVALUE_TEXT) {
+    if (variable->type == ZVALUE_TEXT || variable->type == ZVALUE_FUNCTION) {
         return read_string(file, &variable->text_value);
     }
     if (variable->type == ZVALUE_STATUS) {
@@ -1072,7 +1141,7 @@ int zsharp_bytecode_read(const char *path, ZSharpProgram *program,
          memcmp(magic, BYTECODE_MAGIC, sizeof(magic)) == 0 &&
          read_u16(file, &major) && read_u16(file, &minor) &&
          major == BYTECODE_MAJOR &&
-         (minor == 14 || minor == 15 || minor == 16 ||
+         (minor == 14 || minor == 15 || minor == 16 || minor == 18 || minor == 19 || minor == 20 ||
           minor == BYTECODE_MINOR) &&
          read_string(file, &program->project_id) &&
          read_bytes(file, program->project_identity,

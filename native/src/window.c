@@ -4,6 +4,8 @@
 
 #include "paint.h"
 #include "window_runtime.h"
+#include "window_layout.h"
+#include "style_transition.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -42,6 +44,8 @@ typedef struct WindowControl {
     int placeholder_active;
     int filtering_input;
     int hovered;
+    ZSharpStyleTween background_tween;
+    ZSharpStyleTween text_tween;
 } WindowControl;
 
 typedef struct WindowState {
@@ -151,26 +155,19 @@ static int status_property(ZSharpUIElement *element, const char *name,
 }
 
 static COLORREF parse_color(const char *text, COLORREF fallback) {
-    int digits[6];
-    unsigned red;
-    unsigned green;
-    unsigned blue;
-    size_t index;
-    if (text == NULL || strlen(text) != 7 || text[0] != '#') return fallback;
-    for (index = 0; index < 6; index++) {
-        digits[index] = hex_value(text[index + 1]);
-        if (digits[index] < 0) return fallback;
-    }
-    red = (unsigned)(digits[0] * 16 + digits[1]);
-    green = (unsigned)(digits[2] * 16 + digits[3]);
-    blue = (unsigned)(digits[4] * 16 + digits[5]);
-    return RGB(red, green, blue);
+    uint32_t rgb, background = ((uint32_t)GetRValue(fallback) << 16) |
+        ((uint32_t)GetGValue(fallback) << 8) | GetBValue(fallback);
+    unsigned char alpha;
+    if (!zsharp_color_parse(text, &rgb, &alpha)) return fallback;
+    rgb = zsharp_color_over(rgb, alpha, background);
+    return RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
 }
 
 static COLORREF paint_first_color(const ZSharpPaint *paint,
                                   COLORREF fallback) {
     uint32_t color;
     if (paint == NULL || paint->color_count == 0) return fallback;
+    if (zsharp_paint_alpha_sample(paint,0) == 0) return RGB(1,2,3);
     color = paint->colors[0];
     return RGB((color >> 16) & 0xffu, (color >> 8) & 0xffu,
                color & 0xffu);
@@ -192,6 +189,32 @@ static void paint_rectangle(HDC context, const RECT *area,
     if (paint == NULL || paint->color_count == 0 || width <= 0 || height <= 0)
         return;
     if (paint->kind == ZSHARP_PAINT_SOLID) {
+        unsigned char alpha = zsharp_paint_alpha_sample(paint, 0);
+        if (alpha == 0) return;
+        if (alpha != 255) {
+            HDC memory = CreateCompatibleDC(context);
+            BITMAPINFO bitmap_info;
+            void *bits = NULL;
+            HBITMAP bitmap;
+            memset(&bitmap_info, 0, sizeof(bitmap_info));
+            bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bitmap_info.bmiHeader.biWidth = 1;
+            bitmap_info.bmiHeader.biHeight = -1;
+            bitmap_info.bmiHeader.biPlanes = 1;
+            bitmap_info.bmiHeader.biBitCount = 32;
+            bitmap = CreateDIBSection(context, &bitmap_info, DIB_RGB_COLORS, &bits, NULL, 0);
+            if (memory != NULL && bitmap != NULL && bits != NULL) {
+                BLENDFUNCTION blend = {AC_SRC_OVER, 0, alpha, 0};
+                HGDIOBJ previous = SelectObject(memory, bitmap);
+                *(uint32_t *)bits = paint->colors[0];
+                AlphaBlend(context, area->left, area->top, width, height,
+                           memory, 0, 0, 1, 1, blend);
+                SelectObject(memory, previous);
+            }
+            if (bitmap != NULL) DeleteObject(bitmap);
+            if (memory != NULL) DeleteDC(memory);
+            return;
+        }
         HBRUSH brush = CreateSolidBrush(paint_first_color(paint, RGB(255,255,255)));
         if (brush != NULL) {
             FillRect(context, area, brush);
@@ -890,6 +913,16 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                     FillRect(draw->hDC, &draw->rcItem,
                              state->window_background);
                 }
+                {
+                    ZSharpUIProperty *background = find_property(control->element,"backgroundColor");
+                    ZSharpPaint paint;
+                    char paint_error[128];
+                    memset(&paint,0,sizeof(paint));
+                    if (background != NULL && zsharp_paint_parse(background->text_value,&paint,paint_error,sizeof(paint_error))) {
+                        paint_rectangle(draw->hDC,&draw->rcItem,&paint);
+                        zsharp_paint_free(&paint);
+                    }
+                }
                 previous_font = SelectObject(draw->hDC, control->font);
                 SetBkMode(draw->hDC, TRANSPARENT);
                 SetTextColor(draw->hDC, control->has_text_color
@@ -946,19 +979,23 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                 HGDIOBJ previous_font;
                 ZSharpUIProperty *hover_background = control->hovered
                     ? find_property(control->element, "hoverButtonColor")
-                    : NULL;
+                    : GetFocus() == control->handle ? find_property(control->element,"focusButtonColor") : NULL;
                 ZSharpUIProperty *hover_text = control->hovered
                     ? find_property(control->element, "hoverTextColor")
-                    : NULL;
+                    : GetFocus() == control->handle ? find_property(control->element,"focusTextColor") : NULL;
                 ZSharpUIProperty *border_width = find_property(
                     control->element, "borderWidth");
                 ZSharpUIProperty *border_color = control->hovered &&
                     find_property(control->element, "hoverBorderColor") != NULL
                         ? find_property(control->element, "hoverBorderColor")
-                        : find_property(control->element, "borderColor");
+                        : GetFocus() == control->handle && find_property(control->element,"focusBorderColor") != NULL
+                            ? find_property(control->element,"focusBorderColor") : find_property(control->element, "borderColor");
                 ZSharpUIProperty *border_radius = find_property(
                     control->element, "borderRadius");
                 ZSharpPaint hover_paint;
+                ZSharpPaint transition_paint;
+                uint32_t transition_rgb;
+                unsigned char transition_alpha;
                 const ZSharpPaint *active_paint = &control->button_paint;
                 int has_hover_paint = 0;
                 int radius = measurement_pixels(border_radius,
@@ -991,7 +1028,33 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                     has_hover_paint = 1;
                     color = paint_first_color(active_paint, color);
                 }
+                {
+                    ZSharpUIProperty *transition=find_property(control->element,"transition");
+                    double duration=0;int easing=0;
+                    if(transition && zsharp_style_transition_parse(transition->text_value,&duration,&easing) &&
+                        active_paint->kind==ZSHARP_PAINT_SOLID && active_paint->color_count>0) {
+                        double target[6]={0}, output[6];
+                        ZSharpUIProperty *opacity=find_property(control->element,control->hovered ? "hoverOpacity" :
+                            GetFocus()==control->handle ? "focusOpacity" : "opacity");
+                        if(opacity==NULL)opacity=find_property(control->element,"opacity");
+                        target[0]=(active_paint->colors[0]>>16)&255;
+                        target[1]=(active_paint->colors[0]>>8)&255;target[2]=active_paint->colors[0]&255;
+                        target[3]=zsharp_paint_alpha_sample(active_paint,0);
+                        target[4]=opacity ? strtod(opacity->text_value,NULL) : 1;
+                        zsharp_style_tween(&control->background_tween,target,GetTickCount64()/1000.0,duration,easing,output);
+                        transition_rgb=((uint32_t)(output[0]+.5)<<16)|((uint32_t)(output[1]+.5)<<8)|(uint32_t)(output[2]+.5);
+                        transition_alpha=(unsigned char)(output[3]+.5);
+                        memset(&transition_paint,0,sizeof(transition_paint));
+                        transition_paint.colors=&transition_rgb;transition_paint.alphas=&transition_alpha;transition_paint.color_count=1;
+                        active_paint=&transition_paint;color=paint_first_color(active_paint,color);
+                        if(output[4]<1 || (GetWindowLongPtrA(control->handle,GWL_EXSTYLE)&WS_EX_LAYERED)) {
+                            SetWindowLongPtrA(control->handle,GWL_EXSTYLE,GetWindowLongPtrA(control->handle,GWL_EXSTYLE)|WS_EX_LAYERED);
+                            SetLayeredWindowAttributes(control->handle,0,(BYTE)(output[4]*255+.5),LWA_ALPHA);
+                        }
+                    }
+                }
                 if (active_paint->color_count != 0 && radius > 0 &&
+                    zsharp_paint_alpha_sample(active_paint, 0) == 255 &&
                     active_paint->kind == ZSHARP_PAINT_SOLID) {
                     HBRUSH brush = CreateSolidBrush(color);
                     HGDIOBJ old_brush = SelectObject(draw->hDC, brush);
@@ -1035,12 +1098,18 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                                (int)(sizeof(text) / sizeof(text[0])));
                 previous_font = SelectObject(draw->hDC, control->font);
                 SetBkMode(draw->hDC, TRANSPARENT);
-                SetTextColor(draw->hDC,
-                    hover_text != NULL
-                        ? parse_color(hover_text->text_value,
-                                      control->text_color)
-                        : control->has_text_color
-                            ? control->text_color : RGB(0, 0, 0));
+                {
+                    COLORREF foreground=hover_text != NULL ? parse_color(hover_text->text_value,control->text_color) :
+                        control->has_text_color ? control->text_color : RGB(0,0,0);
+                    ZSharpUIProperty *transition=find_property(control->element,"transition");
+                    double duration;int easing;
+                    if(transition && zsharp_style_transition_parse(transition->text_value,&duration,&easing)) {
+                        double target[6]={GetRValue(foreground),GetGValue(foreground),GetBValue(foreground),0,0,0}, output[6];
+                        zsharp_style_tween(&control->text_tween,target,GetTickCount64()/1000.0,duration,easing,output);
+                        foreground=RGB((BYTE)(output[0]+.5),(BYTE)(output[1]+.5),(BYTE)(output[2]+.5));
+                    }
+                    SetTextColor(draw->hDC,foreground);
+                }
                 DrawTextW(draw->hDC, text, -1, &draw->rcItem,
                           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(draw->hDC, previous_font);
@@ -1084,11 +1153,13 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                 }
             }
             if (state->background_buffer != NULL) {
+                FillRect(state->background_buffer,&area,state->window_background);
                 paint_rectangle(state->background_buffer, &area,
                                 &state->background_paint);
                 BitBlt(target, area.left, area.top,
                        width, height, state->background_buffer, 0, 0, SRCCOPY);
             } else {
+                FillRect(target,&area,state->window_background);
                 paint_rectangle(target, &area, &state->background_paint);
             }
             EndPaint(window, &paint);
@@ -1131,6 +1202,14 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
             DestroyWindow(window);
             return 0;
         case WM_TIMER:
+            if(wparam==2) {
+                size_t i;
+                refresh_hover_controls(state);
+                for(i=0;i<state->control_count;i++)
+                    if(find_property(state->controls[i].element,"transition")!=NULL)
+                        InvalidateRect(state->controls[i].handle,NULL,FALSE);
+                return 0;
+            }
             if (wparam == 1) {
                 KillTimer(window, 1);
                 DestroyWindow(window);
@@ -1289,6 +1368,8 @@ static void reload_control_image(WindowState *state, WindowControl *control,
 
 static void layout_controls(WindowState *state) {
     RECT area;
+    ZSharpWindow *window = &state->program->window;
+    ZSharpLayoutRect *rects = (ZSharpLayoutRect *)calloc(window->element_count, sizeof(*rects));
     size_t index;
     int client_width;
     int client_height;
@@ -1299,7 +1380,19 @@ static void layout_controls(WindowState *state) {
     int origin_y;
     double responsive_scale;
     SCROLLINFO scroll;
+    if (rects == NULL) return;
     GetClientRect(state->window, &area);
+    {
+        ZSharpUIElement *design = find_design(window);
+        ZSharpUIProperty *opacity = design == NULL ? NULL : find_property(design,"opacity");
+        double alpha = opacity == NULL ? 1 : strtod(opacity->text_value,NULL);
+        int transparent = zsharp_paint_alpha_sample(&state->background_paint,0) == 0;
+        if (transparent || alpha < 1 || (GetWindowLongPtrA(state->window,GWL_EXSTYLE) & WS_EX_LAYERED)) {
+            SetWindowLongPtrA(state->window,GWL_EXSTYLE,GetWindowLongPtrA(state->window,GWL_EXSTYLE) | WS_EX_LAYERED);
+            SetLayeredWindowAttributes(state->window,RGB(1,2,3),(BYTE)(alpha*255+0.5),
+                LWA_ALPHA | (transparent ? LWA_COLORKEY : 0));
+        }
+    }
     client_width = area.right - area.left;
     client_height = area.bottom - area.top;
     responsive_scale = state->layout_width > 0
@@ -1390,12 +1483,31 @@ static void layout_controls(WindowState *state) {
         else if (anchor_y != NULL &&
                  strcmp(anchor_y->text_value, "bottom") == 0)
             y = client_height - height - offset_y;
-        if (y + height > content_bottom) content_bottom = y + height;
-        MoveWindow(control->handle, x, y - state->scroll_y,
-                   width, height, TRUE);
+        rects[element - window->elements].x = x;
+        rects[element - window->elements].y = y;
+        rects[element - window->elements].width = width;
+        rects[element - window->elements].height = height;
+    }
+    zsharp_window_layout(window, client_width, client_height, state->scale, rects);
+    for (index = 0; index < state->control_count; index++) {
+        WindowControl *control = &state->controls[index];
+        ZSharpLayoutRect *r = &rects[control->element - window->elements];
+        ZSharpUIProperty *opacity = find_property(control->element, "opacity");
+        double alpha = opacity == NULL ? 1 : strtod(opacity->text_value, NULL);
+        int width = (int)r->width, height = (int)r->height;
+        ShowWindow(control->handle, r->hidden ? SW_HIDE : SW_SHOWNA);
+        if (!r->hidden && r->y + r->height > content_bottom) content_bottom = (int)(r->y + r->height);
+        if (alpha < 1 || (GetWindowLongPtrA(control->handle, GWL_EXSTYLE) & WS_EX_LAYERED)) {
+            SetWindowLongPtrA(control->handle, GWL_EXSTYLE,
+                GetWindowLongPtrA(control->handle, GWL_EXSTYLE) | WS_EX_LAYERED);
+            SetLayeredWindowAttributes(control->handle, 0, (BYTE)(alpha * 255 + 0.5), LWA_ALPHA);
+        }
+        MoveWindow(control->handle, (int)r->x, (int)r->y - state->scroll_y,
+                   width > 0 ? width : 1, height > 0 ? height : 1, TRUE);
         update_multiline_scrollbar(control);
         reload_control_image(state, control, width, height);
     }
+    free(rects);
     state->content_height = content_bottom > client_height
         ? content_bottom + (int)(16.0 * responsive_scale + 0.5)
         : client_height;
@@ -2266,6 +2378,11 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
         return 0;
     }
     layout_controls(&state);
+    {
+        size_t i;
+        for(i=0;i<state.control_count;i++)
+            if(find_property(state.controls[i].element,"transition")!=NULL) { SetTimer(state.window,2,16,NULL);break; }
+    }
     ShowWindow(state.window, SW_SHOWDEFAULT);
     UpdateWindow(state.window);
     if (getenv("ZSHARP_DISABLE_PROJECT_STARTS") == NULL &&

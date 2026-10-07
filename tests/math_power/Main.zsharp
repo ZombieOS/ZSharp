@@ -1,0 +1,19 @@
+zsharp = type.script
+noticed room Powers[] (
+ noticed brain Start[] (
+  if[Math.pow(10, 5) == 100000 and Math.pow(2, Math.pow(3, 2)) == 512] (
+   Print("power nested alive"):
+  )
+  if[Math.pow(2, 0 - 3) == 0.125 and Math.pow(81, 0.5) == 9] (
+   Print("power fractional alive"):
+  )
+  if[Math.pow(0 - 2, 3) == 0 - 8 and Math.pow(0, 0) == 1] (
+   Print("power signed alive"):
+  )
+  number Tiny = Math.pow(10, 0 - 20):
+  number Huge = Math.pow(10, 123):
+  if[Tiny > 0 and Tiny < 0.0000000000000000001 and Huge > Math.pow(10, 122)] (
+   Print("power decimal alive"):
+  )
+ )
+)

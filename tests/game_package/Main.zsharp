@@ -2,10 +2,15 @@ zsharp = type.script
 
 noticed room Game[] (
  import ZSharp.Achievements():
+ noticed text CleanupState = "initial":
+ noticed brain Shutdown[] (
+  Print("game shutdown ran: " + CleanupState):
+ )
  noticed brain AwardTest[DR] (
   ZSharp.Achievement.Award.TEST_GAME:
  )
  noticed brain Start[] (
+  text.set.CleanupState = "started":
   Print("game start ran"):
   Print("mouse edge properties resolved: " + input.mouse.leftPressed + " " + input.mouse.leftReleased + " " + input.mouse.rightPressed + " " + input.mouse.rightReleased):
   if[input.key.a == alive] (

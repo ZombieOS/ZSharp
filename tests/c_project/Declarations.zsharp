@@ -1,0 +1,21 @@
+zsharp = type.script
+noticed room Declarations[] (
+ import c:c_test.C.Utilities():
+ FixtureConfig Settings (
+  label: File.read("inline-name.txt"):
+  nested ( value: (2 * 4): )
+ ):
+ noticed fixture_event Received[number Value] (
+  Fixture.Option("?", "!", "*"):
+  Fixture.Duration(5s):
+  Print("DECLARATION CALLBACK: " + Value):
+ )
+ noticed brain Start[] (
+  Print("OVERLOADS: " + NativeOverload(5) + ", " + NativeOverload(2, 3)):
+  Function.call(c:C.Utilities:fixture_start []):
+  Print("START FINISHED"):
+ )
+ noticed brain Shutdown[] (
+  Print("SERVICE SHUTDOWN"):
+ )
+)

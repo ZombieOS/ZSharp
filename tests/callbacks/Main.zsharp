@@ -1,0 +1,59 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import callback_tests.Targets():
+ import lua:callback_tests.Lua.Calculations():
+ noticed text TextTarget = "Targets:Handlers:Say":
+ noticed function TypedTarget = Targets:Handlers:Say:
+ noticed function LuaTarget = lua:Lua.Calculations:answer:
+
+ noticed brain Start[] (
+  Function.call(TextTarget [10, "room text"]):
+  Function.call(TypedTarget [11, "room function"]):
+  text LocalText = "Targets.Handlers.Say":
+  Function.call(LocalText [12, "local text"]):
+  function LocalRef = Targets:Handlers:Say:
+  function CopyRef = LocalRef:
+  number Dummy = 0:
+  function RoomCopy = TypedTarget:
+  number.set:Dummy = 1:
+  Function.call(CopyRef [13, "local function"]):
+  Function.call(RoomCopy [18, "room reference copy"]):
+  Function.call(Main:Forward:Start [TextTarget]):
+  Function.call(Main:Forward:Typed [LocalRef]):
+  text NumberTarget = "Targets:Handlers:Answer":
+  number Result = Function.call(NumberTarget [10]):
+  Print(Result):
+  number LuaResult = Function.call(LuaTarget [20]):
+  Print(LuaResult):
+  text OutcomeTarget = "Targets:Handlers:Choose":
+  number Outcome = Function.call(OutcomeTarget [20])[Score]:
+  Print("Outcome: " + Outcome):
+  text VoidTarget = "Targets:Handlers:Ping":
+  Function.call(VoidTarget):
+  function VoidRef = Targets:Handlers:Ping:
+  Function.call(VoidRef):
+  text Alternate = "Targets:Handlers:Ping":
+  text.set.Alternate = TextTarget:
+  Function.call(Alternate [16, "reassigned"]):
+  Function.call(Main:Forward:Recursive [VoidTarget, 3]):
+  Print("CALLBACK TESTS PASSED"):
+ )
+)
+
+noticed room Forward[] (
+ import callback_tests.Targets():
+ noticed brain Start[text CallBack] (
+  Function.call(CallBack [14, "text parameter"]):
+ )
+ noticed brain Typed[function CallBack] (
+  Function.call(CallBack [15, "function parameter"]):
+ )
+ noticed brain Recursive[text CallBack, number Depth] (
+  if[Depth > 0] (
+   Function.call(Main:Forward:Recursive [CallBack, Depth - 1]):
+  ) else (
+   Function.call(CallBack):
+  )
+ )
+)

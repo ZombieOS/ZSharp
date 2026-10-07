@@ -1,0 +1,28 @@
+.Startup Design {
+ display: flex;
+ flex-direction: row;
+ flex-wrap: wrap;
+ gap: 10px;
+ padding: 10px 20px;
+ align-items: center;
+ justify-content: space-between;
+}
+button {
+ color: rgb(255, 255, 255);
+ background: transparent;
+ border: 1px solid #FFF;
+ margin: 4px 8px 4px 8px;
+}
+#First, #Second {
+ transition: all 200ms ease;
+ flex-grow: 1;
+ flex-basis: 100px;
+ max-width: 40vw;
+ opacity: 0.8;
+}
+.Startup > First:hover { background: rgba(255, 0, 0, 0.5); }
+.Startup Input:focus { border-color: #FFFF; }
+@media (max-width: 600px) {
+ .Startup Design { flex-direction: column; gap: 5px; }
+ #First { width: 80%; margin: 0; }
+}

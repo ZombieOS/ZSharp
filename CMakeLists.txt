@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.2.0.1 LANGUAGES C)
+project(zsharp VERSION 1.2.1.0 LANGUAGES C)
 if(ANDROID)
     enable_language(CXX)
 endif()
@@ -88,11 +88,14 @@ add_executable(zsharp
     native/src/game_animation.c
     native/src/game_navigation.c
     native/src/game_model.c
+    native/src/game_instances.c
     native/src/game_projection.c
     native/src/game_vulkan.c
     native/src/main.c
     native/src/package.c
+    native/src/package_ignore.c
     native/src/paint.c
+    native/src/style_transition.c
     native/src/project.c
     native/src/provider_loader.c
     native/src/publisher.c
@@ -104,6 +107,7 @@ add_executable(zsharp
     native/src/window.c
     native/src/window_runtime.c
     native/src/window_style.c
+    native/src/window_layout.c
     native/src/window_linux.c
     native/src/window_macos.c
 )
@@ -122,10 +126,13 @@ if(ANDROID)
         native/src/game_animation.c
         native/src/game_navigation.c
         native/src/game_model.c
+        native/src/game_instances.c
         native/src/game_projection.c
         native/src/game_vulkan.c
         native/src/package.c
+        native/src/package_ignore.c
         native/src/paint.c
+        native/src/style_transition.c
         native/src/project.c
         native/src/provider_loader.c
         native/src/publisher.c
@@ -137,6 +144,7 @@ if(ANDROID)
         native/src/window.c
         native/src/window_runtime.c
         native/src/window_style.c
+        native/src/window_layout.c
         native/src/window_linux.c
         native/src/window_macos.c
     )
@@ -255,7 +263,7 @@ if(NOT WIN32)
 endif()
 
 if(WIN32)
-    target_link_libraries(zsharp PRIVATE user32 gdi32 comdlg32 ole32 windowscodecs
+    target_link_libraries(zsharp PRIVATE user32 gdi32 msimg32 comdlg32 ole32 windowscodecs
                                             shell32 advapi32 uuid winhttp)
     target_link_libraries(zsharp_installer PRIVATE winhttp advapi32 user32 shell32)
 endif()
@@ -417,6 +425,16 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}" "-DBIN=$<TARGET_FILE:zsharp>"
         "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUT=${CMAKE_CURRENT_BINARY_DIR}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-game-button-tests.cmake")
+    add_executable(zsharp_test_zss_layout tests/zss-layout-tests.c native/src/paint.c native/src/window_layout.c native/src/style_transition.c)
+    target_include_directories(zsharp_test_zss_layout PRIVATE native/src native/include)
+    target_compile_features(zsharp_test_zss_layout PRIVATE c_std_17)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_zss_layout PRIVATE m)
+    endif()
+    add_test(NAME zsharp_zss_layout COMMAND zsharp_test_zss_layout)
+    add_test(NAME zsharp_zss_styles COMMAND "${CMAKE_COMMAND}" "-DBIN=$<TARGET_FILE:zsharp>"
+        "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUT=${CMAKE_CURRENT_BINARY_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-zss-tests.cmake")
     target_include_directories(zsharp_test_game_collision PRIVATE
         native/include native/src "${ufbx_SOURCE_DIR}")
     target_compile_features(zsharp_test_game_collision PRIVATE c_std_17)
@@ -474,11 +492,39 @@ if(BUILD_TESTING)
     )
     add_test(NAME zsharp_game_projection
              COMMAND zsharp_test_game_projection)
+    add_test(NAME zsharp_file_search COMMAND "${CMAKE_COMMAND}"
+        "-DBIN=$<TARGET_FILE:zsharp>" "-DOUT=${CMAKE_CURRENT_BINARY_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-file-search-tests.cmake")
     add_test(NAME zsharp_game_skinning
              COMMAND zsharp_test_game_skinning
                "${ufbx_SOURCE_DIR}/data/max_transformed_skin_7500_ascii.fbx")
     add_test(NAME zsharp_game_collision
              COMMAND zsharp_test_game_collision)
+    add_executable(zsharp_test_game_instances tests/game-instance-tests.c)
+    target_include_directories(zsharp_test_game_instances PRIVATE native/include native/src)
+    target_compile_features(zsharp_test_game_instances PRIVATE c_std_17)
+    add_test(NAME zsharp_game_instances COMMAND zsharp_test_game_instances)
+    add_test(NAME zsharp_game_instance_runtime COMMAND "${CMAKE_COMMAND}"
+        "-DBIN=$<TARGET_FILE:zsharp>" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-game-instance-tests.cmake")
+    add_test(NAME zsharp_callbacks COMMAND "${CMAKE_COMMAND}"
+        "-DBIN=$<TARGET_FILE:zsharp>" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-callback-tests.cmake")
+    add_test(NAME zsharp_c_declarations COMMAND "${CMAKE_COMMAND}"
+        "-DBIN=$<TARGET_FILE:zsharp>" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-c-declaration-tests.cmake")
+    add_test(NAME zsharp_package_validation_cache COMMAND "${CMAKE_COMMAND}"
+        "-DBIN=$<TARGET_FILE:zsharp>" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-package-performance-tests.cmake")
+    add_executable(zsharp_test_package_ignore tests/package-ignore-tests.c native/src/package_ignore.c)
+    target_include_directories(zsharp_test_package_ignore PRIVATE native/src)
+    add_test(NAME zsharp_package_ignore_match COMMAND zsharp_test_package_ignore)
+    add_test(NAME zsharp_package_ignore COMMAND "${CMAKE_COMMAND}"
+        "-DBIN=$<TARGET_FILE:zsharp>" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-package-ignore-tests.cmake")
+    add_test(NAME zsharp_source_dependencies COMMAND "${CMAKE_COMMAND}"
+        "-DBIN=$<TARGET_FILE:zsharp>" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DOUT=${CMAKE_CURRENT_BINARY_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-source-dependency-tests.cmake")
     if(WIN32)
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
             set(ZSHARP_TEST_PLATFORM "windows-aarch64")

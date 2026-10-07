@@ -2,6 +2,7 @@
 
 #include "paint.h"
 #include "window_runtime.h"
+#include "window_layout.h"
 
 #if defined(__linux__)
 
@@ -85,6 +86,8 @@ typedef struct GtkApi {
     char *(*file_chooser_get_filename)(void *);
     void (*widget_set_size_request)(void *, int, int);
     void (*widget_show_all)(void *);
+    void (*widget_set_visible)(void *, int);
+    void (*widget_set_opacity)(void *, double);
     void (*widget_destroy)(void *);
     int (*widget_get_scale_factor)(void *);
     int (*widget_get_allocated_width)(void *);
@@ -280,6 +283,8 @@ static int gtk_api_load(GtkApi *api, char *error, size_t error_size) {
     GTK_REQUIRED(api, widget_set_size_request, api->gtk,
                  "gtk_widget_set_size_request");
     GTK_REQUIRED(api, widget_show_all, api->gtk, "gtk_widget_show_all");
+    GTK_REQUIRED(api, widget_set_visible, api->gtk, "gtk_widget_set_visible");
+    GTK_REQUIRED(api, widget_set_opacity, api->gtk, "gtk_widget_set_opacity");
     GTK_REQUIRED(api, widget_destroy, api->gtk, "gtk_widget_destroy");
     GTK_REQUIRED(api, widget_get_scale_factor, api->gtk,
                  "gtk_widget_get_scale_factor");
@@ -379,17 +384,12 @@ static int hex_digit(char value) {
 }
 
 static int parse_rgba(const char *text, GdkRGBA *color) {
-    int digits[6];
-    size_t index;
-    if (text == NULL || strlen(text) != 7 || text[0] != '#') return 0;
-    for (index = 0; index < 6; index++) {
-        digits[index] = hex_digit(text[index + 1]);
-        if (digits[index] < 0) return 0;
-    }
-    color->red = (double)(digits[0] * 16 + digits[1]) / 255.0;
-    color->green = (double)(digits[2] * 16 + digits[3]) / 255.0;
-    color->blue = (double)(digits[4] * 16 + digits[5]) / 255.0;
-    color->alpha = 1.0;
+    uint32_t rgb; unsigned char alpha;
+    if (!zsharp_color_parse(text,&rgb,&alpha)) return 0;
+    color->red = ((rgb >> 16) & 255) / 255.0;
+    color->green = ((rgb >> 8) & 255) / 255.0;
+    color->blue = (rgb & 255) / 255.0;
+    color->alpha = alpha / 255.0;
     return 1;
 }
 
@@ -416,7 +416,9 @@ static char *paint_css(const char *selector_text, const char *paint_text,
     cursor = css;
     cursor += sprintf(cursor, "%s{%s", selector_text, property_name);
     if (paint.kind == ZSHARP_PAINT_SOLID) {
-        cursor += sprintf(cursor, "#%06X", (unsigned)paint.colors[0]);
+        cursor += sprintf(cursor, "rgba(%u,%u,%u,%.6g)",
+            (paint.colors[0] >> 16) & 255, (paint.colors[0] >> 8) & 255,
+            paint.colors[0] & 255, zsharp_paint_alpha_sample(&paint, 0) / 255.0);
     } else if (paint.kind == ZSHARP_PAINT_LINEAR) {
         cursor += sprintf(cursor, "linear-gradient(%.12gdeg", paint.degrees);
         for (index = 0; index < paint.color_count; index++)
@@ -561,7 +563,7 @@ static int apply_element_zss(LinuxWindowState *state, LinuxControl *control,
     write = css;
     remaining = capacity;
     if (!append_css(&write, &remaining, "%s{", selector)) goto too_large;
-    if (background != NULL && background->text_value[0] == '#') {
+    if (background != NULL && !zsharp_paint_is_gradient_text(background->text_value)) {
         if (!append_css(&write, &remaining, "background-color:%s;",
                         background->text_value)) goto too_large;
         has_style = 1;
@@ -632,12 +634,20 @@ static int apply_element_zss(LinuxWindowState *state, LinuxControl *control,
             goto too_large;
         has_style = 1;
     }
+    if(property(element,"transition")!=NULL) {
+        if(!append_css(&write,&remaining,"transition:%s;",property(element,"transition")->text_value))goto too_large;
+        has_style=1;
+    }
+    if(property(element,"opacity")!=NULL) {
+        if(!append_css(&write,&remaining,"opacity:%s;",property(element,"opacity")->text_value))goto too_large;
+        has_style=1;
+    }
     if (!append_css(&write, &remaining, "}")) goto too_large;
     if (hover_background != NULL || hover_color != NULL ||
-        hover_border != NULL) {
+        hover_border != NULL || property(element,"hoverOpacity")!=NULL) {
         if (!append_css(&write, &remaining, "%s:hover{", selector))
             goto too_large;
-        if (hover_background != NULL && hover_background->text_value[0] == '#' &&
+        if (hover_background != NULL && !zsharp_paint_is_gradient_text(hover_background->text_value) &&
             !append_css(&write, &remaining, "background-color:%s;",
                         hover_background->text_value)) goto too_large;
         if (hover_color != NULL &&
@@ -646,13 +656,22 @@ static int apply_element_zss(LinuxWindowState *state, LinuxControl *control,
         if (hover_border != NULL &&
             !append_css(&write, &remaining, "border-color:%s;",
                         hover_border->text_value)) goto too_large;
+        if(property(element,"hoverOpacity")!=NULL && !append_css(&write,&remaining,"opacity:%s;",
+            property(element,"hoverOpacity")->text_value))goto too_large;
         if (!append_css(&write, &remaining, "}")) goto too_large;
         has_style = 1;
     }
-    if (focus_border != NULL) {
-        if (!append_css(&write, &remaining,
-                        "%s:focus{border-color:%s;}", selector,
-                        focus_border->text_value)) goto too_large;
+    if (focus_border != NULL || property(element,"focusButtonColor")!=NULL ||
+        property(element,"focusTextColor")!=NULL || property(element,"focusOpacity")!=NULL) {
+        if(!append_css(&write,&remaining,"%s:focus{",selector))goto too_large;
+        if(focus_border && !append_css(&write,&remaining,"border-color:%s;",focus_border->text_value))goto too_large;
+        if(property(element,"focusButtonColor") && !append_css(&write,&remaining,"background-color:%s;",
+            property(element,"focusButtonColor")->text_value))goto too_large;
+        if(property(element,"focusTextColor") && !append_css(&write,&remaining,"color:%s;",
+            property(element,"focusTextColor")->text_value))goto too_large;
+        if(property(element,"focusOpacity") && !append_css(&write,&remaining,"opacity:%s;",
+            property(element,"focusOpacity")->text_value))goto too_large;
+        if(!append_css(&write,&remaining,"}"))goto too_large;
         has_style = 1;
     }
     if (selection_background != NULL || selection_color != NULL) {
@@ -971,11 +990,14 @@ static void file_selected(GtkWidget *widget, void *data) {
 
 static void layout_controls(LinuxWindowState *state, int width, int height) {
     size_t index;
+    ZSharpWindow *window = &state->program->window;
+    ZSharpLayoutRect *rects = (ZSharpLayoutRect *)calloc(window->element_count, sizeof(*rects));
     int content_bottom = 0;
     double responsive_scale = state->layout_width > 0
         ? (double)width / (double)state->layout_width : 1.0;
     int origin_x;
     int origin_y;
+    if (rects == NULL) return;
     if (state->layout_height > 0) {
         double height_scale = (double)height / (double)state->layout_height;
         if (height_scale < responsive_scale) responsive_scale = height_scale;
@@ -1025,6 +1047,20 @@ static void layout_controls(LinuxWindowState *state, int width, int height) {
         else if (anchor_y != NULL &&
                  strcmp(anchor_y->text_value, "bottom") == 0)
             y = height - h - offset_y;
+        rects[element - window->elements].x = x;
+        rects[element - window->elements].y = y;
+        rects[element - window->elements].width = w;
+        rects[element - window->elements].height = h;
+    }
+    zsharp_window_layout(window, width, height, state->scale, rects);
+    for (index = 0; index < state->control_count; index++) {
+        LinuxControl *control = &state->controls[index];
+        ZSharpUIElement *element = control->element;
+        ZSharpLayoutRect *r = &rects[element - window->elements];
+        ZSharpUIProperty *opacity = property(element, "opacity");
+        int w = (int)r->width, h = (int)r->height, x = (int)r->x, y = (int)r->y;
+        state->api.widget_set_visible(control->widget, !r->hidden);
+        (void)opacity;
         state->api.widget_set_size_request(
             control->widget, w,
             element->type == ZUI_TEXT && property(element, "height") == NULL
@@ -1055,8 +1091,9 @@ static void layout_controls(LinuxWindowState *state, int width, int height) {
                 control->widget);
             if (allocated > h) h = allocated;
         }
-        if (y + h > content_bottom) content_bottom = y + h;
+        if (!r->hidden && y + h > content_bottom) content_bottom = y + h;
     }
+    free(rects);
     content_bottom = content_bottom > height ? content_bottom + 16 : height;
     state->api.widget_set_size_request(state->fixed, width, content_bottom);
 }

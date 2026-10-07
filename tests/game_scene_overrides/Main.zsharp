@@ -8,7 +8,7 @@ noticed room Main[] (
   number.set:Spotlight.lightAngle = 50:
   Spotlight.castShadows.set: alive:
   Spotlight.visible.set: alive:
-  number.set:Cube.opacity = 75:
-  number.set:Cube.roughness = 30:
+  number.set:Main.BlueCube.opacity = 75:
+  number.set:Main.BlueCube.roughness = 30:
  )
 )

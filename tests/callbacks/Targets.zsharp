@@ -1,0 +1,20 @@
+zsharp = type.script
+noticed room Handlers[] (
+ noticed brain Say[number Value, text Message] (
+  Print(Message + ": " + Value):
+ )
+ noticed number Answer[number Value] (
+  feed(Value + 7):
+ )
+ noticed brain Ping[] (
+  Print("PING"):
+ )
+ silent brain Private[] ()
+ noticed brain Choose[number Value] (
+  if(Score)[Value > 0] (
+   feed(Value + 1):
+  ) else (
+   feed(0):
+  )
+ )
+)

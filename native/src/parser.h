@@ -16,6 +16,8 @@ typedef struct ZSharpCustomSyntaxRule {
     char *function;
     char *module;
     int is_block;
+    int is_expression;
+    int declaration_kind;
 } ZSharpCustomSyntaxRule;
 
 int zsharp_parse_source_with_syntax(

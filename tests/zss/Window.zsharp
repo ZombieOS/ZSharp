@@ -1,0 +1,28 @@
+zsharp = type.script:window
+noticed Window Startup[] (
+ import ZSharp.Window.*():
+ noticed design Design[] (
+  title: "ZSS 1.2.1":
+  width: 800px:
+  height: 600px:
+  scalable: alive:
+  background: #101020:
+ )
+ noticed button First[] (
+  text: "First":
+  width: 100px:
+  height: 32px:
+ )
+ noticed button Second[] (
+  text: "Second":
+  width: 100px:
+  height: 32px:
+ )
+ noticed textInput Input[] (
+  display: "Type here":
+  type: text:
+  width: 200px:
+  height: 32px:
+  contents: []:
+ )
+)

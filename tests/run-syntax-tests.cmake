@@ -20,15 +20,44 @@ if(DEFINED TEST_C_PROJECT AND NOT TEST_C_PROJECT STREQUAL "")
     if(NOT c_result EQUAL 0 OR
        NOT c_output MATCHES "Hello from C, Tester!" OR
        NOT c_output MATCHES "42" OR
+       NOT c_output MATCHES "EXPRESSION CLIENT" OR
+       NOT c_output MATCHES "EXPRESSION COMBINED" OR
+       NOT c_output MATCHES "EXPRESSION OVERLOAD" OR
+       NOT c_output MATCHES "C STATE RETAINED" OR
+       NOT c_output MATCHES "43" OR
        NOT c_output MATCHES "Custom C syntax moved Tester to Spawn" OR
        NOT c_output MATCHES "Custom C syntax moved Tester to Hub" OR
+       NOT c_output MATCHES "InlineDestination" OR
+       NOT c_output MATCHES "WordDestination" OR
+       NOT c_output MATCHES "C NESTED EXPRESSIONS" OR
+       NOT c_output MATCHES "C CAPTURE EVALUATED ONCE" OR
        NOT c_output MATCHES "Detections: Windows=1 Linux=0 MacOS=1")
         message(FATAL_ERROR
             "C interoperability test failed (${c_result})\n"
             "stdout: ${c_output}\nstderr: ${c_error}")
     endif()
+    execute_process(COMMAND "${ZSHARP_BIN}" compile Main.zsharp -o Expressions.zbc
+        WORKING_DIRECTORY "${TEST_C_PROJECT}"
+        RESULT_VARIABLE c_compile ERROR_VARIABLE c_error)
+    if(NOT c_compile EQUAL 0)
+        message(FATAL_ERROR "C expression bytecode compilation failed: ${c_error}")
+    endif()
+    execute_process(COMMAND "${ZSHARP_BIN}" run-bytecode Expressions.zbc
+        WORKING_DIRECTORY "${TEST_C_PROJECT}"
+        RESULT_VARIABLE c_run OUTPUT_VARIABLE c_output ERROR_VARIABLE c_error)
+    if(NOT c_run EQUAL 0 OR NOT c_output MATCHES "EXPRESSION COMBINED" OR
+       NOT c_output MATCHES "EXPRESSION OVERLOAD" OR
+       NOT c_output MATCHES "C STATE RETAINED" OR
+       NOT c_output MATCHES "43")
+        message(FATAL_ERROR "C expression bytecode execution failed: ${c_output}\n${c_error}")
+    endif()
 endif()
 set(WINDOW_DIR "${PROJECT_ROOT}/tests/window")
+execute_process(COMMAND "${ZSHARP_BIN}" run "${PROJECT_ROOT}/tests/else-if.zsharp"
+    RESULT_VARIABLE elseif_result OUTPUT_VARIABLE elseif_output ERROR_VARIABLE elseif_error)
+if(NOT elseif_result EQUAL 0 OR NOT elseif_output MATCHES "SECOND[\r\n]+FIRST[\r\n]+FALLBACK[\r\n]+CONTINUES[\r\n]+CONSOLE SHUTDOWN" OR elseif_output MATCHES "WRONG")
+    message(FATAL_ERROR "else if regression failed: ${elseif_output}\n${elseif_error}")
+endif()
 set(FILE_IO_DIR "${CMAKE_CURRENT_BINARY_DIR}/file-io-project")
 set(MATH_DIR "${PROJECT_ROOT}/tests/math")
 set(ICON_INVALID_PROJECT "${CMAKE_CURRENT_BINARY_DIR}/icon-invalid-project")
@@ -138,11 +167,14 @@ execute_process(
 if(NOT cpp_result EQUAL 0 OR
    NOT cpp_output MATCHES "Hello from C\\+\\+, Tester!" OR
    NOT cpp_output MATCHES "42" OR
-   NOT cpp_output MATCHES "C\\+\\+ status alive")
+   NOT cpp_output MATCHES "C\\+\\+ status alive" OR
+   NOT cpp_output MATCHES "C\\+\\+ module state retained" OR
+   NOT cpp_output MATCHES "C\\+\\+ shutdown state retained")
     message(FATAL_ERROR
         "C++ interoperability test failed (${cpp_result})\n"
         "stdout: ${cpp_output}\nstderr: ${cpp_error}")
 endif()
+
 
 if(DEFINED TEST_RUST_PROJECT AND NOT TEST_RUST_PROJECT STREQUAL "")
     execute_process(
@@ -257,6 +289,62 @@ if(NOT math_result EQUAL 0)
 endif()
 
 set(old_math_project "${CMAKE_CURRENT_BINARY_DIR}/old-math-project")
+set(regex_dir "${CMAKE_CURRENT_BINARY_DIR}/regex-project")
+file(MAKE_DIRECTORY "${regex_dir}")
+file(COPY "${PROJECT_ROOT}/tests/regex/" DESTINATION "${regex_dir}")
+foreach(mode run run-bytecode)
+    if(mode STREQUAL "run-bytecode")
+        execute_process(COMMAND "${ZSHARP_BIN}" compile Main.zsharp -o Main.zbc
+            WORKING_DIRECTORY "${regex_dir}" RESULT_VARIABLE regex_compile ERROR_VARIABLE regex_error)
+        if(NOT regex_compile EQUAL 0)
+            message(FATAL_ERROR "Regex compilation failed: ${regex_error}")
+        endif()
+        set(regex_file Main.zbc)
+    else()
+        set(regex_file Main.zsharp)
+    endif()
+    execute_process(COMMAND "${ZSHARP_BIN}" ${mode} ${regex_file}
+        WORKING_DIRECTORY "${regex_dir}" RESULT_VARIABLE regex_result OUTPUT_VARIABLE regex_output ERROR_VARIABLE regex_error)
+    foreach(marker "REGEX TEST" "REGEX MATCHES" "REGEX EMPTY" "REGEX REPLACE" "REGEX FLAGS")
+        if(NOT regex_result EQUAL 0 OR NOT regex_output MATCHES "${marker}")
+            message(FATAL_ERROR "Regex ${mode} failed: ${regex_output}\n${regex_error}")
+        endif()
+    endforeach()
+endforeach()
+expect_failure("invalid regex pattern" "Regex failed" "${regex_dir}" run Invalid.zsharp)
+expect_failure("invalid regex type" "Regex arguments must be text" "${regex_dir}" run Type.zsharp)
+expect_failure("invalid regex flags" "Regex failed" "${regex_dir}" run Flags.zsharp)
+file(READ "${regex_dir}/project.zsettings" regex_settings)
+string(REPLACE "ZSharp: [1.2.1.0]:" "ZSharp: [1.2.0.1]:" regex_settings "${regex_settings}")
+file(WRITE "${regex_dir}/project.zsettings" "${regex_settings}")
+expect_failure("old project Regex gate" "Regex requires ZSharp: [1.2.1.0]:" "${regex_dir}" check Main.zsharp)
+set(power_dir "${CMAKE_CURRENT_BINARY_DIR}/power-project")
+file(MAKE_DIRECTORY "${power_dir}")
+file(COPY "${PROJECT_ROOT}/tests/math_power/" DESTINATION "${power_dir}")
+execute_process(COMMAND "${ZSHARP_BIN}" run Main.zsharp WORKING_DIRECTORY "${power_dir}"
+    RESULT_VARIABLE power_result OUTPUT_VARIABLE power_output ERROR_VARIABLE power_error)
+foreach(marker "power nested alive" "power fractional alive" "power signed alive" "power decimal alive")
+    if(NOT power_result EQUAL 0 OR NOT power_output MATCHES "${marker}")
+        message(FATAL_ERROR "Math.pow failed: ${power_output}\n${power_error}")
+    endif()
+endforeach()
+execute_process(COMMAND "${ZSHARP_BIN}" compile Main.zsharp -o "${power_dir}/Main.zbc"
+    WORKING_DIRECTORY "${power_dir}" RESULT_VARIABLE power_result ERROR_VARIABLE power_error)
+if(NOT power_result EQUAL 0)
+    message(FATAL_ERROR "Math.pow bytecode compilation failed: ${power_error}")
+endif()
+execute_process(COMMAND "${ZSHARP_BIN}" run-bytecode "${power_dir}/Main.zbc"
+    WORKING_DIRECTORY "${power_dir}" RESULT_VARIABLE power_result OUTPUT_VARIABLE power_output ERROR_VARIABLE power_error)
+if(NOT power_result EQUAL 0 OR NOT power_output MATCHES "power nested alive" OR NOT power_output MATCHES "power decimal alive")
+    message(FATAL_ERROR "Math.pow bytecode failed: ${power_output}\n${power_error}")
+endif()
+expect_failure("Math.pow overflow" "Math.pow result exceeds" "${power_dir}" run Overflow.zsharp)
+expect_failure("Math.pow domain" "negative bases require" "${power_dir}" run Domain.zsharp)
+expect_failure("Math.pow zero negative" "zero cannot have" "${power_dir}" run Zero.zsharp)
+file(READ "${power_dir}/project.zsettings" power_settings)
+string(REPLACE "ZSharp: [1.2.1.0]:" "ZSharp: [1.2.0.1]:" power_settings "${power_settings}")
+file(WRITE "${power_dir}/project.zsettings" "${power_settings}")
+expect_failure("old project Math.pow gate" "Math.pow requires ZSharp: [1.2.1.0]:" "${power_dir}" check Main.zsharp)
 file(REMOVE_RECURSE "${old_math_project}")
 file(COPY "${MATH_DIR}/" DESTINATION "${old_math_project}")
 file(READ "${old_math_project}/project.zsettings" old_math_settings)
@@ -271,8 +359,11 @@ expect_failure("old project native Math gate"
 expect_success("native 3D game packaging" "${PROJECT_ROOT}"
                package game "${TEST_3D_GAME_PROJECT}" Native3DRegression)
 
+set(python_marker "${TEST_OUTPUT}.python-worker.pid")
+file(REMOVE "${python_marker}" "${python_marker}.closed")
 execute_process(
-    COMMAND "${ZSHARP_BIN}" run Main.zsharp
+    COMMAND "${CMAKE_COMMAND}" -E env "ZSHARP_PYTHON_TEST_MARKER=${python_marker}"
+            "${ZSHARP_BIN}" run Main.zsharp
     WORKING_DIRECTORY "${PROJECT_ROOT}/tests/python_project"
     RESULT_VARIABLE python_result
     OUTPUT_VARIABLE python_output
@@ -281,11 +372,50 @@ execute_process(
 if(NOT python_result EQUAL 0 OR
    NOT python_output MATCHES "Hello, Tester!" OR
    NOT python_output MATCHES "42" OR
-   NOT python_output MATCHES "Python status alive")
+   NOT python_output MATCHES "Python status alive" OR
+   NOT python_output MATCHES "Python persistent state alive" OR
+   NOT python_output MATCHES "Python shutdown state alive")
     message(FATAL_ERROR
         "Python interoperability test failed (${python_result})\n"
         "stdout: ${python_output}\nstderr: ${python_error}")
 endif()
+
+if(NOT EXISTS "${python_marker}.closed")
+    message(FATAL_ERROR "Python worker did not perform graceful interpreter cleanup")
+endif()
+foreach(blocking IN ITEMS 0 1)
+    if(blocking)
+        file(REMOVE "${python_marker}" "${python_marker}.closed")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    "ZSHARP_PYTHON_TEST_MARKER=${python_marker}"
+                    "ZSHARP_PYTHON_TEST_BLOCKING=1"
+                    "${ZSHARP_BIN}" run Main.zsharp
+            WORKING_DIRECTORY "${PROJECT_ROOT}/tests/python_project"
+            RESULT_VARIABLE worker_result OUTPUT_VARIABLE worker_output
+            ERROR_VARIABLE worker_error TIMEOUT 15)
+        if(NOT worker_result EQUAL 0 OR NOT worker_output MATCHES "Python persistent state alive")
+            message(FATAL_ERROR "Python blocking-thread shutdown failed: ${worker_result}\n${worker_error}")
+        endif()
+    endif()
+    file(READ "${python_marker}" worker_pid)
+    if(WIN32)
+        execute_process(COMMAND powershell -NoProfile -Command
+            "if (Get-Process -Id ${worker_pid} -ErrorAction SilentlyContinue) { exit 1 }"
+            RESULT_VARIABLE worker_alive)
+    else()
+        execute_process(COMMAND kill -0 "${worker_pid}" RESULT_VARIABLE worker_alive
+                        ERROR_QUIET)
+        if(worker_alive EQUAL 0)
+            set(worker_alive 1)
+        else()
+            set(worker_alive 0)
+        endif()
+    endif()
+    if(NOT worker_alive EQUAL 0)
+        message(FATAL_ERROR "Python worker ${worker_pid} remained alive after ZVM exit")
+    endif()
+endforeach()
 
 execute_process(
     COMMAND "${ZSHARP_BIN}" run Main.zsharp
@@ -874,7 +1004,11 @@ if(WIN32)
     if(NOT game_result EQUAL 0 OR
        NOT game_output MATCHES "running bytecoded startup" OR
        NOT game_output MATCHES "game start ran" OR
-       NOT game_output MATCHES "mouse edge properties resolved")
+       NOT game_output MATCHES "mouse edge properties resolved" OR
+       NOT game_output MATCHES "game shutdown ran: started" OR
+       NOT game_output MATCHES "other file shutdown ran" OR
+       NOT game_output MATCHES "cancelled task cleanup: running" OR
+       game_output MATCHES "DISABLED CLEANUP RAN")
         message(FATAL_ERROR
             "Vulkan game package smoke test failed (${game_result})\n"
             "stdout: ${game_output}\nstderr: ${game_error}")
@@ -892,7 +1026,11 @@ if(WIN32)
     )
     if(NOT game_source_result EQUAL 0 OR
        NOT game_source_output MATCHES "running unbytecoded source startup" OR
-       NOT game_source_output MATCHES "game start ran")
+       NOT game_source_output MATCHES "game start ran" OR
+       NOT game_source_output MATCHES "game shutdown ran: started" OR
+       NOT game_source_output MATCHES "other file shutdown ran" OR
+       NOT game_source_output MATCHES "cancelled task cleanup: running" OR
+       game_source_output MATCHES "DISABLED CLEANUP RAN")
         message(FATAL_ERROR
             "source game package smoke test failed (${game_source_result})\n"
             "stdout: ${game_source_output}\n"

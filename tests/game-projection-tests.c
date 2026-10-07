@@ -164,5 +164,43 @@ int main(void) {
             return 1;
         }
     }
+    {
+        ZSharpGameRenderFrame view = {0};
+        ZSharpGameRenderObject cube = {0};
+        view.camera_fov = 70;
+        cube.width = cube.height = cube.depth = 2;
+        cube.scale_x = cube.scale_y = cube.scale_z = 1;
+        cube.z = -10;
+        if (!zsharp_game_cube_in_view(&view, &cube)) return 20;
+        cube.z = 10;
+        if (zsharp_game_cube_in_view(&view, &cube)) return 21;
+        cube.z = -10; cube.x = 100;
+        if (zsharp_game_cube_in_view(&view, &cube)) return 22;
+        cube.width = 300; /* Large floor crossing the view must survive. */
+        if (!zsharp_game_cube_in_view(&view, &cube)) return 23;
+        view.camera_rotation_y = 180; cube.width = 2; cube.x = 0; cube.z = 10;
+        if (!zsharp_game_cube_in_view(&view, &cube)) return 24;
+    }
+    {
+        ZSharpGameRenderFrame direct={0},prepared;
+        ZSharpGameRenderObject cube={0};
+        float a[12][4],b[12][4];
+        int yaw;
+        cube.width=3;cube.height=4;cube.depth=2;
+        cube.scale_x=cube.scale_y=cube.scale_z=1;cube.z=-20;
+        cube.rotation_x=17;cube.rotation_y=21;cube.rotation_z=5;
+        direct.camera_fov=83;direct.camera_rotation_x=13;direct.camera_rotation_z=7;
+        for(yaw=-360;yaw<=360;yaw+=15) {
+            size_t na,nb,i,j;
+            direct.camera_rotation_y=(float)yaw;
+            prepared=direct;zsharp_game_prepare_projection(&prepared);
+            na=zsharp_game_project_cube(&direct,&cube,a);
+            nb=zsharp_game_project_cube(&prepared,&cube,b);
+            if(na!=nb)return 25;
+            for(i=0;i<na;i++)for(j=0;j<4;j++)
+                if(fabsf(a[i][j]-b[i][j])> .01f + fabsf(a[i][j])*.0001f)return 26;
+            if(zsharp_game_cube_in_view(&direct,&cube)!=zsharp_game_cube_in_view(&prepared,&cube))return 27;
+        }
+    }
     return 0;
 }

@@ -1,5 +1,66 @@
 # Z# syntax guide
 
+`ZSHARP_C_FUNCTION_DURATION_OPTION` (kind 4) is a C-extension function option
+accepting exactly one nonnegative duration literal, such as `Demo.Cooldown(5s):`
+or `Demo.Cooldown(5ms):`. Like text options, it appears before executable
+statements in a custom function declaration. Its binder receives the callback
+target followed by a NUMBER measured in milliseconds, once during initialization.
+Seconds are converted using the same decimal arithmetic as `wait`.
+
+C extensions may also register `ZSHARP_C_FUNCTION_OPTION` (kind 3) through
+`add_declaration`. Its name is a qualified identifier, for example `Demo.Option`.
+Inside a custom function declaration, `Demo.Option("one", "two"):` must precede
+executable statements and takes one or more literal texts. The option binder
+runs after the function binder during initialization, receiving the function's
+`File:Room:Function` target followed by the texts. Options are not executed as
+part of the callback body and are preserved in bytecode. Extensions validate
+their own option semantics; ordinary brains do not accept these declarations.
+
+## C-defined declarations and background services (1.2.1.0)
+
+C modules may export `zsharp_c_register_v2(ZSharpCSyntaxRegistryV2 *, char *, size_t)`.
+Its `v1` member retains the existing statement, block and expression registry.
+`add_declaration(context, name, kind, binder, error, error_size)` adds a new
+function declaration type (`ZSHARP_C_FUNCTION_DECLARATION`) or a named room-level
+configuration block (`ZSHARP_C_NAMED_BLOCK_DECLARATION`). Existing built-in types
+cannot be replaced. Modules with only the v1 hook continue to work.
+
+```javascript
+noticed custom_event Handler[text Message, number Count] (
+ Print(Message):
+)
+
+CustomConfig Settings (
+ label: File.read("label.txt"):
+ nested ( value: Math.pow(2, 3): )
+):
+```
+
+The module must register `custom_event` and `CustomConfig`; they are not built-ins.
+Function declarations retain normal Z# parameters and bodies, and do not run
+automatically even if named `Start`. Before startup, their binder receives the
+declaration name, `File:Room:Function` target, then alternating parameter name/type
+texts. Named configuration binders receive their name followed by alternating
+dotted field paths and evaluated scalar values. Nested blocks flatten to paths
+such as `nested.value`. Hex colors and literal text/number lists are passed as text.
+Lists use JSON text. Configuration expressions are evaluated at runtime, not while
+the compiler checks source. They are preserved in bytecode.
+
+An optional `zsharp_c_service_v1` hook supports queued callbacks and host lifetime.
+See `native/include/zsharp_c.h` for ACTIVE/POLL/COMPLETE/SHUTDOWN operations.
+POLL receives the owning source name in `event.target` and must only return events
+for that owner. The returned target must belong to an owned custom function
+declaration; parameter counts and types are checked by ZVM. Worker threads queue
+events; ZVM task threads execute the bodies. Callbacks are serviced at instruction
+boundaries and after `Start[]` returns. Active services keep console scripts alive;
+closing a game/window cancels its tasks and shuts down their services. Pending
+callbacks are not serviced while a Z# task is blocked inside a native call.
+
+DiscordZ uses this extension for `discord_command_hybrid`, `discord_command_slash`,
+`discord_command_msg`, named `Webhook` blocks and `Discord.Print`. These are
+dependency-provided syntax, not built-in Z# features. Import `c:discordz.C.Main()`
+and rebuild DiscordZ against the 1.2.1 development C header before using them.
+
 This guide explains how to write Z# and compares its concepts with C#, Java, and C. The official source extension is `.zsharp`.
 
 This edition is organized for Z# 1.2.0.0 around five areas: getting started, the Z# language, apps, games, and language interoperability. Features that were previously documented as version-specific additions are now placed with the part of Z# they belong to.
@@ -163,6 +224,117 @@ valid source syntax.
 
 ## Application and game packages
 
+### Package exclusions: `.zignore`
+
+From Z# 1.2.1.0, place an optional UTF-8 `.zignore` in the project root.
+It filters files before hashing and source validation for `.zapp`, `.zgame`,
+their source companions, and `.zpackage` dependencies. It never deletes source
+files or affects `zsharp run`/imports in your working project. `.gitignore` does
+not control packaging. `.zignore` itself is always omitted from archives.
+
+```text
+# Secrets and source-only examples
+.env
+.env.*
+/Z# Examples/
+*.obj
+__pycache__/
+Assets/**/*.cache
+!Assets/important.cache
+```
+
+Rules are ordered; the last matching rule wins. Blank lines and lines beginning
+with `#` are ignored. `!pattern` re-includes a matching path; `\#` and `\!` match
+literal leading characters. `/` anchors to the root, and patterns containing
+`/` are root-relative. Names without `/` match at any depth. A trailing `/`
+matches directories only. `*` and `?` do not cross `/`; `**` can cross directories
+and `**/` also matches zero directory levels. Bracket classes/ranges such as
+`[a-z]` and `[!0-9]` are supported. Backslashes escape literal characters;
+use forward slashes for path separators. Unescaped trailing spaces are ignored.
+Matching is case-sensitive on all systems; wildcard matching is byte-oriented.
+
+This supports common Git-style patterns, not every Git ignore feature: only
+the root `.zignore` is read, and existing built-in exclusions cannot be undone.
+Excluded directories are not traversed, so re-include a parent before trying
+to re-include its children. Settings and configured startup/native targets may
+not be excluded; packaging fails with a clear error. Do not exclude runtime
+imports, objects or assets your application needs. Rules are limited to 1 MiB,
+10000 entries and 4096 bytes per pattern; oversized, NUL-containing or unreadable ignore files fail
+packaging rather than silently including their contents.
+
+### Source dependency packages
+
+From Z# 1.2.1.0, reusable project source can be distributed as a `.zpackage`:
+
+```text
+zsharp package pack path/to/library DiscordZ
+```
+
+This creates `path/to/library/Packages/DiscordZ.zpackage`. Packs are always
+source-only: no compiled Z# bytecode and no `--unbytecode`/`--unbytecoded`
+option. A library needs `project.zsettings`, but does not need an application
+startup window or a game scene. Native C/C++/Rust/Kotlin modules still need
+their compiled platform libraries alongside their source; a pack does not
+automatically compile those languages.
+
+Declare a Store project ID and four-part release version in the consuming
+project's settings:
+
+```zsharp
+Dependencies (
+ discordz:1.0.0.0:
+):
+```
+
+The trailing `:` after each release is optional for compatibility with older
+settings. Both `zsharp run path/to/Bot.zsharp` and app/game packaging prepare
+dependencies **before parsing source**, including imported custom C syntax:
+
+- First look for a matching `.zpackage` directly inside `Dependencies/`.
+  Its internal PID/version must match; the filename can be anything.
+- If absent, download
+  `https://zos-store-api.zos-store-api.workers.dev/?action=download&project=PROJECT_ID&release=RELEASE_ID`
+  to `Dependencies/PROJECT_ID-RELEASE_ID.zpackage`.
+- Validate the source archive and install it under
+  `Dependencies/PROJECT_ID/RELEASE_ID/`. Existing matching installations are
+  reused. Concurrent runs coordinate installation rather than sharing a
+  partially downloaded file.
+
+Corrupt local archives and multiple archives matching the same PID/release
+are errors, not reasons to silently download a replacement. Releases are
+immutable: replacing an already-installed release with different archive
+contents reports an error; move its installed folder aside first. Downloads
+are limited to 1 GiB and use HTTPS. Transitive dependencies are prepared too;
+cycles and excessively deep/large dependency graphs are rejected.
+
+Use normal project-qualified imports and calls, for example:
+
+```zsharp
+import discordz.Scripts.Client():
+import c:discordz.C.Main():
+
+Function.call(discordz:Client:Client:Initialize):
+Function.call(c:discordz.C.Main:initialize []):
+```
+
+These are examples of library API names, not built-in DiscordZ functions.
+Within the library, its own project-relative paths and imports stay relative
+to that library. Dependency files are isolated from the consuming project's
+source lookup, so both projects may have a `Main.zsharp`. Dependency `Start[]`
+functions do not automatically run as application/game startup tasks; call
+initialization explicitly.
+
+App/game packages include the installed dependency source/assets, without
+duplicating the `.zpackage` archives. Packaged applications therefore do not
+need a Store download for those included dependencies. Built-in runtime
+dependencies (`zsharp`, `zsharpwindow`, `zsharpgame`, `zos`) and explicitly
+supplied native `--provider` projects keep their existing behavior.
+
+Dependencies are executable code, including any native libraries or custom
+syntax modules they contain. Archive validation checks identity, paths and
+integrity; it is not a safety review or a publisher signature. Only use trusted
+dependencies. A `.zpackage` is not a runnable `.zapp` or `.zgame`.
+
 Z# applications use `.zapp` and games use `.zgame`.
 
 These are cross-platform Z# container formats. The normal 1.0.2.1 container
@@ -180,6 +352,13 @@ source files
 ```
 
 Build packages with:
+
+From 1.2.1.0, game packaging shares one freshly loaded scene/object validation
+model across script checks and startup compilation for each output. All scene,
+object, script, and package integrity checks still run. This is build-local
+reuse, not a persistent cache: changes are checked again on the next build.
+Set the environment variable `ZSHARP_PACKAGE_PROFILE=1` to print the validation
+model-load count and placement count while diagnosing packaging performance.
 
 ```text
 zsharp package app path/to/project Application
@@ -669,6 +848,56 @@ File.Room.User.Move[10, 20]:
 Project.File.Room.User.Move[10, 20]:
 ```
 
+#### Callback variables and function references (1.2.1.0)
+
+`Function.call` also accepts a variable name. Room fields, local values, and
+function parameters may supply either `text` or the dedicated `function` type:
+
+```zsharp
+noticed text TextCallback = "Actions:Actions:Move":
+noticed function MoveCallback = Actions:Actions:Move:
+
+noticed brain Forward[text CallBack] (
+ Function.call(CallBack [10, "hi"]):
+)
+
+noticed brain ForwardTyped[function CallBack] (
+ Function.call(CallBack [10, "hi"]):
+)
+
+noticed brain Start[] (
+ text LocalText = "Actions:Actions:Move":
+ function LocalFunction = Actions:Actions:Move:
+ function Copy = LocalFunction:
+ Function.call(LocalText [10, "hi"]):
+ Function.call(Copy [10, "hi"]):
+)
+```
+
+These declarations belong inside a room; import the target file normally in
+every room that binds or invokes its callbacks. Defining a reference does not
+execute it. Dedicated references bind qualified targets and are checked at
+build time for existence, imports, and visibility; their parameter count/types
+are checked when invoked. Local `function` declarations can copy an existing
+function reference. Text targets are resolved at runtime and accept
+`File:Room:Function`, `File.Room.Function`, a four-part project-qualified target,
+or an existing foreign target such as `lua:Lua.Utilities:add`. Unquoted dedicated
+references use `File:Room:Function`, `Project.File.Room.Function`, or the normal
+`LANGUAGE:Path.To.File:function` spelling.
+
+Omit the argument brackets for zero arguments: `Function.call(CallBack):`.
+Returning functions also work in expressions, for example
+`number Total = Function.call(CallBack [4, 6]):`, and existing named brain
+outcome selectors still work. Invalid/empty targets, incorrect argument types
+or counts, missing imports, and inaccessible targets report errors; callback
+variables do not bypass visibility rules. A `function` parameter requires an
+actual function reference, not ordinary text. This is a named-function
+reference, not a closure capturing local variables or an object method.
+
+`noticed brain Start[text CallBack]` is valid, but requires an explicit call
+with its argument. Only zero-parameter `Start[]` brains automatically run.
+The canonical spelling remains `Function.call`, with lowercase `call`.
+
 ## Local values and assignment
 
 Local values omit visibility and exist only during that brain call. Room
@@ -743,6 +972,28 @@ values remain local to the brain call.
 
 ## Conditions
 
+### Shutdown cleanup (1.2.1.0)
+
+An optional `noticed brain Shutdown[] (...)` runs during graceful shutdown.
+For apps and games, ZVM stops and joins ordinary tasks first, then calls every
+eligible `Shutdown[]` in project script files, including files without a
+`Start[]`. Hooks run sequentially once, retaining the room's saved values.
+`Shutdown[DR]` disables automatic cleanup. Console scripts run their shutdown
+brains when execution finishes. No hooks are required.
+
+```zsharp
+noticed brain Shutdown[] (
+ Function.call(cpp:Cpp.Discord.Discord:shutdown []):
+)
+```
+
+Cleanup may print, update ordinary variables, and call native modules. It must
+finish promptly; do not run endless loops or access closing window/game
+properties. Cleanup does not receive the cancelled window runtime. A failed
+hook is reported, but other hooks are still attempted. Force-ending the
+process, power loss, or a native crash cannot guarantee cleanup. A native call
+that never returns can prevent tasks from joining and reaching cleanup.
+
 Conditions use square brackets:
 
 ```zsharp
@@ -752,6 +1003,23 @@ if[Visits >= 10] (
  Print("New visitor"):
 )
 ```
+
+Chain additional conditions with `else if`. Conditions are checked in order;
+only the first matching branch runs. Spaces before `[` are optional.
+
+```zsharp
+if [Visits >= 10] (
+ Print("Returning visitor"):
+) else if [Visits >= 1] (
+ Print("Welcome back"):
+) else (
+ Print("New visitor"):
+)
+```
+
+Any number of `else if` branches can precede the optional final `else`.
+As with a plain `if`, if no condition matches and the chain has no final
+`else`, the current function returns early. Use `else ()` to continue instead.
 
 Comparison operators include:
 
@@ -1149,6 +1417,58 @@ absolute paths and paths containing `..` are rejected. A single read is
 limited to 16 MiB. Parent folders must already exist. These operations do not
 open native file dialogs or grant access outside the project.
 
+From Z# 1.2.1.0, recursively find files by extension:
+
+```zsharp
+text() Files = File.searchExtension(".zscene"):
+Print(Files.Length):
+text First = File.searchExtension(".zscene")[0]:
+```
+
+The extension must be nonempty and begin with `.`. Matching is ASCII
+case-insensitive. Results are text paths relative to the project root with
+`/` separators, sorted in case-sensitive path order. The search includes
+all regular files under the project, including build/output/hidden folders;
+symbolic links and junctions are not followed. No import is required.
+No matches returns an empty array. Search-result arrays use ordinary zero-based
+Z# indexing: `[0]` is the first file. Invalid indexes produce the usual
+array bounds errors, so check `Files.Length` before reading `Files[0]`.
+Results are a snapshot; another call searches again. Searches exceeding 256
+nested directory levels fail instead of recursing indefinitely.
+
+## Regular expressions
+
+From Z# 1.2.1.0, no import is required for these expressions:
+
+```javascript
+status Valid = Regex.test("ABC123", "^[A-Z]+[0-9]+$"):
+status Found = Regex.test("Hello", "hello", "i"):
+text() Matches = Regex.matches("item12 item34", "\\d+"):
+text First = Matches[0]:
+text Updated = Regex.replace("a12 b34", "[0-9]+", "#"):
+```
+
+All arguments must be text. The optional final flags argument accepts `g`
+(global), `i` (ignore case), `m` (multiline anchors), `s` (dot matches newlines),
+and `u` (Unicode mode). Patterns follow the bundled QuickJS JavaScript RegExp
+engine, not PCRE. Pattern and replacement strings are passed as data, never
+executed as JavaScript source. Double backslashes in Z# strings: `"\\d+"`
+passes `\d+` to the regex engine.
+
+`Regex.test` returns alive/dead for any match; use `^` and `$` anchors when you
+need a whole-string match. `Regex.matches` returns all full matches, not capture
+groups, as a zero-based text array; no matches returns an empty array. You may
+also index directly: `Regex.matches("a12", "\\d+")[0]`. Zero-length matches
+advance safely instead of looping forever.
+
+`Regex.replace` replaces all matches and returns the original text if none match.
+Replacement templates support `$&` (the whole match), `$1`, `$2`, etc. (capture
+groups), and `$$` (a literal dollar sign). `matches` and `replace` add `g`
+automatically when it is absent. Invalid patterns, flags, or argument types
+produce runtime errors. Each call uses an isolated engine context with a
+16 MiB engine allocation limit, an approximately two-second execution deadline,
+and at most 100000 returned matches. Returned text cannot contain NUL characters.
+
 ## Native math
 
 Z# provides native scalar math expressions without requiring an imported
@@ -1164,7 +1484,18 @@ number Positive = Math.abs(Value):
 number Smaller = Math.min(First, Second):
 number Larger = Math.max(First, Second):
 number ConvertedDegrees = Math.degrees(Radians):
+number Power = Math.pow(10, 5): // 100000; available from 1.2.1.0
 ```
+
+`Math.pow(base, exponent)` accepts nested numeric expressions, for example
+`number Power = Math.pow(2, Math.pow(3, 2)):` produces 512 (2 raised to 9).
+It supports integer, fractional, zero, and negative exponents within the finite
+double-precision range. Negative bases require integer exponents; zero cannot
+have a negative exponent; `Math.pow(0, 0)` returns 1. Overflow produces a clear
+runtime error, not infinity or invalid number text. Underflow may round to zero.
+Thus `Math.pow(10, Math.pow(10, 123))` parses, but cannot be represented and
+reports overflow. Use the result in an assignment, condition, or `Print(...)`;
+math calls are expressions, not standalone colon-ended statements.
 
 Trigonometric functions accept radians. `Math.radians` converts degrees to
 radians, and `Math.degrees` performs the reverse conversion. `Math.sqrt`
@@ -2164,6 +2495,24 @@ Player.grounded
 Player.colliding
 ```
 
+`Game.fps` measures the reciprocal of the most recent rendered-frame loop
+interval (including presentation and pacing), not the fixed physics rate.
+It can fluctuate; `Game.delta` still reports the physics timestep.
+For performance investigation, set `ZSHARP_GAME_PROFILE=1` before launching
+the development runtime. It reports frame intervals and physics/input,
+snapshot, and render/present times to stderr. Profiling output itself adds
+overhead; disable it for normal play.
+
+The development 1.2.1.0 runtime uses SDL_GPU/Vulkan for 3D triangle filling,
+texture sampling, blending, and depth testing where available. It retains
+software depth rendering when GPU initialization is unavailable. Scripts,
+physics, mesh transformation, and current lighting/shadow calculations remain
+CPU work. No source changes are needed to select the GPU pass. For comparison
+or troubleshooting, set `ZSHARP_GAME_SOFTWARE=1` before launch to force the
+software renderer. Profiling prints the selected renderer at startup.
+The new GPU path has been tested locally on Windows; Linux/macOS hardware
+verification is still required before claiming support there.
+
 ### Game buttons (Z# 1.2.0.1)
 
 ```zsharp
@@ -2264,6 +2613,72 @@ An object can be qualified with its scene as
 `grounded` and `colliding`. Scene changes, rendering, physics, and script loops
 run concurrently, so `wait(...)` does not freeze the game window.
 
+### Controlling a specific scene placement
+
+In 1.2.1.0, `Scene.Instance.property` addresses one live placement, not its
+shared `.zobject` definition. The scene prefix is the declared scene name,
+not its folder path. Instance identifiers are case-sensitive.
+
+```zsharp
+objects[JSON] (
+ [
+  {"id": "Cube", "name": "ElevatorLeftDoor",
+   "location": {"x": -1, "y": 0, "z": 0}},
+  {"id": "Cube", "name": "Elevator Right Door",
+   "location": {"x": 1, "y": 0, "z": 0},
+   "instanceId": "ElevatorRightDoor"}
+ ]
+)
+```
+
+An identifier-style `name` is the default instance identifier. Use optional
+`instanceId` after `location` when a hierarchy label contains spaces, or when
+several placements share a display label. Projects using `instanceId` must
+target `ZSharp: [1.2.1.0]:` or newer. Explicit IDs use at most 127 ASCII
+letters, digits, or underscores, starting with a letter or underscore, and
+must be unique within that scene. Names and IDs may repeat in different scenes.
+An explicit ID replaces the display-name alias. Duplicate explicit IDs and
+invalid IDs are rejected during packaging/loading. Repeated legacy display
+labels are still allowed, but referencing an ambiguous label is an error.
+
+```zsharp
+number.set:Chapter1Floor1.ElevatorLeftDoor.positionX =
+ Chapter1Floor1.ElevatorLeftDoor.positionX - (Game.delta * 2):
+number.set:Chapter1Floor1.ElevatorRightDoor.positionX =
+ Chapter1Floor1.ElevatorRightDoor.positionX + (Game.delta * 2):
+Chapter1Floor1.ElevatorLeftDoor.visible.set: dead:
+```
+
+Readable/writable transforms are `positionX/Y/Z`, `rotationX/Y/Z`,
+`scaleX/Y/Z`, and `velocityX/Y/Z`. Existing writable properties such as
+`visible`, `width`, `height`, `depth`, `color`, `trigger`, and the supported
+surface/physics/light fields use the same instance path. Collision flags
+`grounded` and `colliding` remain read-only; this does not add a writable `body`
+or `collider` field. Moving one Cube placement does not move the other Cubes.
+
+Unqualified `Instance.property` addresses only the active scene. The old
+object-definition name (`Player.positionX`, for example) remains an alias
+when it uniquely identifies a placement; it is never an arbitrary first match.
+A unique placement name/ID takes precedence over a definition-name alias.
+Qualified paths address the named scene's own instance, including inactive
+scene state, and do not follow an identically named instance into another scene.
+Scene instances are indexed at load time; property access does not scan all
+placements. Live reads and writes are synchronized with physics snapshots.
+
+Position changes immediately affect the rendered transform and collider.
+Kinematic velocity moves platforms normally; script-positioned static or
+kinematic platforms also record movement for rider carrying. Grounded dynamic
+bodies are carried horizontally and vertically by their supporting platform
+where contact is maintained; jumping releases support. This is translation
+carrying, not rotation/scale-driven rider attachment or swept collision for
+large teleports. No scene rebuild/reload is necessary.
+
+`Game.scene.set: "Chapter1Floor2":` keeps the existing scene-entry behavior:
+positions return to their configured spawn locations and velocities reset.
+Set arrival positions after switching scenes. Explicit transforms on an
+inactive scene are not a substitute for configuring its spawn placements.
+Scene switching itself still requires `import project_id.game.scene():`.
+
 ## Achievements and audio
 
 Game achievements use ZSON in a `type.script:achievement` file:
@@ -2340,6 +2755,70 @@ zsharp package game "path/to/examples/test-game" ZSharpGameTest --unbytecode
 ```
 
 ## ZSS game styling
+
+### Button states (1.2.1.0)
+
+Game text and buttons accept a base `font-size` in pixels:
+
+```css
+.NewGame { font-size: 24px; }
+```
+
+Bare numbers are also pixels. Values must be greater than zero and at most
+4096. The default is the existing 8-pixel bitmap font; increasing font size
+scales that bitmap, rather than selecting a smooth/vector font. Button text
+remains centered and clipped to the button area. Font-size state overrides
+and font-size transitions are not implemented.
+
+A quit button's callback can close the app/game with:
+
+```zsharp
+noticed brain Quit[] (
+ Application.Quit:
+)
+```
+
+No import is needed. This requires project ZSharp 1.2.1.0 or newer and a
+running native app/game. It requests normal window closure, returns from the
+current callback, cancels other tasks, and uses the usual `Shutdown[]` cleanup
+path. It is not a force-kill operation.
+
+Game buttons support `:hover` (pointer over the button) and `:focus`
+(selected for keyboard activation):
+
+```css
+.NewGame:hover {
+ color: #990000;
+ opacity: 0.8;
+ scale-x: 1.1;
+ scale-y: 1.1;
+}
+.NewGame:focus {
+ color: #3366FF;
+ opacity: 1;
+}
+.NewGame {
+ transition: all 150ms ease-in-out;
+}
+```
+
+State declarations support `color`, `opacity`, `scale-x`, and `scale-y`.
+The base button rule also accepts `background: transparent;` to hide only
+the background while retaining the label and clickable area. A `#RRGGBB`
+background restores a solid fill. Background transparency remains in effect
+during hover/focus; use a solid background if those states should show a fill.
+ZSS opacity is between 0 and 1; scene/runtime opacity uses its existing
+0–100 range. Hover takes precedence when both states supply the same property.
+These visual scale changes do not resize the physics collider or click area.
+Tab/Shift+Tab cycles visible buttons; Enter/Space invokes the focused button's
+left action. Clicking a button focuses it. Losing window focus clears selection;
+mouse capture suppresses button focus/hover interaction.
+
+Button transitions accept `all <duration> [timing]` or `none`. Durations use
+`ms` or `s`; timing is `linear`, `ease`, `ease-in`, `ease-out`, or
+`ease-in-out`. Transitions interpolate color, opacity, and visual scale.
+Property lists, delays, and CSS keyframe animations are not implemented.
+
 
 Z# Style Sheets use the `.zss` extension and CSS declaration syntax. They are
 parsed directly by ZVM and do not require a browser. Use `.Object` when an
@@ -2503,6 +2982,19 @@ number.set:Flashlight.lightIntensity = 240:
 Flashlight.castShadows.set: alive:
 ```
 
+With a placement `instanceId` of `Flashlight`, scene-qualified access is:
+
+```zsharp
+number Brightness = Chapter1Floor1.Flashlight.lightIntensity:
+number.set:Chapter1Floor1.Flashlight.lightIntensity = 100:
+number.set:Chapter1Floor1.Flashlight.rotationY = 45:
+```
+
+The script must import its project's game scene feature, for example
+`import the_pallet.game.scene():`. JSON placement attributes use `intensity`,
+`range`, and `angle`; runtime paths use `lightIntensity`, `lightRange`, and
+`lightAngle`, not `intensity`/`range`/`angle`.
+
 Lights also expose `rotationX/Y/Z`, `color`, `lightType` (`point`, `spot`, or
 `directional`), `lightRange`, and `lightAngle` at runtime. Scene objects expose
 `opacity`, `roughness`, `emissive`, and `metallic` as 0–100 number properties.
@@ -2519,7 +3011,38 @@ are available in this development build, subject to the limitations above.
 
 # Languages
 
-Z# can interoperate with several other languages. C is also the extension path for trusted modules that register new Z# statement and block syntax.
+Z# can interoperate with several other languages. C is also the extension path for trusted modules that register new Z# statement, block, and expression syntax.
+
+In Z# 1.2.1.0, C modules can register value-producing expressions:
+
+```c
+registry->add_expression(registry->context, "Discord.Client",
+                         "client", error, error_size);
+```
+
+The module's `zsharp_c_call_v1` handler receives function `client` with no
+arguments and returns a `ZSharpCValue`. Return `ZSHARP_C_STATUS` with
+`number = 1` for `alive` or `number = 0` for `dead` to use it directly:
+
+```javascript
+import c:my_project.C.Console():
+// Inside a brain, after importing the module that registers the expression:
+if[Discord.Client] (
+ Print("Client available"):
+)
+```
+
+Expressions may also return numbers or text for assignments, arithmetic,
+comparisons, and function arguments. For example, register
+`NativeSum({a}, {b})` and use `number Total = NativeSum(10, 20) + 1:`.
+Placeholders accept expressions, including nested calls, following the custom
+statement rules. Expression patterns omit the statement-ending colon.
+Registrations cannot replace built-in syntax or overlap another registered
+pattern. Distinct patterns may share a namespace, including `Discord.Init(...)`,
+`Discord.client`, and `Discord.client({name})`. Handlers execute at runtime on each evaluation;
+registration itself must remain side-effect-free. Existing C modules remain
+compatible; modules using the appended `add_expression` API require a
+1.2.1.0-or-newer compiler and should declare that project version requirement.
 
 ## Python
 
@@ -2559,6 +3082,16 @@ values, mapped to Python `str`, `int`/`float`, `bool`, and `None`. A Python
 exception fails the Z# call and includes its Python traceback in the runtime
 error. The official ZVM bundles Python; developers may set
 `ZSHARP_PYTHON_RUNTIME` while testing a custom interpreter.
+
+Python calls share one persistent interpreter process for the lifetime of the
+ZVM process. Modules are cached by their resolved file path: globals and imported
+modules survive subsequent calls, including calls from other Z# tasks. Calls
+are serialized across tasks. Python remains available during `Shutdown[]`;
+ZVM closes the worker at process exit, allowing up to two seconds for normal
+Python cleanup before terminating a worker that remains alive. On Windows,
+the worker is also owned by a kill-on-close job to prevent orphaned workers.
+Restart the ZVM to reload edited Python modules. User Python output is forwarded
+to standard error so it cannot corrupt the worker's result protocol.
 
 ## JavaScript
 
@@ -2664,7 +3197,14 @@ extern "C" ZSHARP_CPP_EXPORT int zsharp_cpp_call_v1(
 ```
 
 Bridge arguments and results support text, number, status, and null. Returned
-text is copied by ZVM before the module is unloaded. C++ calls require
+text is copied by ZVM immediately after the call. C++ modules are cached by
+full library path and remain loaded until process exit, preserving global
+state and SDK callbacks between calls. The cache is shared across script
+tasks; loading is synchronized, but module functions must synchronize their
+own shared state if called concurrently. Call an SDK's explicit shutdown
+function when appropriate; ZVM does not invent or automatically invoke one.
+Restart the app/game after rebuilding a module to load the changed library.
+C++ calls require
 `ZSharp: [1.1.3.0]:` or newer.
 
 ## Rust
@@ -2786,10 +3326,15 @@ Detections(
 ```
 
 Patterns use literal Z# tokens and `{name}` placeholders. Each placeholder
-currently accepts one identifier, number, or quoted text atom; complex
-expressions inside placeholders are not yet supported. The first word of a
-custom pattern cannot be a built-in Z# statement keyword or a first word
-already registered by another C pattern. Assignment and bracket syntax are
+accepts an expression, including variables, qualified properties, arithmetic,
+and nested calls such as `Discord.Bot.Login(File.read(".env")):`. Arguments
+are evaluated at runtime, not during registration. Commas and closing
+parentheses inside nested calls do not split the outer arguments. A literal
+operator in a registered pattern remains a separator (use parentheses around
+a complex operand in that uncommon form). Adjacent placeholders without a
+separator keep their original single-atom interpretation. The first word of a
+custom pattern cannot be a built-in Z# keyword. Distinct patterns may share
+their first word; overlapping token patterns are rejected. Assignment and bracket syntax are
 also reserved. A pattern is available only in a script that imports its C
 module. Registration must have no side effects because the compiler may call
 it repeatedly.

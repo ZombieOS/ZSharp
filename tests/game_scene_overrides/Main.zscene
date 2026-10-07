@@ -12,6 +12,7 @@ noticed scene Main[] (
     "id": "Cube",
     "name": "Blue Cube",
     "location": {"x": "-10", "y": "0", "z": "0"},
+    "instanceId": "BlueCube",
     "width": "12",
     "height": "8",
     "length": "6",
