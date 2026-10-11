@@ -65,5 +65,24 @@ int main(void) {
     a[0].name="media/0/600/0/1e12/display";a[0].text_value="none";
     CHECK(zsharp_window_layout(&window,800,600,1,rects));CHECK(!rects[1].hidden);
     CHECK(zsharp_window_layout(&window,400,600,1,rects));CHECK(rects[1].hidden);
+    /* Layout edges must not replace or interpret button click callbacks. */
+    {
+        ZSharpUIProperty edges[4] = {{0}};
+        memset(elements, 0, sizeof(elements)); memset(rects, 0, sizeof(rects));
+        elements[0].type = ZUI_DESIGN;
+        elements[1].type = ZUI_CONTAINER;
+        elements[2].type = ZUI_BUTTON;
+        rects[1].x = 16; rects[1].y = 300;
+        rects[1].width = 646; rects[1].height = 88;
+        rects[2].width = rects[2].height = 32;
+        edges[0].name = "__parent"; edges[0].text_value = "2";
+        edges[1].name = "right"; edges[1].type = ZUI_PROPERTY_CALLBACK;
+        edges[2].name = "cssRight"; edges[2].text_value = "12px";
+        edges[3].name = "bottom"; edges[3].text_value = "12px";
+        elements[2].properties = edges; elements[2].property_count = 4;
+        CHECK(zsharp_window_layout(&window, 678, 472, 1, rects));
+        CHECK(NEAR(rects[2].x, 618) && NEAR(rects[2].y, 344));
+        CHECK(edges[1].type == ZUI_PROPERTY_CALLBACK);
+    }
     puts("ZSS color and layout checks passed"); return 0;
 }

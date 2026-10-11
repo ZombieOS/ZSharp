@@ -331,6 +331,8 @@ static int write_instruction(FILE *file,
         case ZOP_PUSH_STATUS:
             return write_u32(file, (uint32_t)instruction->number_operand);
         case ZOP_PUSH_TEXT:
+        case ZOP_BROWSER_JS:
+        case ZOP_BROWSER_CSS:
         case ZOP_PUSH_FUNCTION:
         case ZOP_STORE_LOCAL_FUNCTION:
         case ZOP_LOAD_NAME:
@@ -363,6 +365,7 @@ static int write_instruction(FILE *file,
             return write_string(file, instruction->operand) &&
                    write_u32(file, instruction->argument_count);
         case ZOP_CALL_QUALIFIED:
+        case ZOP_BROWSER_BIND:
         case ZOP_CALL_QUALIFIED_VALUE:
             return write_string(file, instruction->operand) &&
                    write_string(file, instruction->call_file) &&
@@ -800,6 +803,8 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
             instruction->number_operand = (int32_t)value;
             return 1;
         case ZOP_PUSH_TEXT:
+        case ZOP_BROWSER_JS:
+        case ZOP_BROWSER_CSS:
         case ZOP_PUSH_FUNCTION:
         case ZOP_STORE_LOCAL_FUNCTION:
         case ZOP_LOAD_NAME:
@@ -832,6 +837,7 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
             return read_string(file, &instruction->operand) &&
                    read_u32(file, &instruction->argument_count);
         case ZOP_CALL_QUALIFIED:
+        case ZOP_BROWSER_BIND:
         case ZOP_CALL_QUALIFIED_VALUE:
             return read_string(file, &instruction->operand) &&
                    read_string(file, &instruction->call_file) &&
@@ -1101,7 +1107,7 @@ static int read_window(FILE *file, ZSharpWindow *window) {
         if (element == NULL || !read_u8(file, &visibility) ||
             visibility > 1 || !read_u8(file, &type) ||
             type < (uint8_t)ZUI_DESIGN ||
-            type > (uint8_t)ZUI_DROPDOWN ||
+            type > (uint8_t)ZUI_CONTAINER ||
             !read_string(file, &element->variant) ||
             !read_string(file, &element->name) ||
             !read_u32(file, &property_count) ||

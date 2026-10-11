@@ -221,6 +221,12 @@ static ZSharpUIPropertyType expected_property_type(
             return ZUI_PROPERTY_TEXT;
         if (strcmp(name, "scalable") == 0) return ZUI_PROPERTY_STATUS;
         if (strcmp(name, "background") == 0) return ZUI_PROPERTY_COLOR;
+    } else if (element == ZUI_CONTAINER) {
+        if (strcmp(name, "background") == 0) return ZUI_PROPERTY_COLOR;
+        if (strcmp(name, "visible") == 0) return ZUI_PROPERTY_STATUS;
+        if (strcmp(name, "scrollTop") == 0 || strcmp(name, "scrollLeft") == 0)
+            return ZUI_PROPERTY_MEASUREMENT;
+        if (strcmp(name, "scrollTo") == 0) return ZUI_PROPERTY_IDENTIFIER;
     } else if (element == ZUI_TEXT) {
         if (strcmp(name, "content") == 0) return ZUI_PROPERTY_TEXT;
         if (strcmp(name, "color") == 0) return ZUI_PROPERTY_COLOR;
@@ -371,11 +377,11 @@ int zsharp_window_model_set(ZSharpProgram *program, const char *path,
             return 0;
         }
         if (paint.kind != ZSHARP_PAINT_SOLID &&
-            !(element->type == ZUI_DESIGN &&
+            !((element->type == ZUI_DESIGN || element->type == ZUI_CONTAINER) &&
               strcmp(property_name, "background") == 0)) {
             zsharp_paint_free(&paint);
             snprintf(error, error_size,
-                     "gradients are supported by design backgrounds");
+                     "gradients are supported by design and container backgrounds");
             free(copy);
             return 0;
         }

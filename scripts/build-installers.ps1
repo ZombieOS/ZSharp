@@ -17,6 +17,12 @@ param(
 
     [string] $TestGamePackage = "",
 
+    # Direct release preparation avoids duplicate website bundles on C:.
+    [string] $WebsiteRoot = "",
+    [string] $RuntimeRoot = "",
+    [string] $WorkRoot = "",
+    [string] $RuntimeArchivePath = "",
+
     [switch] $Beta
 )
 
@@ -34,6 +40,14 @@ $resourceRoot = Join-Path $projectRoot `
 $buildRoot = Join-Path $projectRoot "build\installers"
 $siteRoot = Join-Path $projectRoot "build\download-site"
 $latestRoot = Join-Path $projectRoot "build\zvm-latest"
+$directWebsite = -not [string]::IsNullOrWhiteSpace($WebsiteRoot)
+if ($directWebsite) { $siteRoot = [IO.Path]::GetFullPath($WebsiteRoot) }
+if ($RuntimeRoot) { $resourceRoot = (Resolve-Path -LiteralPath $RuntimeRoot).Path }
+if ($WorkRoot) {
+    $workDirectory = [IO.Path]::GetFullPath($WorkRoot)
+    $buildRoot = Join-Path $workDirectory "installers"
+    $latestRoot = Join-Path $workDirectory "zvm-latest"
+}
 $downloadsRoot = Join-Path `
     ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) `
     "Downloads"
@@ -43,19 +57,19 @@ if ([string]::IsNullOrWhiteSpace($PublishingRoot)) {
 } else {
     $outRoot = [IO.Path]::GetFullPath($PublishingRoot)
 }
-if (-not $siteRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase) -or
+if (-not $directWebsite -and (-not $siteRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase) -or
     -not $buildRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase) -or
-    -not $latestRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    -not $latestRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase))) {
     throw "Installer output paths escaped the Z# project"
 }
 
-if (Test-Path -LiteralPath $siteRoot) {
+if (-not $directWebsite -and (Test-Path -LiteralPath $siteRoot)) {
     Remove-Item -LiteralPath $siteRoot -Recurse -Force
 }
-if (Test-Path -LiteralPath $buildRoot) {
+if (-not $WorkRoot -and (Test-Path -LiteralPath $buildRoot)) {
     Remove-Item -LiteralPath $buildRoot -Recurse -Force
 }
-if (Test-Path -LiteralPath $latestRoot) {
+if (-not $WorkRoot -and (Test-Path -LiteralPath $latestRoot)) {
     Remove-Item -LiteralPath $latestRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Path $siteRoot, $buildRoot, $latestRoot, `
@@ -222,8 +236,10 @@ foreach ($target in $targets) {
         throw "The embedded $($target.Id) Python runtime checksum does not match"
     }
     Copy-Item -LiteralPath $pythonSource -Destination $archiveRuntimeDirectory
-    Copy-Item -LiteralPath $pythonSource, $pythonChecksumFile `
-        -Destination $siteInstallerDirectory -Force
+    if (-not $directWebsite) {
+        Copy-Item -LiteralPath $pythonSource, $pythonChecksumFile `
+            -Destination $siteInstallerDirectory -Force
+    }
     $platformMetadata.pythonPath =
         "runtimes/$($target.Id)/python-runtime.tar.gz"
     $platformMetadata.pythonSha256 = $pythonChecksum
@@ -258,15 +274,18 @@ foreach ($target in $targets) {
         $publicInstallerName += ".exe"
     }
     $publicInstaller = Join-Path $outRoot $publicInstallerName
-    Copy-Item -LiteralPath $installerPath -Destination $publicInstaller -Force
+    if ($directWebsite) { $publicInstaller = Join-Path $siteInstallerDirectory $target.Installer }
+    else { Copy-Item -LiteralPath $installerPath -Destination $publicInstaller -Force }
     $installerChecksum =
         (Get-FileHash -Algorithm SHA256 -LiteralPath $publicInstaller).Hash.ToLowerInvariant()
-    $installerChecksums.Add("$installerChecksum  $publicInstallerName")
+    $checksumName = if ($directWebsite) { "installers/$Version/$($target.Id)/$($target.Installer)" } else { $publicInstallerName }
+    $installerChecksums.Add("$installerChecksum  $checksumName")
     if ($target.Id.StartsWith("macos-")) {
         # Finder opens this bundle without a Terminal window. Keep the raw
         # executable too: the ZVM uses it for unattended updates.
         $appName = "zsharp-setup-$Version-$($target.Id).app.zip"
         $appArchive = Join-Path $outRoot $appName
+        if ($directWebsite) { $appArchive = Join-Path $siteInstallerDirectory $appName }
         $zip = [IO.Compression.ZipFile]::Open(
             $appArchive, [IO.Compression.ZipArchiveMode]::Create)
         try {
@@ -317,9 +336,10 @@ foreach ($target in $targets) {
                 [BitConverter]::ToUInt16($zipBytes, $entryOffset + 32)
         }
         [IO.File]::WriteAllBytes($appArchive, $zipBytes)
-        Copy-Item -LiteralPath $appArchive -Destination $siteInstallerDirectory
+        if (-not $directWebsite) { Copy-Item -LiteralPath $appArchive -Destination $siteInstallerDirectory }
         $appChecksum = (Get-FileHash -Algorithm SHA256 -LiteralPath $appArchive).Hash.ToLowerInvariant()
-        $installerChecksums.Add("$appChecksum  $appName")
+        $checksumName = if ($directWebsite) { "installers/$Version/$($target.Id)/$appName" } else { $appName }
+        $installerChecksums.Add("$appChecksum  $checksumName")
     }
 }
 
@@ -367,6 +387,10 @@ if ($null -ne $resolvedTestGame) {
 }
 $latestArchiveName = if ($Beta) { "ZVM-BETA.zip" } else { "ZVM-LATEST.zip" }
 $latestArchive = Join-Path $archiveDirectory $latestArchiveName
+if ($RuntimeArchivePath) {
+    $latestArchive = [IO.Path]::GetFullPath($RuntimeArchivePath)
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $latestArchive) | Out-Null
+}
 Push-Location $latestRoot
 Compress-Archive -Path "runtimes" -DestinationPath $latestArchive `
     -CompressionLevel NoCompression
@@ -393,11 +417,11 @@ $manifest = [ordered]@{
 }
 $updateManifest = ($manifest | ConvertTo-Json -Depth 5) +
     [Environment]::NewLine
-[System.IO.File]::WriteAllText(
+if (-not $directWebsite) { [System.IO.File]::WriteAllText(
     (Join-Path $outRoot "zsharp-update-$Version.js"),
     $updateManifest,
     $utf8NoBom
-)
+) }
 [System.IO.File]::WriteAllText(
     (Join-Path $siteRoot $(if ($Beta) { "beta.js" } else { "update.js" })),
     $updateManifest,
@@ -416,12 +440,16 @@ $exampleResponse = $manifest | ConvertTo-Json -Depth 5
 )
 
 $siteArchive = Join-Path $outRoot "zsharp-download-site-$Version.zip"
-if (Test-Path -LiteralPath $siteArchive) {
+if (-not $directWebsite -and (Test-Path -LiteralPath $siteArchive)) {
     Remove-Item -LiteralPath $siteArchive -Force
 }
-Compress-Archive -Path (Join-Path $siteRoot "*") `
-    -DestinationPath $siteArchive -CompressionLevel Optimal
+if (-not $directWebsite) {
+    Compress-Archive -Path (Join-Path $siteRoot "*") `
+        -DestinationPath $siteArchive -CompressionLevel Optimal
+}
 
-Write-Host "Website upload bundle: $siteArchive"
+if ($directWebsite) { Write-Host "Website files: $siteRoot" }
+else { Write-Host "Website upload bundle: $siteArchive" }
+Write-Host "Runtime archive: $latestArchive"
 Write-Host "Installer checksums: $(Join-Path $outRoot "zsharp-installer-$Version-SHA256SUMS.txt")"
 Write-Host "Publishing folder: $outRoot"

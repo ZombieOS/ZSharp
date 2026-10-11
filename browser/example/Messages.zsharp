@@ -1,0 +1,15 @@
+zsharp = type.script
+
+noticed room Messages[] (
+ import ZSharp.Browser():
+ noticed brain Greet[] (
+  text Name = Browser.Name.value:
+  if[Name == ""] (
+   Browser.Greeting.content.set: "Please enter your name.":
+  ) else (
+   Browser.Greeting.content.set: "Hello, " + Name + "! From Messages.zsharp.":
+   wait(1s):
+   Browser.Greeting.content.set: "Still here, " + Name + "—after a cross-file wait.":
+  )
+ )
+)

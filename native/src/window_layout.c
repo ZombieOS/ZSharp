@@ -13,8 +13,13 @@ static ZSS_THREAD_LOCAL double viewport_width, viewport_height;
 static const char *value(const ZSharpUIElement *element, const char *name) {
     size_t i;
     const char *result = NULL;
+    if (strcmp(name, "left") == 0 || strcmp(name, "right") == 0) {
+        const char *edge = value(element, strcmp(name, "left") == 0 ? "cssLeft" : "cssRight");
+        if (edge) return edge;
+    }
     for (i = 0; i < element->property_count; i++) {
         const char *field = element->properties[i].name;
+        if (element->properties[i].type == ZUI_PROPERTY_CALLBACK) continue;
         if (strcmp(field,name) == 0) result = element->properties[i].text_value;
         else if (strncmp(field,"media/",6) == 0) {
             double min_w,max_w,min_h,max_h;
@@ -45,7 +50,14 @@ double zsharp_css_length(const char *text, double reference, double width,
 }
 static double length(const ZSharpUIElement *element, const char *name,
                       double reference, double w, double h, double scale, double fallback) {
-    return zsharp_css_length(value(element, name), reference, w, h, scale, fallback);
+    size_t i;
+    const char *text = value(element, name);
+    for (i = 0; i < element->property_count; i++) if (
+        strcmp(element->properties[i].name, name) == 0 &&
+        element->properties[i].unit == ZUI_UNIT_ZU && text)
+        return strtod(text, NULL) * 4 * scale;
+    return zsharp_css_length(text, reference, viewport_width * scale,
+        viewport_height * scale, scale, fallback);
 }
 static double clamp(double number, double low, double high) {
     if (high < low) high = low;
@@ -63,7 +75,7 @@ static void margins(const ZSharpUIElement *element, double w, double h,
     output[3] = length(element, "marginLeft", w, w, h, scale, 0);
 }
 
-int zsharp_window_layout(const ZSharpWindow *window, double w, double h,
+static int flat_layout(const ZSharpWindow *window, double w, double h,
                          double scale, ZSharpLayoutRect *rects) {
     const ZSharpUIElement *design = NULL;
     size_t i, count = 0, *items;
@@ -71,13 +83,15 @@ int zsharp_window_layout(const ZSharpWindow *window, double w, double h,
     int grid, column, reverse, wrap;
     const char *display, *direction;
     if (window == NULL || rects == NULL) return 0;
-    viewport_width = w / scale; viewport_height = h / scale;
     for (i = 0; i < window->element_count; i++) {
         const ZSharpUIElement *element = &window->elements[i];
         ZSharpLayoutRect *r = &rects[i];
         double m[4];
         if (element->type == ZUI_DESIGN) { design = element; continue; }
         r->hidden = equal(value(element, "display"), "none");
+        { size_t p; for (p = 0; p < element->property_count; p++)
+            if (strcmp(element->properties[p].name, "visible") == 0 &&
+                !element->properties[p].status_value) r->hidden = 1; }
         r->width = length(element, "cssWidth", w, w, h, scale, r->width);
         r->height = length(element, "cssHeight", h, w, h, scale, r->height);
         r->width = clamp(r->width, length(element, "minWidth", w,w,h,scale,0),
@@ -207,4 +221,86 @@ int zsharp_window_layout(const ZSharpWindow *window, double w, double h,
         }
     }
     free(items); return 1;
+}
+
+size_t zsharp_window_parent(const ZSharpUIElement *element) {
+    const char *parent = value(element, "__parent");
+    char *end;
+    unsigned long long number;
+    if (!parent) return 0;
+    number = strtoull(parent, &end, 10);
+    return *end || number > (size_t)-1 ? (size_t)-1 : (size_t)number;
+}
+
+int zsharp_window_layout(const ZSharpWindow *window, double w, double h,
+                         double scale, ZSharpLayoutRect *rects) {
+    size_t n, i, scope, *offsets = NULL, *children = NULL, *cursor = NULL;
+    ZSharpUIElement *elements = NULL;
+    ZSharpLayoutRect *local = NULL;
+    const ZSharpUIElement *design = NULL;
+    int ok = 0, nested = 0;
+    if (!window || !rects || scale <= 0 || !isfinite(scale)) return 0;
+    n = window->element_count;
+    viewport_width = w / scale; viewport_height = h / scale;
+    for (i = 0; i < n; i++) {
+        if (window->elements[i].type == ZUI_DESIGN) design = &window->elements[i];
+        if (window->elements[i].type == ZUI_CONTAINER || zsharp_window_parent(&window->elements[i])) nested = 1;
+    }
+    if (!nested) return flat_layout(window, w, h, scale, rects);
+    offsets = calloc(n + 2, sizeof(*offsets)); cursor = calloc(n + 1, sizeof(*cursor));
+    children = malloc((n ? n : 1) * sizeof(*children));
+    elements = calloc(n + 1, sizeof(*elements)); local = calloc(n + 1, sizeof(*local));
+    if (!offsets || !cursor || !children || !elements || !local) goto done;
+    for (i = 0; i < n; i++) {
+        size_t p = zsharp_window_parent(&window->elements[i]);
+        if (p > i || (p && window->elements[p - 1].type != ZUI_CONTAINER)) goto done;
+        if (window->elements[i].type != ZUI_DESIGN) offsets[p + 1]++;
+    }
+    for (i = 1; i < n + 2; i++) offsets[i] += offsets[i - 1];
+    memcpy(cursor, offsets, (n + 1) * sizeof(*cursor));
+    for (i = 0; i < n; i++) if (window->elements[i].type != ZUI_DESIGN)
+        children[cursor[zsharp_window_parent(&window->elements[i])]++] = i;
+    for (scope = 0; scope <= n; scope++) {
+        size_t first = offsets[scope], count = offsets[scope + 1] - first, j;
+        const ZSharpUIElement *parent = scope ? &window->elements[scope - 1] : design;
+        double sw = scope ? rects[scope - 1].width : w;
+        double sh = scope ? rects[scope - 1].height : h;
+        double ox = scope ? rects[scope - 1].x : 0, oy = scope ? rects[scope - 1].y : 0;
+        double right = sw, bottom = sh, scroll_x = 0, scroll_y = 0;
+        ZSharpWindow view = {0};
+        if (!parent || (scope && parent->type != ZUI_CONTAINER)) continue;
+        elements[0] = *parent; elements[0].type = ZUI_DESIGN;
+        memset(&local[0], 0, sizeof(local[0]));
+        for (j = 0; j < count; j++) {
+            size_t idx = children[first + j];
+            elements[j + 1] = window->elements[idx]; local[j + 1] = rects[idx];
+            if (scope) {
+                local[j + 1].x = length(&elements[j + 1], "locationX", sw, w, h, scale, 0);
+                local[j + 1].y = length(&elements[j + 1], "locationY", sh, w, h, scale, 0);
+            }
+        }
+        view.elements = elements; view.element_count = count + 1;
+        if (!flat_layout(&view, sw, sh, scale, local)) goto done;
+        for (j = 0; j < count; j++) if (!local[j + 1].hidden) {
+            right = fmax(right, local[j + 1].x + local[j + 1].width);
+            bottom = fmax(bottom, local[j + 1].y + local[j + 1].height);
+        }
+        if (scope) {
+            ZSharpLayoutRect *r = &rects[scope - 1];
+            scroll_x = clamp(numeric(parent, "scrollLeft", 0) * scale, 0, fmax(0, right - sw));
+            scroll_y = clamp(numeric(parent, "scrollTop", 0) * scale, 0, fmax(0, bottom - sh));
+            if (equal(value(parent, "scrollTo"), "bottom")) scroll_y = fmax(0, bottom - sh);
+            r->content_width = right; r->content_height = bottom;
+            r->scroll_x = scroll_x; r->scroll_y = scroll_y;
+        }
+        for (j = 0; j < count; j++) {
+            size_t idx = children[first + j];
+            rects[idx] = local[j + 1]; rects[idx].x += ox - scroll_x; rects[idx].y += oy - scroll_y;
+            if (scope && rects[scope - 1].hidden) rects[idx].hidden = 1;
+        }
+    }
+    ok = 1;
+done:
+    free(offsets); free(cursor); free(children); free(elements); free(local);
+    return ok;
 }

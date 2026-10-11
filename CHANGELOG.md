@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.2.2.0 - 2026-10-10
+
+- Added the experimental first bZVM prototype, executing Z# bytecode in
+  WebAssembly through a reusable JavaScript loader. Visitors do not need the
+  desktop ZVM installed.
+- Added browser DOM text, inner HTML, input-value and style access, click
+  callbacks and inline handlers, plus embedded JavaScript and CSS blocks.
+- Added browser project settings discovery and explicit multi-file imports,
+  typed function arguments and returns, callback parameters, persistent room
+  variables, visibility checks, arrays, Math, Regex and decimal arithmetic.
+- Added non-blocking browser waits with preserved locals and nested call stacks,
+  independent click tasks, page-exit cancellation and execution safety limits.
+  bZVM remains a limited prototype, not full desktop ZVM compatibility;
+  native apps/games, language integrations, object/class execution, JSON loading
+  and file operations are not included in this browser release.
+- Added triple-quoted multiline text literals (`'''...'''`) to Z#.
+- Added native UI containers with nested layout, flex/grid support, clipping,
+  scrolling and runtime container properties, including gradient backgrounds.
+- Added Windows text-input `Submit[...]` callbacks: Enter submits and
+  Shift+Enter inserts a newline in multiline inputs. Existing input behavior
+  remains unchanged when no submit callback is declared. Linux/macOS input
+  submission is not implemented yet.
+- Improved Windows native control styling with rounded text inputs and
+  dropdowns, styled dropdown options, and rounded text backgrounds.
+- Fixed responsive native window layout and control sizing during resizing,
+  including automatic dimensions and container-relative placement.
+- Fixed transparent native text backgrounds to respect their containing
+  background rather than always using the window background.
+- Fixed ZSS layout `left`/`right` properties conflicting with click callbacks.
+
 ## 1.2.1.0 - 2026-10-07
 
 - Added root `.zignore` package exclusions with ordered Git-style glob rules,

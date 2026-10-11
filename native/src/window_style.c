@@ -319,7 +319,8 @@ static int apply_declaration(ZSharpUIElement *element, const char *pseudo,
         if (strncmp(field, "margin-", 7) == 0 && strcmp(field, "margin-left") != 0 &&
             strcmp(field, "margin-right") != 0 && strcmp(field, "margin-top") != 0 &&
             strcmp(field, "margin-bottom") != 0) return 0;
-        if (!css_length(value, strncmp(field, "margin", 6) == 0 ||
+        if (!(strcmp(field,"flex-basis") == 0 && strcmp(value,"auto") == 0) &&
+            !css_length(value, strncmp(field, "margin", 6) == 0 ||
             strcmp(field, "left") == 0 || strcmp(field, "right") == 0 ||
             strcmp(field, "top") == 0 || strcmp(field, "bottom") == 0)) return 0;
         while (*p && n + 1 < sizeof(name)) {
@@ -328,6 +329,9 @@ static int apply_declaration(ZSharpUIElement *element, const char *pseudo,
             p++;
         }
         name[n] = '\0';
+        /* Keep layout edges separate from the left/right click callbacks. */
+        if (strcmp(field, "left") == 0) strcpy(name, "cssLeft");
+        else if (strcmp(field, "right") == 0) strcpy(name, "cssRight");
         return set_text_property(element, name, ZUI_PROPERTY_MEASUREMENT, value,
                                   ZUI_UNIT_NONE, apply, error, error_size);
     }
@@ -359,9 +363,17 @@ static int apply_declaration(ZSharpUIElement *element, const char *pseudo,
         if ((strcmp(value, "flex") == 0 || strcmp(value, "grid") == 0 ||
             strcmp(field, "grid-template-columns") == 0 || strcmp(field, "flex-direction") == 0 ||
             strcmp(field, "flex-wrap") == 0 || strcmp(field, "justify-content") == 0 ||
-            strcmp(field, "align-items") == 0) && element->type != ZUI_DESIGN) return 0;
+            strcmp(field, "align-items") == 0) && element->type != ZUI_DESIGN && element->type != ZUI_CONTAINER) return 0;
         return set_text_property(element, name, ZUI_PROPERTY_IDENTIFIER, value,
                                   ZUI_UNIT_NONE, apply, error, error_size);
+    }
+    if (strcmp(field, "overflow") == 0 || strcmp(field, "overflow-x") == 0 ||
+        strcmp(field, "overflow-y") == 0) {
+        if (element->type != ZUI_CONTAINER || (pseudo && *pseudo) ||
+            (strcmp(value,"hidden") && strcmp(value,"auto") && strcmp(value,"scroll"))) return 0;
+        strcpy(name, strcmp(field,"overflow-x") == 0 ? "overflowX" :
+            strcmp(field,"overflow-y") == 0 ? "overflowY" : "overflow");
+        return set_text_property(element,name,ZUI_PROPERTY_IDENTIFIER,value,ZUI_UNIT_NONE,apply,error,error_size);
     }
     if (strcmp(field, "flex-grow") == 0 || strcmp(field, "flex-shrink") == 0 || strcmp(field, "order") == 0) {
         char *end; double number = strtod(value, &end);
@@ -386,7 +398,7 @@ static int apply_declaration(ZSharpUIElement *element, const char *pseudo,
         if (!valid_color(value) &&
             strncmp(value, "linear-gradient(", 16) != 0 &&
             strncmp(value, "radial-gradient(", 16) != 0) return 0;
-        base = element->type == ZUI_DESIGN ? "background" :
+        base = element->type == ZUI_DESIGN || element->type == ZUI_CONTAINER ? "background" :
                element->type == ZUI_BUTTON ? "buttonColor" :
                                               "backgroundColor";
         prefixed_name(name, sizeof(name), pseudo, base);
@@ -395,7 +407,7 @@ static int apply_declaration(ZSharpUIElement *element, const char *pseudo,
     }
     if (strcmp(field, "background-color") == 0) {
         if (!valid_color(value)) return 0;
-        base = element->type == ZUI_DESIGN ? "background" :
+        base = element->type == ZUI_DESIGN || element->type == ZUI_CONTAINER ? "background" :
                element->type == ZUI_BUTTON ? "buttonColor" :
                                               "backgroundColor";
         prefixed_name(name, sizeof(name), pseudo, base);
@@ -437,11 +449,11 @@ static int apply_declaration(ZSharpUIElement *element, const char *pseudo,
     }
     if (strcmp(field, "width") == 0 || strcmp(field, "height") == 0) {
         if (pseudo != NULL && pseudo[0] != '\0') return 0;
-        if (!css_length(value, 0)) return 0;
+        if (strcmp(value,"auto") && !css_length(value, 0)) return 0;
         snprintf(name, sizeof(name), "css%c%s", (char)toupper(field[0]), field + 1);
         if (!set_text_property(element, name, ZUI_PROPERTY_MEASUREMENT, value,
                 ZUI_UNIT_NONE, apply, error, error_size)) return 0;
-        if (strchr(value, '%') != NULL || strstr(value, "vw") != NULL || strstr(value, "vh") != NULL) return 1;
+        if (strcmp(value,"auto") == 0 || strchr(value, '%') != NULL || strstr(value, "vw") != NULL || strstr(value, "vh") != NULL) return 1;
         return set_measurement(element, field, value, apply, error,
                                error_size);
     }

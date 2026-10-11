@@ -1,5 +1,14 @@
 # Z# syntax guide
 
+## Development preview: input submission (1.2.2.0)
+
+Native text inputs may declare `Submit[Chat:Chat:Send]:`, using the same callback
+path rules as button clicks. On the Windows development backend, Enter invokes
+this callback without inserting a newline; Shift+Enter inserts a newline when
+`multiline: alive:` is enabled. Without Submit, existing Enter behavior is
+unchanged. Holding Enter does not repeatedly submit. Linux/macOS submission
+handling is not implemented yet.
+
 `ZSHARP_C_FUNCTION_DURATION_OPTION` (kind 4) is a C-extension function option
 accepting exactly one nonnegative duration literal, such as `Demo.Cooldown(5s):`
 or `Demo.Cooldown(5ms):`. Like text options, it appears before executable
@@ -3341,3 +3350,131 @@ it repeatedly.
 Registered blocks pass alternating field-name text and evaluated values to
 the C handler. `true` and `false` work inside these blocks as status values;
 normal Z# code still uses `alive` and `dead`.
+
+## Browser prototype (1.2.2.0, development)
+
+The local bZVM prototype executes Z# bytecode in WebAssembly. HTML selects one
+entry `.zsharp` script, whose explicitly imported project files are loaded before
+startup. The loader automatically finds `project.zsettings` in the HTML document's
+directory or nearest parent directory, up to the server root (32 levels maximum).
+That settings file's directory is the project root; `data-project` is not needed.
+Its old explicit URL override remains supported for compatibility. If automatic
+discovery receives only HTTP 404 responses, standalone scripts without imports
+still work. Other HTTP errors or invalid settings stop startup.
+Settings are parsed inside WebAssembly by the same settings
+parser as the native ZVM, not by a separate JavaScript grammar. Use the normal
+`Project`, `PID`, `Version`, `Authors`, `Description`, `ZSharp`, and `Dependencies`
+fields. The prototype currently requires `Dependencies ():` and rejects native
+window/game configuration and unsupported newer runtime versions. Malformed or
+missing explicitly linked settings stop startup with a clear error. The
+`bzvm:ready` event's `detail.project` contains the project name, ID and root URL
+when settings are enabled.
+Load `bzvm.js` with `defer` and include a `type="text/zsharp"` script tag.
+Place `bzvm.wasm` beside the loader and serve the page over HTTP, not `file:`.
+
+```html
+<script src="bzvm/bzvm.js" defer></script>
+<script type="text/zsharp" src="Main.zsharp"></script>
+<input id="input">
+<button id="button">Greet</button>
+<div id="greeting"></div>
+```
+
+```zsharp
+zsharp = type.script
+noticed room Main[] (
+ import ZSharp.Browser():
+ noticed brain Start[] (
+  Browser.button.clicked: (
+   text Name = Browser.input.value:
+   if[Name != ""] (
+    Browser.greeting.content.set: "Hello, " + Name + "! Count: " + 10:
+    wait(5s):
+    Browser.greeting.content.set: "Five seconds later, " + Name:
+   ) else (
+    Browser.greeting.content.set: "Enter your name first.":
+   )
+  ):
+ )
+)
+```
+
+`if`, `else if`, `else` and text concatenation work in this subset. Joining text
+with numbers/status values converts those fields to text. `.value` reads an
+input's text; `.content` maps to `textContent`; `.html` maps to `innerHTML` and
+preserves the outer element. Paths require a unique HTML ID that is also a Z#
+identifier: use `bar_title`, not `bar-title`. Input `.contents` and `.length`
+are not implemented. `.style.PROPERTY.set:` accepts CSS strings.
+
+Click handlers may be inline blocks ending in `):`, or use
+`Browser.button.clicked: Function.call(Main:Main:Greet):`. Registration does not
+execute the body. Each click starts an independent task. Inline handlers have
+fresh local variables, not captured locals from the registering function.
+
+`wait(5s):`, `wait(16ms):` and `wait(0ms):` yield to browser timers and resume
+the same task, preserving its locals and nested call stack. Other clicks remain
+responsive. Wait durations are literal nonnegative values, limited to 2147483647
+milliseconds; fractional milliseconds round up in the loader. Browser throttling
+can delay timers, especially in background tabs. Loops should include a wait;
+each uninterrupted task slice has a 100000-instruction safety limit. Leaving
+the page cancels pending tasks.
+
+The browser runtime supports typed function parameters, `feed` return values
+(including calls suspended by waits), function-reference parameters, persistent
+room variables, visibility checks, indexed text/number arrays, `Math` and
+`Regex`. Arithmetic uses the desktop VM's decimal routines. Explicit project
+imports and cross-file calls are supported as described below.
+
+This is not yet full desktop language parity: object/class instance execution,
+JSON loading, file operations, and additional browser events still need browser
+runtime implementations. Native apps/games and foreign-language integrations
+are outside the browser target. Unsupported instructions report an error rather
+than silently executing with different semantics.
+
+### Browser project imports and cross-file calls
+
+Use the settings PID and explicit project-relative paths. Given PID `my_site`,
+`import my_site.Scripts.Messages():` loads `Scripts/Messages.zsharp` from the
+project root. URL/file capitalization must match the actual files. The browser
+does not recursively search directories or support wildcard imports yet.
+
+```zsharp
+// Main.zsharp
+zsharp = type.script
+noticed room Main[] (
+ import ZSharp.Browser():
+ import my_site.Scripts.Messages():
+ noticed brain Start[] (
+  Function.call(Messages:Messages:Show):
+  Browser.button.clicked: Function.call(Messages:Messages:Show):
+ )
+)
+```
+
+```zsharp
+// Scripts/Messages.zsharp
+zsharp = type.script
+noticed room Messages[] (
+ import ZSharp.Browser():
+ noticed brain Show[] (
+  Browser.greeting.content.set: "Hello from another file":
+  wait(1s):
+  Browser.greeting.content.set: "The same task resumed":
+ )
+)
+```
+
+The call target uses `File:Room:Brain`; a same-project PID prefix is also accepted
+by normal `Function.call`. The calling room must import a foreign file, and the
+target room/brain must be `noticed`. Script filenames must be unique across the
+loaded project. Each file is loaded once; circular imports are supported.
+Only the HTML entry script's automatic `Start[]` brains run, not imported files'
+startup brains. Calls and click targets can cross files and preserve waits.
+The first subset supports zero-argument, void brains only (no arguments or return
+values yet), at most 64 files and 8 MiB total source. Missing/duplicate files,
+missing imports, hidden targets and external project dependencies produce errors.
+
+Raw multiline strings use `'''...'''`. Embedded browser-only blocks support
+`JavaScript[( ... )]:` and `CSS[ClassName, ( ... )]:`. CSS bodies contain
+declarations applied to `.ClassName`; they do not create elements. Embedded
+JavaScript executes with normal page privileges and may require CSP permission.

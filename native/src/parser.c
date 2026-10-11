@@ -163,6 +163,11 @@ static int next_token_is_word(const Parser *parser, const char *word) {
 }
 
 static char *decode_text(Parser *parser, const ZSharpToken *token) {
+    if (token->length >= 6 && token->start[0] == '\'') {
+        char *raw = zsharp_copy_text(token->start + 3, token->length - 6);
+        if (!raw) fail_at(parser, token, "out of memory");
+        return raw;
+    }
     const char *input = token->start + 1;
     const char *end = token->start + token->length - 1;
     char *result = (char *)malloc(token->length);
@@ -1169,6 +1174,7 @@ static int parse_delay_statement(Parser *parser, ZSharpFunction *function) {
     return 1;
 }
 
+static int parse_statement_block(Parser *parser, ZSharpFunction *function);
 static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
     ZSharpToken first_token = parser->current;
     char *parts[5] = {0};
@@ -1208,6 +1214,63 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
     }
     if (parser->failed) goto failed;
 
+    if (part_count == 3 && strcmp(parts[0], "Browser") == 0 &&
+        strcmp(parts[2], "clicked") == 0 && !is_ui_setter) {
+        if (!consume_type(parser, ZTOKEN_COLON, "':' after Browser.ID.clicked")) goto failed;
+        if (parser->current.type == ZTOKEN_LEFT_PAREN) {
+            size_t bind_index = function->instruction_count, jump_index;
+            char entry[64];
+            size_t saved_loop_depth = parser->loop_depth, saved_outcome_depth = parser->named_outcome_depth;
+            LoopContext saved_loops[64];
+            if (!parser->member_room) { fail_at(parser, &first_token, "inline browser handlers require a room"); goto failed; }
+            instruction = emit(parser, function, ZOP_BROWSER_BIND);
+            if (!instruction) goto failed;
+            instruction->operand = zsharp_copy_text(parts[1], strlen(parts[1]));
+            instruction->call_file = zsharp_copy_text(parser->source_name, strlen(parser->source_name));
+            instruction->call_room = zsharp_copy_text(parser->member_room->name, strlen(parser->member_room->name));
+            instruction->call_function = zsharp_copy_text(function->name, strlen(function->name));
+            jump_index = function->instruction_count;
+            if (!emit(parser, function, ZOP_JUMP)) goto failed;
+            snprintf(entry, sizeof(entry), "%zu", function->instruction_count);
+            function->instructions[bind_index].call_outcome = zsharp_copy_text(entry, strlen(entry));
+            /* A handler has its own control-flow scope, not the registering loop's. */
+            memcpy(saved_loops, parser->loops, sizeof(saved_loops));
+            parser->loop_depth = 0; parser->named_outcome_depth = 0;
+            if (!parse_statement_block(parser, function)) goto failed;
+            memcpy(parser->loops, saved_loops, sizeof(saved_loops));
+            parser->loop_depth = saved_loop_depth; parser->named_outcome_depth = saved_outcome_depth;
+            if (!consume_type(parser, ZTOKEN_COLON, "':' after the inline click handler") ||
+                !emit(parser, function, ZOP_RETURN_VOID)) goto failed;
+            function->instructions[jump_index].index_operand = (uint32_t)function->instruction_count;
+            for (index = 0; index < part_count; index++) free(parts[index]);
+            return 1;
+        }
+        if (!consume_word(parser, "Function") || !parse_qualified_call(parser, function, 0)) goto failed;
+        instruction = &function->instructions[function->instruction_count - 1];
+        if (instruction->argument_count) {
+            fail_at(parser, &first_token, "prototype click handlers require a zero-argument target"); goto failed;
+        }
+        instruction->op = ZOP_BROWSER_BIND;
+        free(instruction->operand);
+        instruction->operand = zsharp_copy_text(parts[1], strlen(parts[1]));
+        for (index = 0; index < part_count; index++) free(parts[index]);
+        return instruction->operand != NULL;
+    }
+    if (is_ui_setter && part_count >= 3 && strcmp(parts[0], "Browser") == 0) {
+        if (!consume_type(parser, ZTOKEN_COLON, "':' before the Browser value")) goto failed;
+        if (parser->current.type == ZTOKEN_COLOR) {
+            instruction = emit(parser, function, ZOP_PUSH_TEXT);
+            if (!instruction) goto failed;
+            instruction->operand = copy_token(parser, &parser->current);
+            advance_token(parser);
+        } else if (!parse_expression(parser, function)) goto failed;
+        if (!consume_type(parser, ZTOKEN_COLON, "':' after the Browser value")) goto failed;
+        instruction = emit(parser, function, ZOP_UI_SET_VALUE);
+        if (!instruction) goto failed;
+        instruction->operand = join_path_parts(parser, parts, part_count);
+        for (index = 0; index < part_count; index++) free(parts[index]);
+        return instruction->operand != NULL;
+    }
     if (part_count == 3 && strcmp(parts[1], "toPoint") == 0 &&
         (strcmp(parts[2], "glide") == 0 ||
          strcmp(parts[2], "teleport") == 0) &&
@@ -2150,7 +2213,68 @@ static int parse_function_local(Parser *parser, ZSharpFunction *function) {
     return 1;
 }
 
+static int parse_browser_block(Parser *parser, ZSharpFunction *function) {
+    int javascript = zsharp_token_equals(&parser->current, "JavaScript");
+    const char *p = parser->lexer.current, *body, *end, *class_start = NULL;
+    size_t class_length = 0;
+    char quote = 0; int line_comment = 0, block_comment = 0;
+    ZSharpInstruction *instruction;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p++ != '[') goto invalid;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (!javascript) {
+        class_start = p;
+        if (!(isalpha((unsigned char)*p) || *p == '_')) goto invalid;
+        while (isalnum((unsigned char)*p) || *p == '_' || *p == '-') p++;
+        class_length = (size_t)(p - class_start);
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p++ != ',') goto invalid;
+        while (*p && isspace((unsigned char)*p)) p++;
+    }
+    if (*p++ != '(') goto invalid;
+    body = p;
+    for (; *p; p++) {
+        if (line_comment) { if (*p == '\n') line_comment = 0; continue; }
+        if (block_comment) { if (*p == '*' && p[1] == '/') { block_comment = 0; p++; } continue; }
+        if (quote) { if (*p == '\\' && p[1]) p++; else if (*p == quote) quote = 0; continue; }
+        if (*p == '"' || *p == '\'' || (javascript && *p == '`')) { quote = *p; continue; }
+        if (*p == '/' && p[1] == '*') { block_comment = 1; p++; continue; }
+        if (javascript && *p == '/' && p[1] == '/') { line_comment = 1; p++; continue; }
+        if (*p == ')' && p[1] == ']' && p[2] == ':') break;
+    }
+    if (!*p) { fail_at(parser, &parser->current, "unterminated browser block; expected )]:"); return 0; }
+    end = p + 3;
+    instruction = emit(parser, function, javascript ? ZOP_BROWSER_JS : ZOP_BROWSER_CSS);
+    if (!instruction) return 0;
+    if (javascript) instruction->operand = zsharp_copy_text(body, (size_t)(p - body));
+    else {
+        size_t body_length = (size_t)(p - body);
+        instruction->operand = malloc(class_length + body_length + 7);
+        if (instruction->operand) {
+            char *out = instruction->operand;
+            *out++ = '.';
+            memcpy(out, class_start, class_length); out += class_length;
+            *out++ = ' '; *out++ = '{'; *out++ = '\n';
+            memcpy(out, body, body_length); out += body_length;
+            *out++ = '\n'; *out++ = '}'; *out = '\0';
+        }
+    }
+    if (!instruction->operand) { fail_at(parser, &parser->current, "out of memory"); return 0; }
+    for (p = parser->lexer.current; p < end; p++) {
+        if (*p == '\n') { parser->lexer.line++; parser->lexer.column = 1; }
+        else parser->lexer.column++;
+    }
+    parser->lexer.current = end; advance_token(parser); return 1;
+invalid:
+    fail_at(parser, &parser->current, javascript
+        ? "JavaScript blocks require [( followed by raw code and )]:"
+        : "CSS blocks require [ClassName, ( followed by CSS declarations and )]:"); return 0;
+}
+
 static int parse_statement(Parser *parser, ZSharpFunction *function) {
+    if (parser->current.type == ZTOKEN_IDENTIFIER &&
+        (zsharp_token_equals(&parser->current, "JavaScript") || zsharp_token_equals(&parser->current, "CSS")))
+        return parse_browser_block(parser, function);
     size_t syntax_index;
     for (syntax_index = 0; syntax_index < parser->syntax_rule_count;
          syntax_index++) {
@@ -3664,6 +3788,11 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
     if (element->type == ZUI_BUTTON && match_word(parser, "Click")) {
         return parse_click_field(parser, element);
     }
+    if (element->type == ZUI_TEXT_INPUT && match_word(parser, "Submit")) {
+        ZSharpUIProperty *submit = add_ui_property(parser, element, "submit", ZUI_PROPERTY_CALLBACK);
+        return submit != NULL && parse_callback_path(parser, submit) &&
+               consume_type(parser, ZTOKEN_COLON, "':' after the submit target");
+    }
     if (element->type == ZUI_DROPDOWN && match_word(parser, "Change")) {
         ZSharpUIProperty *change = add_ui_property(
             parser, element, "change", ZUI_PROPERTY_CALLBACK);
@@ -3696,6 +3825,14 @@ static int parse_ui_field(Parser *parser, ZSharpUIElement *element) {
         } else if (field_is_measurement(name)) {
             type = ZUI_PROPERTY_MEASUREMENT;
             valid = 1;
+        }
+    } else if (element->type == ZUI_CONTAINER) {
+        if (strcmp(name, "background") == 0) {
+            type = ZUI_PROPERTY_COLOR; valid = 1;
+        } else if (strcmp(name, "visible") == 0) {
+            type = ZUI_PROPERTY_STATUS; valid = 1;
+        } else if (field_is_measurement(name)) {
+            type = ZUI_PROPERTY_MEASUREMENT; valid = 1;
         }
     } else if (element->type == ZUI_TEXT) {
         if (strcmp(name, "content") == 0) {
@@ -3876,6 +4013,7 @@ static int finish_ui_element(Parser *parser, ZSharpUIElement *element) {
     if (element->type == ZUI_DESIGN) {
         return require_ui_field(parser, element, "title");
     }
+    if (element->type == ZUI_CONTAINER) return 1;
     if (element->type == ZUI_TEXT) {
         ZSharpUIProperty *alignment = find_ui_property(element, "textAlign");
         if (alignment != NULL &&
@@ -4016,9 +4154,12 @@ static int parse_ui_element(Parser *parser, ZSharpWindow *window) {
     ZSharpUIElement *element;
     char *variant = NULL;
     size_t index;
+    size_t element_index = window->element_count;
     if (!parse_visibility(parser, &is_public)) return 0;
     if (match_word(parser, "design")) {
         type = ZUI_DESIGN;
+    } else if (match_word(parser, "container")) {
+        type = ZUI_CONTAINER;
     } else if (match_word(parser, "text")) {
         type = ZUI_TEXT;
         if (match_type(parser, ZTOKEN_LEFT_BRACKET)) {
@@ -4058,7 +4199,7 @@ static int parse_ui_element(Parser *parser, ZSharpWindow *window) {
         type = ZUI_DROPDOWN;
     } else {
         fail_at(parser, &parser->current,
-                "expected design, text, button, image, textInput, or dropdown");
+                "expected design, container, text, button, image, textInput, or dropdown");
         return 0;
     }
     element = zsharp_window_add_element(window);
@@ -4093,7 +4234,25 @@ static int parse_ui_element(Parser *parser, ZSharpWindow *window) {
                       "'(' before the UI element body")) return 0;
     while (!parser->failed && parser->current.type != ZTOKEN_RIGHT_PAREN &&
            parser->current.type != ZTOKEN_EOF) {
-        if (!parse_ui_field(parser, element)) return 0;
+        if (type == ZUI_CONTAINER &&
+            (zsharp_token_equals(&parser->current, "noticed") ||
+             zsharp_token_equals(&parser->current, "silent"))) {
+            size_t child_index = window->element_count;
+            ZSharpUIProperty *parent;
+            char parent_number[32];
+            if (!parse_ui_element(parser, window)) return 0;
+            element = &window->elements[element_index];
+            if (window->elements[child_index].type == ZUI_DESIGN) {
+                fail_at(parser, &parser->current, "design must be declared directly inside Window");
+                return 0;
+            }
+            parent = add_ui_property(parser, &window->elements[child_index],
+                "__parent", ZUI_PROPERTY_MEASUREMENT);
+            if (!parent) return 0;
+            snprintf(parent_number, sizeof(parent_number), "%zu", element_index + 1);
+            parent->text_value = zsharp_copy_text(parent_number, strlen(parent_number));
+            if (!parent->text_value) { fail_at(parser, &parser->current, "out of memory"); return 0; }
+        } else if (!parse_ui_field(parser, element)) return 0;
     }
     return consume_type(parser, ZTOKEN_RIGHT_PAREN,
                         "')' after the UI element body") &&

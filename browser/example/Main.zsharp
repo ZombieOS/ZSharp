@@ -1,0 +1,30 @@
+zsharp = type.script
+
+noticed room Main[] (
+ import ZSharp.Browser():
+ import bzvm_test.Messages():
+ noticed brain Start[] (
+  Browser.Greet.clicked: Function.call(Messages:Messages:Greet):
+  Browser.Greeting.html.set: '''
+<h1>Hello from bZVM!</h1>
+<p>Z# is running inside WebAssembly.</p>
+''':
+  Browser.Greeting.style.color.set: #22bb33:
+  CSS[greeting, (
+   font-family: sans-serif;
+   background: #111814;
+   padding: 24px;
+  )]:
+  JavaScript[(
+   document.body.dataset.bzvm = "ready";
+  )]:
+ )
+ noticed brain Greet[] (
+  text Name = Browser.Name.value:
+  if[Name == ""] (
+   Browser.Greeting.content.set: "Please enter your name.":
+  ) else (
+   Browser.Greeting.content.set: "Hello, " + Name + "!":
+  )
+ )
+)

@@ -25,7 +25,9 @@
 #include <wincodec.h>
 
 typedef struct WindowControl {
+    struct WindowState *state;
     HWND handle;
+    WNDPROC native_proc;
     ZSharpUIElement *element;
     HBRUSH background;
     HFONT font;
@@ -44,6 +46,7 @@ typedef struct WindowControl {
     int placeholder_active;
     int filtering_input;
     int hovered;
+    int scroll_x, scroll_y, content_width, content_height;
     ZSharpStyleTween background_tween;
     ZSharpStyleTween text_tween;
 } WindowControl;
@@ -103,6 +106,8 @@ static const char *WINDOW_CLASS_NAME = "ZombieOS.ZSharp.Window.1";
 #define ZSHARP_WM_GET_PROPERTY (WM_APP + 38)
 
 static void layout_controls(WindowState *state);
+static LRESULT CALLBACK container_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
+static int panel_scroll_enabled(ZSharpUIElement *element, int horizontal);
 static int set_window_property(void *data, const char *path,
                                ZSharpWindowValueType value_type,
                                const char *text_value, ZSharpUIUnit unit,
@@ -891,6 +896,22 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
         case WM_DRAWITEM: {
             DRAWITEMSTRUCT *draw = (DRAWITEMSTRUCT *)lparam;
             WindowControl *control = find_control(state, draw->hwndItem);
+            if (control != NULL && control->element->type == ZUI_DROPDOWN) {
+                WCHAR text[512] = {0};
+                HGDIOBJ old = SelectObject(draw->hDC, control->font);
+                RECT area = draw->rcItem;
+                ZSharpUIProperty *options = find_property(control->element, "options");
+                WCHAR *label = NULL;
+                if (options && draw->itemID != (UINT)-1 && draw->itemID < options->item_count)
+                    label = utf8_to_wide(options->items[draw->itemID]);
+                else GetWindowTextW(control->handle, text, 512);
+                FillRect(draw->hDC, &area, control->background ? control->background : state->window_background);
+                SetBkMode(draw->hDC, TRANSPARENT);
+                SetTextColor(draw->hDC, control->has_text_color ? control->text_color : RGB(228,233,230));
+                area.left += 10; area.right -= 4;
+                DrawTextW(draw->hDC, label ? label : text, -1, &area, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                free(label); SelectObject(draw->hDC, old); return TRUE;
+            }
             if (control != NULL && control->element->type == ZUI_TEXT) {
                 WCHAR text[8192];
                 char relative[MAX_PATH];
@@ -912,6 +933,38 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
                 } else {
                     FillRect(draw->hDC, &draw->rcItem,
                              state->window_background);
+                }
+                /* Composite ancestor panels over the window backdrop, in
+                   parent-to-child order. Translate their full paint bounds so
+                   gradients stay aligned rather than restarting at each label. */
+                {
+                    HWND parent = GetParent(control->handle);
+                    size_t count = 0, i;
+                    HWND *parents;
+                    while (parent && parent != state->window) {
+                        count++; parent = GetParent(parent);
+                    }
+                    parents = count ? (HWND *)malloc(count * sizeof(*parents)) : NULL;
+                    parent = GetParent(control->handle);
+                    for (i = 0; parents && i < count; i++) {
+                        parents[i] = parent; parent = GetParent(parent);
+                    }
+                    while (parents && count) {
+                        WindowControl *panel = find_control(state, parents[--count]);
+                        ZSharpUIProperty *background = panel ? find_property(panel->element,"background") : NULL;
+                        ZSharpPaint paint = {0}; char paint_error[128];
+                        if (background && zsharp_paint_parse(background->text_value,&paint,paint_error,sizeof(paint_error))) {
+                            RECT bounds; POINT origin = {0,0};
+                            int saved = SaveDC(draw->hDC);
+                            GetClientRect(panel->handle,&bounds);
+                            MapWindowPoints(panel->handle,control->handle,&origin,1);
+                            OffsetViewportOrgEx(draw->hDC,origin.x,origin.y,NULL);
+                            paint_rectangle(draw->hDC,&bounds,&paint);
+                            RestoreDC(draw->hDC,saved);
+                            zsharp_paint_free(&paint);
+                        }
+                    }
+                    free(parents);
                 }
                 {
                     ZSharpUIProperty *background = find_property(control->element,"backgroundColor");
@@ -1403,6 +1456,13 @@ static void layout_controls(WindowState *state) {
         if (height_scale < responsive_scale) responsive_scale = height_scale;
     }
     if (responsive_scale < 0.05) responsive_scale = 0.05;
+    /* Managed layouts grow available space, not logical pixels or fonts. */
+    for (index = 0; index < window->element_count; index++) {
+        if (window->elements[index].type == ZUI_CONTAINER) {
+            responsive_scale = 1.0;
+            break;
+        }
+    }
     origin_x = (int)((client_width - state->layout_width * responsive_scale) /
                      2.0 + 0.5);
     origin_y = (int)((client_height - state->layout_height * responsive_scale) /
@@ -1495,16 +1555,45 @@ static void layout_controls(WindowState *state) {
         ZSharpUIProperty *opacity = find_property(control->element, "opacity");
         double alpha = opacity == NULL ? 1 : strtod(opacity->text_value, NULL);
         int width = (int)r->width, height = (int)r->height;
+        size_t parent = zsharp_window_parent(control->element);
+        int x = (int)r->x, y = (int)r->y;
+        if (parent) { x -= (int)rects[parent - 1].x; y -= (int)rects[parent - 1].y; }
+        else y -= state->scroll_y;
         ShowWindow(control->handle, r->hidden ? SW_HIDE : SW_SHOWNA);
-        if (!r->hidden && r->y + r->height > content_bottom) content_bottom = (int)(r->y + r->height);
+        if (!parent && !r->hidden && r->y + r->height > content_bottom) content_bottom = (int)(r->y + r->height);
         if (alpha < 1 || (GetWindowLongPtrA(control->handle, GWL_EXSTYLE) & WS_EX_LAYERED)) {
             SetWindowLongPtrA(control->handle, GWL_EXSTYLE,
                 GetWindowLongPtrA(control->handle, GWL_EXSTYLE) | WS_EX_LAYERED);
             SetLayeredWindowAttributes(control->handle, 0, (BYTE)(alpha * 255 + 0.5), LWA_ALPHA);
         }
-        MoveWindow(control->handle, (int)r->x, (int)r->y - state->scroll_y,
-                   width > 0 ? width : 1, height > 0 ? height : 1, TRUE);
+        MoveWindow(control->handle, x, y,
+                   width > 0 ? width : 1,
+                   control->element->type == ZUI_DROPDOWN
+                       ? (height > 0 ? height : 1) + 240
+                       : (height > 0 ? height : 1), TRUE);
+        if (control->element->type == ZUI_CONTAINER) {
+            int axis, radius = measurement_pixels(find_property(control->element,"borderRadius"),state->scale,0);
+            control->scroll_x = (int)r->scroll_x; control->scroll_y = (int)r->scroll_y;
+            control->content_width = (int)r->content_width; control->content_height = (int)r->content_height;
+            for (axis=0;axis<2;axis++) {
+                int enabled = panel_scroll_enabled(control->element,!axis);
+                SCROLLINFO info = {0}; info.cbSize=sizeof(info); info.fMask=SIF_RANGE | SIF_PAGE | SIF_POS;
+                info.nMax = (axis ? control->content_height : control->content_width)-1;
+                info.nPage = (UINT)(axis ? height : width);
+                info.nPos = axis ? control->scroll_y : control->scroll_x;
+                SetScrollInfo(control->handle,axis ? SB_VERT : SB_HORZ,&info,TRUE);
+                ShowScrollBar(control->handle,axis ? SB_VERT : SB_HORZ,enabled && info.nMax >= (int)info.nPage);
+            }
+            if (radius>0) SetWindowRgn(control->handle,CreateRoundRectRgn(0,0,width+1,height+1,radius*2,radius*2),TRUE);
+            else SetWindowRgn(control->handle,NULL,TRUE);
+        }
         update_multiline_scrollbar(control);
+        if (control->element->type == ZUI_DROPDOWN) {
+            int radius = measurement_pixels(find_property(control->element,"borderRadius"),state->scale,0);
+            SendMessageW(control->handle, CB_SETITEMHEIGHT, (WPARAM)-1, height > 6 ? height - 6 : 1);
+            SendMessageW(control->handle, CB_SETITEMHEIGHT, 0, height > 6 ? height - 6 : 1);
+            if (radius > 0) SetWindowRgn(control->handle, CreateRoundRectRgn(0,0,width+1,height+1,radius*2,radius*2),TRUE);
+        }
         reload_control_image(state, control, width, height);
     }
     free(rects);
@@ -1530,6 +1619,110 @@ static void layout_controls(WindowState *state) {
     scroll.nPos = state->scroll_y;
     SetScrollInfo(state->window, SB_VERT, &scroll, TRUE);
     if (initial_scroll != state->scroll_y) layout_controls(state);
+}
+
+static LRESULT CALLBACK dropdown_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    WindowControl *control = (WindowControl *)GetWindowLongPtrW(window, GWLP_USERDATA);
+    if (!control || !control->native_proc) return DefWindowProcW(window,message,wparam,lparam);
+    if (message == WM_PAINT) {
+        PAINTSTRUCT ps;
+        RECT area;
+        WCHAR text[512] = {0};
+        HDC dc = BeginPaint(window, &ps);
+        HGDIOBJ old;
+        HPEN pen;
+        HGDIOBJ old_pen;
+        GetClientRect(window, &area);
+        {
+            int radius = measurement_pixels(find_property(control->element,"borderRadius"),control->state->scale,0);
+            HGDIOBJ old_brush, old_outline;
+            FillRect(dc, &area, control->state->window_background);
+            old_brush = SelectObject(dc,control->background ? control->background : control->state->window_background);
+            old_outline = SelectObject(dc,GetStockObject(NULL_PEN));
+            RoundRect(dc,area.left,area.top,area.right,area.bottom,radius*2,radius*2);
+            SelectObject(dc,old_outline); SelectObject(dc,old_brush);
+        }
+        GetWindowTextW(window, text, 512);
+        old = SelectObject(dc, control->font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, control->has_text_color ? control->text_color : RGB(228,233,230));
+        area.left += 10; area.right -= 28;
+        DrawTextW(dc,text,-1,&area,DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        area.left = area.right + 8;
+        pen = CreatePen(PS_SOLID, 1, RGB(145,163,152));
+        old_pen = SelectObject(dc,pen);
+        MoveToEx(dc,area.left,area.bottom/2-2,NULL);
+        LineTo(dc,area.left+4,area.bottom/2+2);
+        LineTo(dc,area.left+8,area.bottom/2-2);
+        SelectObject(dc,old_pen); DeleteObject(pen);
+        SelectObject(dc,old); EndPaint(window,&ps); return 0;
+    }
+    if (message == WM_ERASEBKGND) return 1;
+    if (message == WM_NCPAINT) return 0;
+    return CallWindowProcW(control->native_proc,window,message,wparam,lparam);
+}
+
+static int panel_scroll_enabled(ZSharpUIElement *element, int horizontal) {
+    ZSharpUIProperty *p = find_property(element, horizontal ? "overflowX" : "overflowY");
+    if (!p) p = find_property(element,"overflow");
+    return p && (!strcmp(p->text_value,"auto") || !strcmp(p->text_value,"scroll"));
+}
+
+static LRESULT CALLBACK container_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    WindowControl *control = (WindowControl *)GetWindowLongPtrA(window,GWLP_USERDATA);
+    WindowState *state = control ? control->state : NULL;
+    if (!state) return DefWindowProcA(window,message,wparam,lparam);
+    switch (message) {
+        case WM_COMMAND: case WM_NOTIFY: case WM_DRAWITEM:
+        case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORBTN: case WM_CTLCOLORLISTBOX:
+            return SendMessageA(state->window,message,wparam,lparam);
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps; RECT bounds; ZSharpPaint paint = {0}; char error[128];
+            ZSharpUIProperty *background = find_property(control->element,"background");
+            HDC dc = BeginPaint(window,&ps); GetClientRect(window,&bounds);
+            if (background && zsharp_paint_parse(background->text_value,&paint,error,sizeof(error))) {
+                paint_rectangle(dc,&bounds,&paint); zsharp_paint_free(&paint);
+            } else FillRect(dc,&bounds,state->window_background);
+            { ZSharpUIProperty *border = find_property(control->element,"borderColor");
+              int width = measurement_pixels(find_property(control->element,"borderWidth"),state->scale,0);
+              if (border && width > 0) {
+                  HBRUSH brush = CreateSolidBrush(parse_color(border->text_value,RGB(0,0,0)));
+                  int b; for (b=0;b<width;b++) { FrameRect(dc,&bounds,brush); InflateRect(&bounds,-1,-1); }
+                  DeleteObject(brush);
+              } }
+            EndPaint(window,&ps); return 0;
+        }
+        case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL: case WM_VSCROLL: case WM_HSCROLL: {
+            int horizontal = message == WM_HSCROLL || message == WM_MOUSEHWHEEL;
+            int position = horizontal ? control->scroll_x : control->scroll_y;
+            SCROLLINFO info = {0}; char path[512], number[64], error[128];
+            if (!panel_scroll_enabled(control->element,horizontal))
+                return SendMessageA(GetParent(window),message,wparam,lparam);
+            info.cbSize=sizeof(info); info.fMask=SIF_ALL;
+            GetScrollInfo(window,horizontal ? SB_HORZ : SB_VERT,&info);
+            if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL)
+                position += (horizontal ? 1 : -1) * (int)((short)HIWORD(wparam)) * 48 / WHEEL_DELTA;
+            else switch (LOWORD(wparam)) {
+                case SB_TOP: position=0; break;
+                case SB_BOTTOM: position=info.nMax; break;
+                case SB_LINEUP: position-=24; break;
+                case SB_LINEDOWN: position+=24; break;
+                case SB_PAGEUP: position-=(int)info.nPage; break;
+                case SB_PAGEDOWN: position+=(int)info.nPage; break;
+                case SB_THUMBPOSITION: case SB_THUMBTRACK: position=info.nTrackPos; break;
+                default: return 0;
+            }
+            if (position<0) position=0;
+            snprintf(path,sizeof(path),"%s.scrollTo",control->element->name);
+            zsharp_window_model_set(state->program,path,ZWINDOW_VALUE_IDENTIFIER,"none",ZUI_UNIT_NONE,NULL,NULL,error,sizeof(error));
+            snprintf(path,sizeof(path),"%s.%s",control->element->name,horizontal ? "scrollLeft" : "scrollTop");
+            snprintf(number,sizeof(number),"%.6f",position/state->scale);
+            zsharp_window_model_set(state->program,path,ZWINDOW_VALUE_MEASUREMENT,number,ZUI_UNIT_PX,NULL,NULL,error,sizeof(error));
+            layout_controls(state); return 0;
+        }
+    }
+    return DefWindowProcA(window,message,wparam,lparam);
 }
 
 static int create_controls(WindowState *state, int client_width,
@@ -1564,7 +1757,10 @@ static int create_controls(WindowState *state, int client_width,
         int height;
         if (element->type == ZUI_DESIGN) continue;
         element_default_size(element, &default_width, &default_height);
-        if (element->type == ZUI_TEXT) {
+        if (element->type == ZUI_CONTAINER) {
+            class_name = "STATIC";
+            style |= WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+        } else if (element->type == ZUI_TEXT) {
             class_name = "STATIC";
             text_property = find_property(element, "content");
             color_property = find_property(element, "color");
@@ -1589,6 +1785,7 @@ static int create_controls(WindowState *state, int client_width,
             color_property = find_property(element, "textColor");
             style |= CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL |
                      WS_TABSTOP;
+            style |= CBS_OWNERDRAWFIXED;
         } else {
             ZSharpUIProperty *type = find_property(element, "type");
             ZSharpUIProperty *display = find_property(element, "display");
@@ -1642,19 +1839,42 @@ static int create_controls(WindowState *state, int client_width,
             height / 2;
         control = &state->controls[control_index];
         control->element = element;
-        control->handle = CreateWindowExA(
+        control->state = state;
+        { size_t parent = zsharp_window_parent(element);
+          HWND parent_handle = state->window;
+          if (parent) {
+              size_t p; for (p=0;p<control_index;p++) if (state->controls[p].element == &window->elements[parent-1])
+                  { parent_handle=state->controls[p].handle; break; }
+          }
+        { WCHAR *wide_class = utf8_to_wide(class_name);
+          WCHAR *wide_text = utf8_to_wide(display_text);
+          ZSharpUIProperty *border = find_property(element, "borderWidth");
+          int borderless = border && measurement_pixels(border, scale, 1) == 0;
+          if (borderless) style &= ~WS_BORDER;
+        control->handle = wide_class && wide_text ? CreateWindowExW(
             (element->type == ZUI_TEXT_INPUT ||
-             element->type == ZUI_DROPDOWN) ? WS_EX_CLIENTEDGE :
+             element->type == ZUI_DROPDOWN) && !borderless ? WS_EX_CLIENTEDGE :
             element->type == ZUI_TEXT ? WS_EX_TRANSPARENT : 0,
-            class_name, display_text, style, x, y, width, height,
-            state->window, (HMENU)(INT_PTR)(1000 + control_index),
-            GetModuleHandleA(NULL), NULL);
+            wide_class, wide_text, style, x, y, width, height,
+            parent_handle, (HMENU)(INT_PTR)(1000 + control_index),
+            GetModuleHandleW(NULL), NULL) : NULL;
+          free(wide_class); free(wide_text);
+        }
+        }
         if (control->handle == NULL) {
             snprintf(error, error_size,
                      "could not create UI element '%s'", element->name);
             return 0;
         }
+        if (element->type == ZUI_CONTAINER) {
+            SetWindowLongPtrA(control->handle,GWLP_USERDATA,(LONG_PTR)control);
+            SetWindowLongPtrA(control->handle,GWLP_WNDPROC,(LONG_PTR)container_proc);
+        }
         set_window_text_utf8(control->handle, display_text);
+        if (element->type == ZUI_DROPDOWN && find_property(element,"borderRadius")) {
+            SetWindowLongPtrW(control->handle,GWLP_USERDATA,(LONG_PTR)control);
+            control->native_proc = (WNDPROC)SetWindowLongPtrW(control->handle,GWLP_WNDPROC,(LONG_PTR)dropdown_proc);
+        }
         if (color_property != NULL) {
             control->text_color =
                 parse_color(color_property->text_value, RGB(0, 0, 0));
@@ -1933,7 +2153,11 @@ static int set_window_property(void *data, const char *path,
                      element->name);
             return 0;
         }
-        if (strcmp(property->name, "content") == 0 ||
+        if (element->type == ZUI_CONTAINER &&
+            (strcmp(property->name,"background") == 0 || strcmp(property->name,"visible") == 0 ||
+             strcmp(property->name,"scrollTo") == 0)) {
+            layout_controls(state); redraw_control = 1;
+        } else if (strcmp(property->name, "content") == 0 ||
             strcmp(property->name, "text") == 0) {
             set_window_text_utf8(control->handle, property->text_value);
             if (element->type == ZUI_TEXT) layout_controls(state);
@@ -2418,6 +2642,18 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
         }
     }
     while ((result = GetMessageA(&message, NULL, 0, 0)) > 0) {
+        if (message.message == WM_KEYDOWN && message.wParam == VK_RETURN &&
+            !(GetKeyState(VK_SHIFT) & 0x8000)) {
+            WindowControl *control = find_control(&state, message.hwnd);
+            if (control && control->element->type == ZUI_TEXT_INPUT &&
+                find_property(control->element, "submit")) {
+                if (!(message.lParam & (1L << 30))) {
+                    update_input_contents(control);
+                    run_callback(&state, control->element, "submit");
+                }
+                continue;
+            }
+        }
         TranslateMessage(&message);
         DispatchMessageA(&message);
         refresh_hover_controls(&state);

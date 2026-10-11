@@ -94,6 +94,17 @@ ZSharpToken zsharp_lexer_next(ZSharpLexer *lexer) {
         return make_token(ZTOKEN_NUMBER, start, lexer, line, column);
     }
 
+    if (character == '\'' && peek(lexer) == '\'' && peek_next(lexer) == '\'') {
+        advance(lexer); advance(lexer);
+        while (!is_at_end(lexer)) {
+            if (peek(lexer) == '\'' && peek_next(lexer) == '\'' && lexer->current[2] == '\'') {
+                advance(lexer); advance(lexer); advance(lexer);
+                return make_token(ZTOKEN_STRING, start, lexer, line, column);
+            }
+            advance(lexer);
+        }
+        return make_token(ZTOKEN_ERROR, start, lexer, line, column);
+    }
     if (character == '"') {
         while (peek(lexer) != '"' && !is_at_end(lexer)) {
             if (peek(lexer) == '\\' && peek_next(lexer) != '\0') {

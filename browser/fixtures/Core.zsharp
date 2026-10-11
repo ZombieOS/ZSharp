@@ -1,0 +1,59 @@
+zsharp = type.script
+
+noticed room Main[] (
+ noticed number Counter = 0:
+ noticed text Title = "initial":
+ noticed status Active = alive:
+ noticed text() Labels = ["one", "two"]:
+ noticed number() Scores = [10, 20]:
+
+ noticed brain Start[] (
+  number Sum = Function.call(Core:Maths:Add [10, 20]):
+  Print(Sum):
+  text Greeting = Function.call(Core:Maths:Greet ["Alex"]):
+  Print(Greeting):
+  Function.call(Core:Main:Increment):
+  Function.call(Core:Main:Increment):
+  Print(Main.Counter):
+  text.set.Title = "updated":
+  Print(Main.Title):
+  Active = dead:
+  if[Active == dead] ( Print("inactive"): )
+  function Callback = Core:Maths:Add:
+  Function.call(Core:Main:UseCallback [Callback]):
+  Labels.set[0] = "changed":
+  Scores.set[1] = 25:
+  Print(Labels[0]):
+  Print(Scores[1]):
+  Print(Labels.Length):
+  Print(Math.pow(10, 3)):
+  Print(Math.sqrt(81)):
+  Print(Math.abs(-4)):
+  Print(0.1 + 0.2):
+  Print(100000000000000000001 + 1):
+  Print(10 % 3):
+  if[1] ( Print("numeric condition"): )
+  Print(Regex.test("ABC123", "^[A-Z]+[0-9]+$")):
+  text() Matches = Regex.matches("item12 item34", "\\d+"):
+  Print(Matches[0]):
+  Print(Matches.Length):
+  Print(Regex.replace("a12 b34", "[0-9]+", "#")):
+ )
+
+ noticed brain Increment[] (
+  number.set:Counter = Counter + 1:
+ )
+ noticed brain Report[] ( Print(Counter): )
+ noticed brain UseCallback[function CallBack] (
+  Print(Function.call(CallBack [3, 4])):
+ )
+)
+
+room Maths[] (
+ noticed number Add[number A, number B] (
+  feed(number.A + number.B):
+ )
+ noticed text Greet[text Name] (
+  feed("Hello, " + Name):
+ )
+)

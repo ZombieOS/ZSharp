@@ -101,7 +101,8 @@ typedef enum ZSharpUIElementType {
     ZUI_BUTTON = 3,
     ZUI_IMAGE = 4,
     ZUI_TEXT_INPUT = 5,
-    ZUI_DROPDOWN = 6
+    ZUI_DROPDOWN = 6,
+    ZUI_CONTAINER = 7
 } ZSharpUIElementType;
 
 typedef enum ZSharpUIPropertyType {
@@ -215,7 +216,10 @@ typedef enum ZSharpOpCode {
     ZOP_STORE_LOCAL_FUNCTION = 62,
     ZOP_FILE_SEARCH_EXTENSION = 63,
     ZOP_STORE_LOCAL_TEXT_ARRAY = 64,
-    ZOP_REGEX = 65
+    ZOP_REGEX = 65,
+    ZOP_BROWSER_BIND = 66,
+    ZOP_BROWSER_JS = 67,
+    ZOP_BROWSER_CSS = 68
 } ZSharpOpCode;
 
 typedef struct ZSharpInstruction {

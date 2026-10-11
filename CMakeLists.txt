@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.2.1.0 LANGUAGES C)
+project(zsharp VERSION 1.2.2.0 LANGUAGES C)
 if(ANDROID)
     enable_language(CXX)
 endif()
