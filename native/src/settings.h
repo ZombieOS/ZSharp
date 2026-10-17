@@ -44,9 +44,14 @@ typedef struct ZSharpSettings {
     size_t splash_count;
     ZSharpNativeTarget *native_targets;
     size_t native_target_count;
+    int has_allowed_devices;
+    unsigned allowed_devices; /* Windows=1, Linux=2, MacOS=4; XR is separate. */
+    int xr_allowed;
+    int xr_required;
 } ZSharpSettings;
 
 void zsharp_settings_init(ZSharpSettings *settings);
+int zsharp_settings_host_allowed(const ZSharpSettings *settings, char *error, size_t capacity);
 void zsharp_settings_free(ZSharpSettings *settings);
 
 int zsharp_settings_parse_file(const char *path, ZSharpSettings *settings,

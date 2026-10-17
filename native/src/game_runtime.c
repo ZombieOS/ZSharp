@@ -5,9 +5,16 @@
 #include "achievement.h"
 #include "game_model.h"
 #include "game_input_edges.h"
+#include "gamepad_input.h"
 #include "game_vulkan.h"
 #include "registry.h"
 #include "settings.h"
+#include "terminal.h"
+#include "xr_input.h"
+#ifdef ZSHARP_HAS_OPENXR
+#include "game_xr.h"
+#include "xr_ui.h"
+#endif
 
 #include <math.h>
 #include <ctype.h>
@@ -23,6 +30,15 @@ typedef struct ZSharpGameState {
     SDL_Window *window;
     ZSharpGameVulkan *renderer;
     SDL_Gamepad *gamepad;
+    ZSharpGamepadState gamepad_input;
+    int window_focused;
+    int gamepad_focused;
+    uint64_t gamepad_vibration_serial;
+    int gamepad_test;
+    SDL_JoystickID test_gamepad_id;
+    SDL_Joystick *test_gamepad_joystick;
+    unsigned test_gamepad_rumbles;
+    Uint16 test_gamepad_rumble_strength;
     ZSharpGameModel model;
     SDL_Mutex *model_mutex;
     const ZSharpSettings *settings;
@@ -36,18 +52,33 @@ typedef struct ZSharpGameState {
     int mouse_capture_dirty;
     int cancelled;
     ZSharpMouseEdges mouse_edges;
+    ZSharpXRState xr;
+#ifdef ZSHARP_HAS_OPENXR
+    ZSharpGameXR *xr_backend;
+    ZSharpXRUIActivation xr_ui_activation[2];
+    uint64_t xr_ui_generation;
+    uint64_t xr_ui_trace_pressed[2];
+    unsigned xr_ui_test_phase;
+    int xr_ui_trace, xr_ui_test;
+#endif
 } ZSharpGameState;
 
 #ifdef _MSC_VER
 static __declspec(thread) ZSharpMouseCursor mouse_cursor;
+static __declspec(thread) ZSharpXRCursor xr_cursor;
+static __declspec(thread) ZSharpGamepadCursor gamepad_cursor;
 #else
 static _Thread_local ZSharpMouseCursor mouse_cursor;
+static _Thread_local ZSharpXRCursor xr_cursor;
+static _Thread_local ZSharpGamepadCursor gamepad_cursor;
 #endif
 
 static void game_begin_task(void *state) {
     ZSharpGameState *game = (ZSharpGameState *)state;
     SDL_LockMutex(game->model_mutex);
     zsharp_mouse_cursor_begin(&mouse_cursor, &game->mouse_edges);
+    zsharp_xr_cursor_begin(&xr_cursor, &game->xr);
+    zsharp_gamepad_cursor_begin(&gamepad_cursor, &game->gamepad_input);
     SDL_UnlockMutex(game->model_mutex);
 }
 
@@ -58,6 +89,126 @@ static void game_request_close(void *data) {
 
 static void game_error(char *error, size_t error_size, const char *message);
 static char *join_project_path(const char *root, const char *relative);
+static void refresh_input(ZSharpGameState *game);
+
+#ifdef ZSHARP_HAS_OPENXR
+/* Use the exact button IDs selected by the just-rendered stereo frame. The
+   snapshot-to-model mapping is O(1), independent of the scene's placement count.
+   No script executes under model_mutex and no model pointer escapes the lock. */
+static int dispatch_xr_buttons(ZSharpGameState *game,
+                               const ZSharpGameRenderFrame *frame,
+                               const ZSharpXRState *snapshot,
+                               const size_t hovered[2],
+                               uint64_t scene_generation,
+                               ZSharpWindowCallback callback, void *user_data,
+                               const ZSharpWindowRuntime *runtime,
+                               char *error, size_t error_size) {
+    char *targets[2] = {NULL, NULL};
+    char trace[2][384] = {{0}};
+    int hand, failed = 0;
+    SDL_LockMutex(game->model_mutex);
+    if (game->model.scene_generation != scene_generation ||
+        game->xr_ui_generation != scene_generation) {
+        for (hand = 0; hand < 2; ++hand)
+            zsharp_xr_ui_activation_reset(&game->xr_ui_activation[hand],
+                snapshot->hands[hand].pressed[ZXR_TRIGGER]);
+        game->xr_ui_generation = game->model.scene_generation;
+        game->model.xr_hovered_buttons[0] = game->model.xr_hovered_buttons[1] = 0;
+        if (game->model.scene_generation != scene_generation) {
+            SDL_UnlockMutex(game->model_mutex);
+            return 1;
+        }
+    }
+    for (hand = 0; hand < 2; ++hand) {
+        const ZSharpXRHand *input = &snapshot->hands[hand];
+        int valid = snapshot->active && snapshot->focused && input->aim_tracked;
+        size_t render_id = valid ? hovered[hand] : 0;
+        size_t activated;
+        int armed = game->xr_ui_activation[hand].armed;
+        const ZSharpGameObject *button = NULL;
+        size_t model_index = 0;
+        if (render_id > 0 && render_id <= frame->object_count) {
+            const ZSharpGameRenderObject *rendered = &frame->objects[render_id - 1];
+            model_index = rendered->model_index;
+            if (rendered->render_id == render_id && model_index > 0 &&
+                model_index <= game->model.object_count) {
+                button = &game->model.objects[model_index - 1];
+                if (button->shape != ZGAME_SHAPE_BUTTON || !button->visible ||
+                    button->opacity <= 0.0f || !button->scene ||
+                    strcmp(button->scene, game->model.active_scene) != 0)
+                    button = NULL;
+            }
+        }
+        if (button == NULL) render_id = model_index = 0;
+        game->model.xr_hovered_buttons[hand] = model_index;
+        activated = zsharp_xr_ui_activation_update(&game->xr_ui_activation[hand], valid,
+                input->held[ZXR_TRIGGER], input->pressed[ZXR_TRIGGER], render_id);
+        if (game->xr_ui_trace && input->pressed[ZXR_TRIGGER] != game->xr_ui_trace_pressed[hand]) {
+            const char *name = button ? (button->instance_id ? button->instance_id :
+                button->display_name ? button->display_name : button->name) : "none";
+            snprintf(trace[hand],sizeof(trace[hand]),
+                "[XR UI] %s trigger: focus=%d aim=%d hit=%.72s armed=%d fire=%d",
+                hand ? "Right" : "Left",snapshot->focused,input->aim_tracked,
+                name ? name : "none",armed,activated != 0);
+        }
+        game->xr_ui_trace_pressed[hand] = input->pressed[ZXR_TRIGGER];
+        if (activated) {
+            game->model.focused_button = model_index;
+            if (button->click_left != NULL) {
+                targets[hand] = zsharp_copy_text(button->click_left, strlen(button->click_left));
+                if (targets[hand] == NULL) {
+                    game_error(error, error_size, "out of memory scheduling XR game button");
+                    failed = 1;
+                }
+            }
+        }
+    }
+    SDL_UnlockMutex(game->model_mutex);
+    for (hand = 0; hand < 2; ++hand) {
+        int current_scene;
+        if (trace[hand][0]) zsharp_terminal_print(trace[hand],0);
+        if (targets[hand] == NULL) continue;
+        SDL_LockMutex(game->model_mutex);
+        current_scene = game->model.scene_generation == scene_generation;
+        SDL_UnlockMutex(game->model_mutex);
+        /* A first controller's callback may have switched scenes. Do not enqueue
+           the other controller's old-scene callback in that case. */
+        if (!failed && current_scene && callback != NULL &&
+            !callback(user_data, targets[hand], runtime, error, error_size)) failed = 1;
+        free(targets[hand]);
+    }
+    return !failed;
+}
+
+/* Opt-in headless input fixture exercises the real dispatcher and VM callbacks
+   in desktop mode. Ordinary games never receive synthetic controller input. */
+static int test_xr_buttons(ZSharpGameState *game,const ZSharpGameRenderFrame *frame,
+    uint64_t generation,ZSharpWindowCallback callback,void *user_data,
+    const ZSharpWindowRuntime *runtime,char *error,size_t error_size) {
+    static const uint64_t left[]  ={0,1,1,1,1,1,2,3,3,3,3,3,4,4,4,5};
+    static const uint64_t right[] ={0,1,1,1,1,1,2,3,3,3,4,4,5,5,5,5};
+    static const int held_left[] ={0,1,1,1,1,0,1,1,1,0,0,0,1,1,0,1};
+    static const int held_right[]={0,1,1,1,1,0,1,1,1,0,1,0,1,1,0,0};
+    unsigned phase=game->xr_ui_test_phase++;
+    size_t hovered[2]={0,0},found=0,index;
+    ZSharpXRState snapshot={0};
+    if(phase>=sizeof(left)/sizeof(left[0]))return 1;
+    for(index=0;index<frame->object_count&&found<2;index++)
+        if(frame->objects[index].shape==ZGAME_SHAPE_BUTTON)
+            hovered[found++]=frame->objects[index].render_id;
+    if(found!=2){game_error(error,error_size,"XR UI fixture needs two buttons");return 0;}
+    snapshot.active=1;snapshot.focused=phase!=3;
+    for(int hand=0;hand<2;hand++)snapshot.hands[hand].aim_tracked=1;
+    snapshot.hands[0].pressed[ZXR_TRIGGER]=left[phase];
+    snapshot.hands[1].pressed[ZXR_TRIGGER]=right[phase];
+    snapshot.hands[0].held[ZXR_TRIGGER]=held_left[phase];
+    snapshot.hands[1].held[ZXR_TRIGGER]=held_right[phase];
+    if(phase==12)hovered[0]=hovered[1]=0; /* Hold and enter must not click. */
+    if(phase==7)generation--; /* Stale scene result must not dispatch. */
+    return dispatch_xr_buttons(game,frame,&snapshot,hovered,generation,
+        callback,user_data,runtime,error,error_size);
+}
+#endif
 
 static int set_game_icon(ZSharpGameState *game, const char *relative,
                          char *error, size_t error_size) {
@@ -170,6 +321,8 @@ static int game_owns_property(void *state, const char *path) {
     ZSharpGameState *game = (ZSharpGameState *)state;
     int owns;
     if (zsharp_mouse_edge_index(path) >= 0) return 1;
+    if (path && !strncmp(path,"XR.",3)) return 1;
+    if (path && !strncmp(path, "Gamepad.", 8)) return 1;
     if (path != NULL &&
         strncmp(path, "ZSharp.Achievement.Award.", 25) == 0) return 1;
     SDL_LockMutex(game->model_mutex);
@@ -184,6 +337,37 @@ static int game_get_property(void *state, const char *path,
     ZSharpGameState *game = (ZSharpGameState *)state;
     int ok;
     SDL_LockMutex(game->model_mutex);
+    if (path && !strncmp(path, "Gamepad.", 8)) {
+        char value[256];
+        int kind;
+        /* As with mouse edges, allocation failure must not consume an edge. */
+        *text = (char *)malloc(sizeof(value));
+        if (*text == NULL) {
+            game_error(error, error_size, "out of memory");
+            SDL_UnlockMutex(game->model_mutex);
+            return 0;
+        }
+        ok = zsharp_gamepad_read(&game->gamepad_input, &gamepad_cursor,
+                                 path, value, sizeof(value), &kind);
+        if (ok) {
+            strcpy(*text, value);
+            *type = kind == ZSHARP_GAMEPAD_STATUS ? ZWINDOW_READ_STATUS :
+                    kind == ZSHARP_GAMEPAD_TEXT ? ZWINDOW_READ_TEXT : ZWINDOW_READ_NUMBER;
+        } else {
+            free(*text);
+            *text = NULL;
+            game_error(error, error_size, "unknown Gamepad property");
+        }
+        SDL_UnlockMutex(game->model_mutex);
+        return ok;
+    }
+    if(path && !strncmp(path,"XR.",3)) {
+        char value[128];int status;
+        ok=zsharp_xr_read(&game->xr,&xr_cursor,path,value,sizeof(value),&status);
+        if(ok){*text=zsharp_copy_text(value,strlen(value));*type=status?ZWINDOW_READ_STATUS:ZWINDOW_READ_NUMBER;ok=*text!=NULL;}
+        else game_error(error,error_size,"unknown XR property");
+        SDL_UnlockMutex(game->model_mutex);return ok;
+    }
     {
         int edge = zsharp_mouse_edge_index(path);
         if (edge >= 0) {
@@ -214,6 +398,18 @@ static int game_set_property(void *state, const char *path,
     ZSharpGameState *game = (ZSharpGameState *)state;
     int ok;
     (void)unit;
+    if (path && !strncmp(path, "Gamepad.", 8)) {
+        SDL_LockMutex(game->model_mutex);
+        ok = zsharp_gamepad_write(&game->gamepad_input, path, value,
+                                  error, error_size);
+        SDL_UnlockMutex(game->model_mutex);
+        return ok;
+    }
+    if(path && !strncmp(path,"XR.",3)) {
+        SDL_LockMutex(game->model_mutex);
+        ok=zsharp_xr_write(&game->xr,path,value,error,error_size);
+        SDL_UnlockMutex(game->model_mutex);return ok;
+    }
     if (path != NULL &&
         strncmp(path, "ZSharp.Achievement.Award.", 25) == 0) {
         ZSharpAchievement achievement;
@@ -452,6 +648,375 @@ static void update_audio(ZSharpGameState *game) {
     }
 }
 
+/* SDL calls live on the event/render thread. Z# worker threads only read or
+   queue output through gamepad_input while holding model_mutex. */
+typedef struct GamepadButtonMapping {
+    SDL_GamepadButton sdl;
+    int zsharp;
+} GamepadButtonMapping;
+
+static const GamepadButtonMapping gamepad_buttons[] = {
+    {SDL_GAMEPAD_BUTTON_SOUTH, ZGP_SOUTH},
+    {SDL_GAMEPAD_BUTTON_EAST, ZGP_EAST},
+    {SDL_GAMEPAD_BUTTON_WEST, ZGP_WEST},
+    {SDL_GAMEPAD_BUTTON_NORTH, ZGP_NORTH},
+    {SDL_GAMEPAD_BUTTON_DPAD_UP, ZGP_DPAD_UP},
+    {SDL_GAMEPAD_BUTTON_DPAD_DOWN, ZGP_DPAD_DOWN},
+    {SDL_GAMEPAD_BUTTON_DPAD_LEFT, ZGP_DPAD_LEFT},
+    {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, ZGP_DPAD_RIGHT},
+    {SDL_GAMEPAD_BUTTON_LEFT_STICK, ZGP_LEFT_STICK},
+    {SDL_GAMEPAD_BUTTON_RIGHT_STICK, ZGP_RIGHT_STICK},
+    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, ZGP_LEFT_BUMPER},
+    {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, ZGP_RIGHT_BUMPER},
+    {SDL_GAMEPAD_BUTTON_START, ZGP_START},
+    {SDL_GAMEPAD_BUTTON_BACK, ZGP_BACK},
+    {SDL_GAMEPAD_BUTTON_GUIDE, ZGP_GUIDE},
+    {SDL_GAMEPAD_BUTTON_MISC1, ZGP_MISC1},
+    {SDL_GAMEPAD_BUTTON_MISC2, ZGP_MISC2},
+    {SDL_GAMEPAD_BUTTON_MISC3, ZGP_MISC3},
+    {SDL_GAMEPAD_BUTTON_MISC4, ZGP_MISC4},
+    {SDL_GAMEPAD_BUTTON_MISC5, ZGP_MISC5},
+    {SDL_GAMEPAD_BUTTON_MISC6, ZGP_MISC6},
+    {SDL_GAMEPAD_BUTTON_LEFT_PADDLE1, ZGP_LEFT_PADDLE1},
+    {SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1, ZGP_RIGHT_PADDLE1},
+    {SDL_GAMEPAD_BUTTON_LEFT_PADDLE2, ZGP_LEFT_PADDLE2},
+    {SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2, ZGP_RIGHT_PADDLE2},
+    {SDL_GAMEPAD_BUTTON_TOUCHPAD, ZGP_TOUCHPAD}
+};
+
+static const char *gamepad_type_name(SDL_Gamepad *pad) {
+    switch (SDL_GetGamepadType(pad)) {
+        case SDL_GAMEPAD_TYPE_XBOX360:
+        case SDL_GAMEPAD_TYPE_XBOXONE: return "xbox";
+        case SDL_GAMEPAD_TYPE_PS3:
+        case SDL_GAMEPAD_TYPE_PS4:
+        case SDL_GAMEPAD_TYPE_PS5: return "playstation";
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+        case SDL_GAMEPAD_TYPE_GAMECUBE: return "nintendo";
+        default: return "generic";
+    }
+}
+
+static const char *gamepad_label(SDL_GamepadButtonLabel label) {
+    switch (label) {
+        case SDL_GAMEPAD_BUTTON_LABEL_A: return "A";
+        case SDL_GAMEPAD_BUTTON_LABEL_B: return "B";
+        case SDL_GAMEPAD_BUTTON_LABEL_X: return "X";
+        case SDL_GAMEPAD_BUTTON_LABEL_Y: return "Y";
+        case SDL_GAMEPAD_BUTTON_LABEL_CROSS: return "Cross";
+        case SDL_GAMEPAD_BUTTON_LABEL_CIRCLE: return "Circle";
+        case SDL_GAMEPAD_BUTTON_LABEL_SQUARE: return "Square";
+        case SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE: return "Triangle";
+        default: return "";
+    }
+}
+
+/* Called under model_mutex. Capture held state on connection/focus regain,
+   without reporting an input that began in another application as a press. */
+static void sample_gamepad(ZSharpGameState *game, int baseline) {
+    size_t index;
+    uint64_t presses[ZGP_BUTTONS], releases[ZGP_BUTTONS];
+    if (!game->gamepad || !game->gamepad_focused) return;
+    if (baseline) {
+        memcpy(presses, game->gamepad_input.pressed, sizeof(presses));
+        memcpy(releases, game->gamepad_input.released, sizeof(releases));
+    }
+    zsharp_gamepad_stick(&game->gamepad_input, 0,
+        SDL_GetGamepadAxis(game->gamepad, SDL_GAMEPAD_AXIS_LEFTX),
+        SDL_GetGamepadAxis(game->gamepad, SDL_GAMEPAD_AXIS_LEFTY));
+    zsharp_gamepad_stick(&game->gamepad_input, 1,
+        SDL_GetGamepadAxis(game->gamepad, SDL_GAMEPAD_AXIS_RIGHTX),
+        SDL_GetGamepadAxis(game->gamepad, SDL_GAMEPAD_AXIS_RIGHTY));
+    for (index = 0; index < SDL_arraysize(gamepad_buttons); ++index)
+        zsharp_gamepad_button(&game->gamepad_input, gamepad_buttons[index].zsharp,
+            SDL_GetGamepadButton(game->gamepad, gamepad_buttons[index].sdl));
+    zsharp_gamepad_trigger(&game->gamepad_input, 0,
+        SDL_GetGamepadAxis(game->gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
+    zsharp_gamepad_trigger(&game->gamepad_input, 1,
+        SDL_GetGamepadAxis(game->gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+    if (baseline) {
+        memcpy(game->gamepad_input.pressed, presses, sizeof(presses));
+        memcpy(game->gamepad_input.released, releases, sizeof(releases));
+    }
+}
+
+static void stop_gamepad_rumble(ZSharpGameState *game) {
+    if (game->gamepad) (void)SDL_RumbleGamepad(game->gamepad, 0, 0, 0);
+}
+
+static void refresh_gamepad_focus(ZSharpGameState *game) {
+    int focused, changed;
+    SDL_LockMutex(game->model_mutex);
+    focused = game->xr.active ? game->xr.focused : game->window_focused;
+    changed = focused != game->gamepad_focused;
+    if (changed) {
+        game->gamepad_focused = focused;
+        if (!focused) zsharp_gamepad_reset(&game->gamepad_input, 0);
+        else sample_gamepad(game, 1);
+        game->gamepad_vibration_serial = game->gamepad_input.vibration_serial;
+    }
+    SDL_UnlockMutex(game->model_mutex);
+    if (changed && !focused) stop_gamepad_rumble(game);
+}
+
+static void open_gamepad(ZSharpGameState *game, SDL_JoystickID id) {
+    size_t index;
+    const char *name;
+    if (game->gamepad || (game->gamepad_test && id != game->test_gamepad_id)) return;
+    game->gamepad = SDL_OpenGamepad(id);
+    if (!game->gamepad) return;
+    name = SDL_GetGamepadName(game->gamepad);
+    SDL_LockMutex(game->model_mutex);
+    zsharp_gamepad_connect(&game->gamepad_input, name ? name : "Gamepad",
+        gamepad_type_name(game->gamepad), SDL_GetBooleanProperty(
+            SDL_GetGamepadProperties(game->gamepad),
+            SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false));
+    for (index = 0; index < 4; ++index)
+        snprintf(game->gamepad_input.labels[index],
+            sizeof(game->gamepad_input.labels[index]), "%s",
+            gamepad_label(SDL_GetGamepadButtonLabel(game->gamepad,
+                gamepad_buttons[index].sdl)));
+    sample_gamepad(game, 1);
+    game->gamepad_vibration_serial = game->gamepad_input.vibration_serial;
+    SDL_UnlockMutex(game->model_mutex);
+}
+
+static void select_gamepad(ZSharpGameState *game) {
+    int count = 0, index;
+    SDL_JoystickID *ids = SDL_GetGamepads(&count);
+    for (index = 0; ids && index < count && !game->gamepad; ++index)
+        open_gamepad(game, ids[index]);
+    SDL_free(ids);
+}
+
+static int gamepad_event(ZSharpGameState *game, const SDL_Event *event) {
+    size_t index;
+    SDL_JoystickID selected = game->gamepad ? SDL_GetGamepadID(game->gamepad) : 0;
+    switch (event->type) {
+        case SDL_EVENT_GAMEPAD_ADDED:
+            if (!game->gamepad) open_gamepad(game, event->gdevice.which);
+            return 1;
+        case SDL_EVENT_GAMEPAD_REMOVED:
+        case SDL_EVENT_GAMEPAD_REMAPPED:
+            if (event->gdevice.which == selected) {
+                stop_gamepad_rumble(game);
+                SDL_CloseGamepad(game->gamepad);
+                game->gamepad = NULL;
+                SDL_LockMutex(game->model_mutex);
+                zsharp_gamepad_reset(&game->gamepad_input, 1);
+                game->gamepad_vibration_serial = game->gamepad_input.vibration_serial;
+                SDL_UnlockMutex(game->model_mutex);
+                select_gamepad(game);
+            }
+            return 1;
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
+            if (event->gbutton.which == selected && game->gamepad_focused) {
+                for (index = 0; index < SDL_arraysize(gamepad_buttons); ++index) {
+                    if (gamepad_buttons[index].sdl != event->gbutton.button) continue;
+                    SDL_LockMutex(game->model_mutex);
+                    zsharp_gamepad_button(&game->gamepad_input,
+                        gamepad_buttons[index].zsharp,
+                        event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+                    SDL_UnlockMutex(game->model_mutex);
+                    break;
+                }
+            }
+            return 1;
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+            if (event->gaxis.which == selected && game->gamepad_focused &&
+                (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
+                 event->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) {
+                SDL_LockMutex(game->model_mutex);
+                zsharp_gamepad_trigger(&game->gamepad_input,
+                    event->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,
+                    event->gaxis.value);
+                SDL_UnlockMutex(game->model_mutex);
+            }
+            return 1;
+        default: return 0;
+    }
+}
+
+static void refresh_gamepad_output(ZSharpGameState *game) {
+    float strength, milliseconds;
+    unsigned serial;
+    SDL_LockMutex(game->model_mutex);
+    serial = game->gamepad_input.vibration_serial;
+    strength = game->gamepad_focused ? game->gamepad_input.vibration : 0.0f;
+    milliseconds = game->gamepad_input.vibration_ms;
+    SDL_UnlockMutex(game->model_mutex);
+    if (serial == game->gamepad_vibration_serial) return;
+    game->gamepad_vibration_serial = serial;
+    if (game->gamepad) {
+        Uint16 amount = (Uint16)(strength * 65535.0f + 0.5f);
+        /* Unsupported motors are optional capabilities, never launch errors. */
+        (void)SDL_RumbleGamepad(game->gamepad, amount, amount,
+            (Uint32)ceilf(milliseconds));
+    }
+}
+
+/* Opt-in integration fixture. It uses SDL's real virtual driver and the same
+   event path as hardware; ordinary games never attach a virtual device. */
+static bool SDLCALL test_gamepad_rumble(void *data, Uint16 low, Uint16 high) {
+    ZSharpGameState *game = (ZSharpGameState *)data;
+    (void)high;
+    ++game->test_gamepad_rumbles;
+    game->test_gamepad_rumble_strength = low;
+    return true;
+}
+
+static int attach_test_gamepad(ZSharpGameState *game) {
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    desc.vendor_id = 0x045e;
+    desc.product_id = 0x028e;
+    desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1u;
+    desc.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1u;
+    desc.name = "Z# Virtual Gamepad";
+    desc.userdata = game;
+    desc.Rumble = test_gamepad_rumble;
+    game->test_gamepad_id = SDL_AttachVirtualJoystick(&desc);
+    if (!game->test_gamepad_id) return 0;
+    game->test_gamepad_joystick = SDL_OpenJoystick(game->test_gamepad_id);
+    if (!game->test_gamepad_joystick) return 0;
+    SDL_SetJoystickVirtualAxis(game->test_gamepad_joystick,
+        SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -32768);
+    SDL_SetJoystickVirtualAxis(game->test_gamepad_joystick,
+        SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
+    SDL_UpdateGamepads();
+    return 1;
+}
+
+static void pump_test_gamepad(ZSharpGameState *game) {
+    SDL_Event event;
+    SDL_PumpEvents();
+    while (SDL_PollEvent(&event)) (void)gamepad_event(game, &event);
+    SDL_LockMutex(game->model_mutex);
+    sample_gamepad(game, 0);
+    refresh_input(game);
+    SDL_UnlockMutex(game->model_mutex);
+}
+
+static int gamepad_regression(ZSharpGameState *game, char *error, size_t capacity) {
+    ZSharpGamepadCursor first, second;
+    char value[256];
+    int kind, index;
+    SDL_Event foreign;
+#define PAD_CHECK(condition, message) do { if (!(condition)) { \
+    game_error(error, capacity, "SDL gamepad regression: " message); return 0; \
+} } while (0)
+    game->window_focused = 1;
+    refresh_gamepad_focus(game);
+    PAD_CHECK(attach_test_gamepad(game), "could not attach virtual driver");
+    pump_test_gamepad(game);
+    PAD_CHECK(game->gamepad && game->gamepad_input.connected,
+        "hotplug did not select virtual controller");
+    PAD_CHECK(game->gamepad_input.trigger[0] == 0 &&
+        game->gamepad_input.trigger[1] == 0, "idle trigger was not zero");
+    zsharp_gamepad_cursor_begin(&first, &game->gamepad_input);
+    zsharp_gamepad_cursor_begin(&second, &game->gamepad_input);
+    for (index = 0; index < 2; ++index) {
+        SDL_SetJoystickVirtualButton(game->test_gamepad_joystick,
+            SDL_GAMEPAD_BUTTON_SOUTH, true);
+        SDL_SetJoystickVirtualAxis(game->test_gamepad_joystick,
+            SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 32767);
+        SDL_UpdateGamepads();
+        SDL_SetJoystickVirtualButton(game->test_gamepad_joystick,
+            SDL_GAMEPAD_BUTTON_SOUTH, false);
+        SDL_SetJoystickVirtualAxis(game->test_gamepad_joystick,
+            SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
+        SDL_UpdateGamepads();
+    }
+    /* All four transitions happened before either script/task reads anything. */
+    pump_test_gamepad(game);
+    PAD_CHECK(!game->gamepad_input.held[ZGP_SOUTH] &&
+        !game->gamepad_input.held[ZGP_RIGHT_TRIGGER], "quick tap left held input");
+    for (index = 0; index < 2; ++index) {
+        PAD_CHECK(zsharp_gamepad_read(&game->gamepad_input, &first,
+            "Gamepad.south.pressed", value, sizeof(value), &kind) &&
+            !strcmp(value, "alive"), "quick button press lost");
+        PAD_CHECK(zsharp_gamepad_read(&game->gamepad_input, &first,
+            "Gamepad.south.released", value, sizeof(value), &kind) &&
+            !strcmp(value, "alive"), "quick button release lost");
+        PAD_CHECK(zsharp_gamepad_read(&game->gamepad_input, &first,
+            "Gamepad.right.trigger.pressed", value, sizeof(value), &kind) &&
+            !strcmp(value, "alive"), "quick trigger press lost");
+        PAD_CHECK(zsharp_gamepad_read(&game->gamepad_input, &first,
+            "Gamepad.right.trigger.released", value, sizeof(value), &kind) &&
+            !strcmp(value, "alive"), "quick trigger release lost");
+    }
+    PAD_CHECK(zsharp_gamepad_read(&game->gamepad_input, &first,
+        "Gamepad.south.pressed", value, sizeof(value), &kind) &&
+        !strcmp(value, "dead"), "button edge repeated");
+    PAD_CHECK(zsharp_gamepad_read(&game->gamepad_input, &second,
+        "Gamepad.south.pressed", value, sizeof(value), &kind) &&
+        !strcmp(value, "alive"), "one task consumed another task's input");
+    SDL_zero(foreign);
+    foreign.type = SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+    foreign.gbutton.which = game->test_gamepad_id + 100000;
+    foreign.gbutton.button = SDL_GAMEPAD_BUTTON_EAST;
+    PAD_CHECK(SDL_PushEvent(&foreign), "could not enqueue foreign input");
+    pump_test_gamepad(game);
+    PAD_CHECK(!game->gamepad_input.held[ZGP_EAST], "other device stole input");
+    SDL_SetJoystickVirtualAxis(game->test_gamepad_joystick, SDL_GAMEPAD_AXIS_LEFTX, 32767);
+    SDL_SetJoystickVirtualAxis(game->test_gamepad_joystick, SDL_GAMEPAD_AXIS_LEFTY, -32768);
+    SDL_SetJoystickVirtualButton(game->test_gamepad_joystick,
+        SDL_GAMEPAD_BUTTON_SOUTH, true);
+    SDL_UpdateGamepads();
+    pump_test_gamepad(game);
+    PAD_CHECK(game->gamepad_input.stick[0][0] > 0.70f &&
+        game->gamepad_input.stick[0][1] > 0.70f &&
+        game->gamepad_input.stick[0][0] < 0.71f,
+        "radial stick normalization or forward sign incorrect");
+    PAD_CHECK(game->model.input.keys[ZGAME_KEY_RARROW] &&
+        game->model.input.keys[ZGAME_KEY_UARROW] &&
+        game->model.input.keys[ZGAME_KEY_SPACE], "legacy input mapping changed");
+    PAD_CHECK(zsharp_gamepad_write(&game->gamepad_input, "Gamepad.vibrate",
+        "75|100", error, capacity), "rumble request rejected");
+    refresh_gamepad_output(game);
+    PAD_CHECK(game->test_gamepad_rumble_strength >= 49150,
+        "rumble was not delivered on SDL thread");
+    game->window_focused = 0;
+    refresh_gamepad_focus(game);
+    PAD_CHECK(!game->gamepad_input.held[ZGP_SOUTH] &&
+        game->gamepad_input.stick[0][0] == 0 &&
+        game->test_gamepad_rumble_strength == 0, "focus loss did not clear input/output");
+    zsharp_gamepad_cursor_begin(&first, &game->gamepad_input);
+    game->window_focused = 1;
+    refresh_gamepad_focus(game);
+    PAD_CHECK(game->gamepad_input.held[ZGP_SOUTH], "focus regain did not seed held input");
+    PAD_CHECK(zsharp_gamepad_read(&game->gamepad_input, &first,
+        "Gamepad.south.pressed", value, sizeof(value), &kind) &&
+        !strcmp(value, "dead"), "focus regain generated phantom press");
+    SDL_CloseJoystick(game->test_gamepad_joystick);
+    game->test_gamepad_joystick = NULL;
+    PAD_CHECK(SDL_DetachVirtualJoystick(game->test_gamepad_id), "detach failed");
+    game->test_gamepad_id = 0;
+    pump_test_gamepad(game);
+    PAD_CHECK(!game->gamepad_input.connected && !game->gamepad,
+        "removal did not disconnect controller");
+    PAD_CHECK(attach_test_gamepad(game), "could not reconnect controller");
+    pump_test_gamepad(game);
+    PAD_CHECK(game->gamepad_input.connected &&
+        !game->gamepad_input.held[ZGP_SOUTH], "reconnect retained old held input");
+    PAD_CHECK(zsharp_gamepad_read(&game->gamepad_input, &second,
+        "Gamepad.south.pressed", value, sizeof(value), &kind) &&
+        !strcmp(value, "dead"), "reconnect replayed old input");
+    SDL_SetJoystickVirtualAxis(game->test_gamepad_joystick, SDL_GAMEPAD_AXIS_LEFTX, 32767);
+    SDL_UpdateGamepads();
+    pump_test_gamepad(game);
+    puts("PASS: SDL gamepad hotplug, queued quick taps, independent cursors, sticks, focus, rumble and reconnect");
+#undef PAD_CHECK
+    return 1;
+}
+
 static void refresh_input(ZSharpGameState *game) {
     const bool *keyboard = SDL_GetKeyboardState(NULL);
     static const SDL_Scancode number_keys[10] = {
@@ -466,19 +1031,15 @@ static void refresh_input(ZSharpGameState *game) {
     int pad_right = 0;
     int pad_up = 0;
     int pad_down = 0;
-    if (game->gamepad != NULL) {
-        horizontal = SDL_GetGamepadAxis(game->gamepad,
-                                        SDL_GAMEPAD_AXIS_LEFTX);
-        vertical = SDL_GetGamepadAxis(game->gamepad,
-                                      SDL_GAMEPAD_AXIS_LEFTY);
-        pad_left = horizontal < -8000 || SDL_GetGamepadButton(
-            game->gamepad, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
-        pad_right = horizontal > 8000 || SDL_GetGamepadButton(
-            game->gamepad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
-        pad_up = vertical < -8000 || SDL_GetGamepadButton(
-            game->gamepad, SDL_GAMEPAD_BUTTON_DPAD_UP);
-        pad_down = vertical > 8000 || SDL_GetGamepadButton(
-            game->gamepad, SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    if (game->gamepad && game->gamepad_input.connected && game->gamepad_focused) {
+        /* Preserve the historical fallback threshold independently of the
+           richer API's radial deadzone and normalized analogue values. */
+        horizontal = SDL_GetGamepadAxis(game->gamepad, SDL_GAMEPAD_AXIS_LEFTX);
+        vertical = SDL_GetGamepadAxis(game->gamepad, SDL_GAMEPAD_AXIS_LEFTY);
+        pad_left = horizontal < -8000 || game->gamepad_input.held[ZGP_DPAD_LEFT];
+        pad_right = horizontal > 8000 || game->gamepad_input.held[ZGP_DPAD_RIGHT];
+        pad_up = vertical < -8000 || game->gamepad_input.held[ZGP_DPAD_UP];
+        pad_down = vertical > 8000 || game->gamepad_input.held[ZGP_DPAD_DOWN];
     }
     memset(game->model.input.keys, 0, sizeof(game->model.input.keys));
     for (index = 0; index < 26; index++)
@@ -501,8 +1062,7 @@ static void refresh_input(ZSharpGameState *game) {
         game->model.input.keys[ZGAME_KEY_FN13 + index] =
             keyboard[SDL_SCANCODE_F13 + index];
     game->model.input.keys[ZGAME_KEY_SPACE] = keyboard[SDL_SCANCODE_SPACE] ||
-        (game->gamepad != NULL && SDL_GetGamepadButton(
-            game->gamepad, SDL_GAMEPAD_BUTTON_SOUTH));
+        game->gamepad_input.held[ZGP_SOUTH];
     game->model.input.keys[ZGAME_KEY_ENTER] = keyboard[SDL_SCANCODE_RETURN];
     game->model.input.keys[ZGAME_KEY_ESCAPE] = keyboard[SDL_SCANCODE_ESCAPE];
     game->model.input.keys[ZGAME_KEY_TAB] = keyboard[SDL_SCANCODE_TAB];
@@ -546,20 +1106,73 @@ int zsharp_game_run(const char *title, const char *project_root,
     ZSharpSettings settings;
     ZSharpDiagnostic settings_diagnostic;
     memset(&game, 0, sizeof(game));
+#ifdef ZSHARP_HAS_OPENXR
+    game.xr_ui_trace=getenv("ZSHARP_XR_UI_TRACE")!=NULL;
+    game.xr_ui_test=getenv("ZSHARP_XR_UI_TEST")!=NULL;
+#endif
     memset(&runtime, 0, sizeof(runtime));
+    zsharp_gamepad_init(&game.gamepad_input);
+    game.gamepad_test = getenv("ZSHARP_GAMEPAD_TEST") != NULL;
     zsharp_settings_init(&settings);
     if (getenv("ZSHARP_GAME_FORCE_FAILURE") != NULL) {
         game_error(error, error_size, "forced game launch failure");
         return 0;
     }
+    /* Keep the physical snapshot fresh even while another application owns
+       focus. Delivery to Z# is explicitly gated and baselined below. */
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         game_error(error, error_size, SDL_GetError());
         return 0;
     }
-    if (!zsharp_game_model_load(project_root, &game.model, error,
-                                error_size)) goto done;
     if (!zsharp_settings_load(project_root, &settings, &settings_diagnostic,
                               error, error_size)) goto done;
+    {
+#ifdef _WIN32
+        const unsigned device=1;
+#elif defined(__APPLE__)
+        const unsigned device=4;
+#else
+        const unsigned device=2;
+#endif
+        if(!(settings.allowed_devices&device)){game_error(error,error_size,"This project does not allow this operating system");goto done;}
+        if(settings.xr_allowed){
+            int mode=settings.xr_required?1:0;
+            const char *override_mode=getenv("ZSHARP_XR_MODE");
+            if(override_mode && !strcmp(override_mode,"vr"))mode=1;
+            else if(override_mode && !strcmp(override_mode,"desktop")){
+                if(settings.xr_required){game_error(error,error_size,"This game requires VR mode");goto done;}
+                mode=2;
+            }
+            if(!mode){
+                const SDL_MessageBoxButtonData buttons[]={{SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT,0,"Cancel"},{0,1,"Play in VR"},{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT,2,"Play in Desktop Mode"}};
+                SDL_MessageBoxData box={SDL_MESSAGEBOX_INFORMATION,NULL,"Z# - Launch mode","How would you like to play?",3,buttons,NULL};
+                if(!SDL_ShowMessageBox(&box,&mode)){game_error(error,error_size,SDL_GetError());goto done;}
+                if(mode<=0){ok=1;goto done;}
+            }
+            if(mode==1){
+#ifdef ZSHARP_HAS_OPENXR
+                game.xr_backend=zsharp_game_xr_create(error,error_size);
+                if(game.xr_backend)game.xr.available=game.xr.active=1;
+                else
+#endif
+                {
+                    int choice=0;char message[1024];
+#ifndef ZSHARP_HAS_OPENXR
+                    game_error(error,error_size,"PCVR is not available in this platform/build yet");
+#endif
+                    snprintf(message,sizeof(message),"A usable headset connection was not found.\n\n%s",error);
+                    const SDL_MessageBoxButtonData buttons[]={{SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT|SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT,0,"Close"},{0,2,"Play in Desktop Mode"}};
+                    SDL_MessageBoxData box={SDL_MESSAGEBOX_ERROR,NULL,"Z# - Headset unavailable",message,settings.xr_required?1:2,buttons,NULL};
+                    if(!SDL_ShowMessageBox(&box,&choice)){game_error(error,error_size,SDL_GetError());goto done;}
+                    if(choice!=2){ok=1;goto done;}error[0]=0;
+                }
+            }
+        }
+    }
+    if (!zsharp_game_model_load(project_root, &game.model, error,error_size)) goto done;
+    if (getenv("ZSHARP_GAME_MODEL_UI_TEST") != NULL &&
+        !zsharp_game_model_ui_regression(error, error_size)) goto done;
     game.settings = &settings;
     game.model_mutex = SDL_CreateMutex();
     if (game.model_mutex == NULL) {
@@ -593,13 +1206,10 @@ int zsharp_game_run(const char *title, const char *project_root,
         goto done;
     }
     if (!load_audio(&game, error, error_size)) goto done;
-    {
-        int gamepad_count = 0;
-        SDL_JoystickID *gamepads = SDL_GetGamepads(&gamepad_count);
-        if (gamepads != NULL && gamepad_count > 0)
-            game.gamepad = SDL_OpenGamepad(gamepads[0]);
-        SDL_free(gamepads);
-    }
+    game.window_focused = (SDL_GetWindowFlags(game.window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+    refresh_gamepad_focus(&game);
+    select_gamepad(&game);
+    if (game.gamepad_test && !gamepad_regression(&game, error, error_size)) goto done;
     runtime.state = &game;
     runtime.get_property = game_get_property;
     runtime.owns_property = game_owns_property;
@@ -618,11 +1228,34 @@ int zsharp_game_run(const char *title, const char *project_root,
         double delta;
         ZSharpGameRenderFrame frame;
         ZSharpGameRenderObject *objects = NULL;
+#ifdef ZSHARP_HAS_OPENXR
+        ZSharpXRState xr_snapshot;
+        uint64_t xr_scene_generation = 0;
+        if(game.xr_backend){
+            int result;
+            SDL_LockMutex(game.model_mutex);xr_snapshot=game.xr;SDL_UnlockMutex(game.model_mutex);
+            result=zsharp_game_xr_begin(game.xr_backend,&xr_snapshot,error,error_size);
+            if(!result)goto done;
+            if(result==2){game.cancelled=1;break;}
+            SDL_LockMutex(game.model_mutex);
+            game.xr.available=xr_snapshot.available;game.xr.active=xr_snapshot.active;game.xr.focused=xr_snapshot.focused;
+            game.xr.hand_tracking_available=xr_snapshot.hand_tracking_available;
+            game.xr.head=xr_snapshot.head;memcpy(game.xr.hands,xr_snapshot.hands,sizeof(game.xr.hands));
+            game.model.xr_ui_active = xr_snapshot.active;
+            if (!xr_snapshot.active || !xr_snapshot.focused) {
+                game.model.xr_hovered_buttons[0] = game.model.xr_hovered_buttons[1] = 0;
+                game.model.focused_button = 0;
+            }
+            SDL_UnlockMutex(game.model_mutex);
+        }
+#endif
+        refresh_gamepad_focus(&game);
         SDL_LockMutex(game.model_mutex);
         game.model.input.mouse_delta_x = 0.0f;
         game.model.input.mouse_delta_y = 0.0f;
         SDL_UnlockMutex(game.model_mutex);
         while (SDL_PollEvent(&event)) {
+            if (gamepad_event(&game, &event)) continue;
             if (event.type == SDL_EVENT_QUIT ||
                 event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
                 game.cancelled = 1;
@@ -630,6 +1263,8 @@ int zsharp_game_run(const char *title, const char *project_root,
                      event.type == SDL_EVENT_WINDOW_RESIZED)
                 resized = 1;
             else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                game.window_focused = 0;
+                refresh_gamepad_focus(&game);
                 SDL_LockMutex(game.model_mutex);
                 zsharp_mouse_transition(&game.mouse_edges, 0, 0);
                 zsharp_mouse_transition(&game.mouse_edges, 1, 0);
@@ -638,10 +1273,14 @@ int zsharp_game_run(const char *title, const char *project_root,
                 game.model.focused_button = 0;
                 SDL_UnlockMutex(game.model_mutex);
             }
+            else if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
+                game.window_focused = 1;
+                refresh_gamepad_focus(&game);
+            }
             else if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
                 char *target = NULL;
                 SDL_LockMutex(game.model_mutex);
-                if (!game.model.input.mouse_captured) {
+                if (!game.model.xr_ui_active && !game.model.input.mouse_captured) {
                     if (event.key.key == SDLK_TAB)
                         zsharp_game_model_focus_next(&game.model, (event.key.mod & SDL_KMOD_SHIFT) != 0);
                     else if ((event.key.key == SDLK_RETURN || event.key.key == SDLK_SPACE) &&
@@ -688,7 +1327,7 @@ int zsharp_game_run(const char *title, const char *project_root,
                     zsharp_mouse_transition(&game.mouse_edges, 1, pressed);
                     game.model.input.mouse_right = pressed;
                 }
-                if (pressed && !game.model.input.mouse_captured &&
+                if (pressed && !game.model.xr_ui_active && !game.model.input.mouse_captured &&
                     (event.button.button == SDL_BUTTON_LEFT || event.button.button == SDL_BUTTON_RIGHT)) {
                     int width = 1280, height = 720;
                     const ZSharpGameObject *button;
@@ -718,6 +1357,7 @@ int zsharp_game_run(const char *title, const char *project_root,
                 if (click_failed) goto done;
             }
         }
+        refresh_gamepad_output(&game);
         SDL_LockMutex(game.model_mutex);
         if (game.mouse_capture_dirty) {
             int captured = game.model.input.mouse_captured;
@@ -742,6 +1382,7 @@ int zsharp_game_run(const char *title, const char *project_root,
         if (game.cancelled) break;
         SDL_LockMutex(game.model_mutex);
         game.model.render_delta = delta;
+        sample_gamepad(&game, 0);
         refresh_input(&game);
         accumulator += fmin(delta, 0.25);
         while (accumulator >= 1.0 / 120.0) {
@@ -769,6 +1410,10 @@ int zsharp_game_run(const char *title, const char *project_root,
             }
         }
         zsharp_game_model_frame(&game.model, &frame, &objects);
+#ifdef ZSHARP_HAS_OPENXR
+        xr_snapshot=game.xr;
+        xr_scene_generation = game.model.scene_generation;
+#endif
         SDL_UnlockMutex(game.model_mutex);
         if (frame.object_count != 0 && objects == NULL) {
             game_error(error, error_size, "out of memory");
@@ -809,6 +1454,20 @@ int zsharp_game_run(const char *title, const char *project_root,
             frame.object_count += 3;
         }
         profile_snapshot = SDL_GetTicksNS();
+#ifdef ZSHARP_HAS_OPENXR
+        if(game.xr_backend && !zsharp_game_xr_draw(game.xr_backend,game.renderer,&xr_snapshot,&frame,error,error_size)){free(objects);goto done;}
+        if(game.xr_backend) {
+            size_t hovered[2]={zsharp_game_xr_hovered_button(game.xr_backend,0),
+                zsharp_game_xr_hovered_button(game.xr_backend,1)};
+            if(!dispatch_xr_buttons(&game,&frame,&xr_snapshot,hovered,
+                xr_scene_generation,callback,user_data,&runtime,error,error_size)) {
+                free(objects);goto done;
+            }
+        } else if(game.xr_ui_test && !test_xr_buttons(&game,&frame,xr_scene_generation,
+            callback,user_data,&runtime,error,error_size)) {
+            free(objects);goto done;
+        }
+#endif
         if (!zsharp_game_vulkan_draw(game.renderer, resized, &frame,
                                      error, error_size)) {
             free(objects);
@@ -828,6 +1487,7 @@ int zsharp_game_run(const char *title, const char *project_root,
 done:
     zsharp_settings_free(&settings);
     game.cancelled = 1;
+    stop_gamepad_rumble(&game);
     if (tasks_started && callback != NULL) {
         char stop_error[512] = {0};
         if (!callback(user_data, ZSHARP_WINDOW_TASKS_STOP, &runtime,
@@ -847,6 +1507,11 @@ done:
         SDL_free(game.achievement_samples);
     free(game.window_icon_path);
     if (game.gamepad != NULL) SDL_CloseGamepad(game.gamepad);
+    if (game.test_gamepad_joystick) SDL_CloseJoystick(game.test_gamepad_joystick);
+    if (game.test_gamepad_id) SDL_DetachVirtualJoystick(game.test_gamepad_id);
+#ifdef ZSHARP_HAS_OPENXR
+    zsharp_game_xr_destroy(game.xr_backend);
+#endif
     zsharp_game_vulkan_destroy(game.renderer);
     if (game.window != NULL) SDL_DestroyWindow(game.window);
     if (game.model_mutex != NULL) SDL_DestroyMutex(game.model_mutex);

@@ -2442,6 +2442,23 @@ static int same_active_scene(const ZSharpGameModel *model,
            strcmp(model->active_scene, object->scene) == 0;
 }
 
+static int button_is_hovered(const ZSharpGameModel *model, size_t index,
+                              const ZSharpGameObject *mouse_hover) {
+    const ZSharpGameObject *object = &model->objects[index];
+    if (!object->visible || object->opacity <= 0.0f ||
+        !same_active_scene(model, object)) return 0;
+    if (model->xr_ui_active)
+        return model->xr_hovered_buttons[0] == index + 1 ||
+               model->xr_hovered_buttons[1] == index + 1;
+    return mouse_hover == object;
+}
+
+static void invalidate_scene_ui(ZSharpGameModel *model) {
+    ++model->scene_generation;
+    model->focused_button = 0;
+    model->xr_hovered_buttons[0] = model->xr_hovered_buttons[1] = 0;
+}
+
 const char *zsharp_game_model_scene_title(const ZSharpGameModel *model) {
     ZSharpGameScene *scene = model == NULL
         ? NULL : find_scene(model, model->active_scene);
@@ -3044,7 +3061,7 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
     model->delta = delta;
     model->elapsed += delta;
     {
-        const ZSharpGameObject *hover = model->input.mouse_captured ? NULL :
+        const ZSharpGameObject *hover = model->xr_ui_active || model->input.mouse_captured ? NULL :
             zsharp_game_model_button_at(model,model->input.mouse_x,model->input.mouse_y);
         size_t k;
         for(k=0;k<model->object_count;k++) {
@@ -3052,13 +3069,13 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
             unsigned color=object->color; float opacity=object->opacity,sx=object->scale_x,sy=object->scale_y;
             double target[6];
             if(object->shape!=ZGAME_SHAPE_BUTTON || object->style_transition_duration<=0)continue;
-            if(!model->input.mouse_captured && model->focused_button==k+1) {
+            if((model->xr_ui_active || !model->input.mouse_captured) && model->focused_button==k+1) {
                 if(object->focus_color_explicit)color=object->focus_color;
                 if(object->focus_style_mask&1)opacity=object->focus_opacity;
                 if(object->focus_style_mask&2)sx=object->focus_scale_x;
                 if(object->focus_style_mask&4)sy=object->focus_scale_y;
             }
-            if(hover==object) {
+            if(button_is_hovered(model,k,hover)) {
                 if(object->hover_color_explicit)color=object->hover_color;
                 if(object->hover_style_mask&1)opacity=object->hover_opacity;
                 if(object->hover_style_mask&2)sx=object->hover_scale_x;
@@ -3604,6 +3621,7 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
             return 0;
         }
         if (!replace_text(&model->active_scene, value)) return 0;
+        invalidate_scene_ui(model);
         for (index = 0; index < model->object_count; index++) {
             ZSharpGameObject *scene_object = &model->objects[index];
             if (scene_object->scene == NULL ||
@@ -3709,7 +3727,10 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
             model_error(error, error_size, "unknown game scene");
             return 0;
         }
-        return replace_text(&object->scene, value);
+        if (!replace_text(&object->scene, value)) return 0;
+        /* Changing membership also changes the active-scene render ordinals. */
+        invalidate_scene_ui(model);
+        return 1;
     }
     if (strcmp(field, "color") == 0) {
         char *end = NULL;
@@ -3872,7 +3893,7 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
     ZSharpGameScene *scene = find_scene(model, model->active_scene);
     size_t index;
     size_t count = 0;
-    const ZSharpGameObject *hovered_button = model->input.mouse_captured ? NULL :
+    const ZSharpGameObject *hovered_button = model->xr_ui_active || model->input.mouse_captured ? NULL :
         zsharp_game_model_button_at(model, model->input.mouse_x, model->input.mouse_y);
     memset(frame, 0, sizeof(*frame));
     *objects = model->object_count == 0 ? NULL :
@@ -3884,6 +3905,9 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
         if (!same_active_scene(model, source)) continue;
         target = &(*objects)[count++];
         target->render_id = count;
+        target->model_index = index + 1;
+        target->ui_base_scale_x = source->scale_x;
+        target->ui_base_scale_y = source->scale_y;
         target->shape = source->shape;
         target->x = source->x;
         target->y = source->y;
@@ -3902,10 +3926,11 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
         target->transparent_background = source->transparent_background;
         target->font_size = source->font_size;
         if (source->shape == ZGAME_SHAPE_BUTTON && source->hover_color_explicit &&
-            hovered_button == source)
+            button_is_hovered(model,index,hovered_button))
             target->color = source->hover_color;
         target->opacity = source->opacity;
-        if (source->shape == ZGAME_SHAPE_BUTTON && !model->input.mouse_captured) {
+        if (source->shape == ZGAME_SHAPE_BUTTON &&
+            (model->xr_ui_active || !model->input.mouse_captured)) {
             int focus = model->focused_button == index+1;
             if (focus && source->focus_color_explicit) target->color = source->focus_color;
             if (focus) {
@@ -3913,7 +3938,7 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
                 if (source->focus_style_mask & 2) target->scale_x = source->focus_scale_x;
                 if (source->focus_style_mask & 4) target->scale_y = source->focus_scale_y;
             }
-            if (hovered_button == source) {
+            if (button_is_hovered(model,index,hovered_button)) {
                 if (source->hover_color_explicit) target->color = source->hover_color;
                 if (source->hover_style_mask & 1) target->opacity = source->hover_opacity;
                 if (source->hover_style_mask & 2) target->scale_x = source->hover_scale_x;
@@ -3958,4 +3983,5 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
     frame->objects = *objects;
     frame->object_count = count;
 }
+#include "game_ui_regression.h"
 #endif

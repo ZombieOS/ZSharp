@@ -24,6 +24,11 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#ifdef _MSC_VER
+/* SDL's modern TaskDialog path needs Common Controls v6. The legacy fallback
+ * uses fixed-width buttons and clips "Play in Desktop Mode". */
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#endif
 #else
 #include <errno.h>
 #include <sys/stat.h>
@@ -1079,6 +1084,10 @@ static int open_package_command(const char *package_path, int argc,
         free(root);
         free(app_name);
         return 1;
+    }
+    if (!zsharp_settings_host_allowed(&settings,error,sizeof(error))) {
+        show_app_failure(app_name,error);fprintf(stderr,"package error: %s\n",error);
+        zsharp_settings_free(&settings);zsharp_package_info_free(&info);free(root);free(app_name);return 1;
     }
     if (version_is_newer_than_runtime(settings.zsharp_version)) {
         fprintf(stderr,

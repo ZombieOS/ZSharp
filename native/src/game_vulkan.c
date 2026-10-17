@@ -6,6 +6,7 @@
 #ifdef ZSHARP_HAS_GAME_RUNTIME
 
 #include <SDL3/SDL.h>
+#include "xr_debug_font.h"
 #include <ufbx.h>
 
 #include <math.h>
@@ -53,6 +54,7 @@ struct ZSharpGameVulkan {
     char driver[64];
     struct ZSharpTextureCache *textures;
     struct ZSharpMeshCache *meshes;
+    SDL_Surface *xr_font_atlas; /* Immutable RGBA32 pixels, renderer lifetime. */
     SDL_Texture *depth_texture;
     uint32_t *color_buffer;
     float *depth_buffer;
@@ -1384,6 +1386,534 @@ static SDL_Texture *load_sprite(ZSharpGameVulkan *renderer,
     return texture;
 }
 
+static int world_triangle(ZSharpGameVulkan *renderer,
+    const ZSharpGameRenderFrame *frame,const ZSharpGameRenderObject *object,
+    const float points[3][3],const float uv[3][2],const char *texture_path,
+    float brightness,const float *face_center,const float *face_normal,
+    ZSharpGameTriangleSink sink,void *user,char *error,size_t capacity) {
+    ZSharpGameWorldTriangle triangle={0};ZSharpProjectedCubeFace face={0};
+    float ab[3],ac[3],length;SDL_FColor color;int axis;
+    for(axis=0;axis<9;axis++)if(!isfinite(((const float *)points)[axis])) {
+        renderer_error(error,capacity,"non-finite world-space geometry");return 0;
+    }
+    for(axis=0;axis<3;axis++) {
+        ab[axis]=points[1][axis]-points[0][axis];ac[axis]=points[2][axis]-points[0][axis];
+        face.world_center[axis]=face_center ? face_center[axis] :
+            (points[0][axis]+points[1][axis]+points[2][axis])/3.0f;
+    }
+    face.world_normal[0]=ab[1]*ac[2]-ab[2]*ac[1];
+    face.world_normal[1]=ab[2]*ac[0]-ab[0]*ac[2];
+    face.world_normal[2]=ab[0]*ac[1]-ab[1]*ac[0];
+    length=sqrtf(face.world_normal[0]*face.world_normal[0]+face.world_normal[1]*face.world_normal[1]+face.world_normal[2]*face.world_normal[2]);
+    if(!isfinite(length)){renderer_error(error,capacity,"world-space geometry exceeds numeric range");return 0;}
+    if(length<0.00001f)return 1;
+    for(axis=0;axis<3;axis++)face.world_normal[axis]=face_normal ? face_normal[axis] : face.world_normal[axis]/length;
+    face.brightness=brightness;color=lit_face_color(frame,object,&face);
+    triangle.color[0]=color.r;triangle.color[1]=color.g;triangle.color[2]=color.b;triangle.color[3]=color.a;
+    memcpy(triangle.points,points,sizeof(triangle.points));memcpy(triangle.uv,uv,sizeof(triangle.uv));
+    if(texture_path && *texture_path) {
+        SDL_Texture *texture=load_sprite(renderer,frame,texture_path,error,capacity);
+        SDL_Surface *surface;if(!texture)return 0;surface=raster_surface(renderer,texture);
+        if(!surface){renderer_error(error,capacity,"missing cached texture surface");return 0;}
+        triangle.texture_key=surface;triangle.pixels=surface->pixels;
+        triangle.texture_width=surface->w;triangle.texture_height=surface->h;triangle.texture_pitch=surface->pitch;
+    }
+    if(!sink(user,&triangle)){renderer_error(error,capacity,"world geometry callback failed");return 0;}return 1;
+}
+
+/* UI keeps the existing logical pixel dimensions. Placing a width:160 button
+   at scaleX:.005 makes it .8 world units wide; its font uses that same scale.
+   Match cube/mesh rotations: Rx, Ry(rotationY + legacy rotation), then Rz. */
+typedef struct WorldUITransform {
+    float origin[3], basis[3][3], scale[2];
+} WorldUITransform;
+
+static void world_ui_transform(const ZSharpGameRenderObject *object,
+                                WorldUITransform *transform) {
+    ZSharpGameRenderObject unit = *object;
+    ZSharpMeshCache mesh = {0};
+    int axis, component;
+    mesh.source_extent[0] = mesh.source_extent[1] = mesh.source_extent[2] = 1;
+    unit.width = unit.height = unit.depth = 1;
+    unit.scale_x = unit.scale_y = unit.scale_z = 1;
+    unit.x = unit.y = unit.z = 0;
+    transform->origin[0] = object->x;
+    transform->origin[1] = object->y;
+    transform->origin[2] = object->z;
+    transform->scale[0] = object->scale_x;
+    transform->scale[1] = object->scale_y;
+    for (axis = 0; axis < 3; axis++) {
+        float point[3] = {0};
+        point[axis] = 1;
+        rotate_mesh_point(point, &unit, &mesh);
+        for (component = 0; component < 3; component++)
+            transform->basis[axis][component] = point[component];
+    }
+}
+
+static int world_ui_atlas(ZSharpGameVulkan *renderer,
+                          char *error, size_t capacity) {
+    enum { columns = 14, cell = 10 };
+    int glyph, row, column;
+    SDL_Surface *surface;
+    if (renderer->xr_font_atlas != NULL) return 1;
+    surface = SDL_CreateSurface(columns * cell,
+        ((SDL_DEBUG_FONT_NUM_GLYPHS + columns - 1) / columns) * cell,
+        SDL_PIXELFORMAT_RGBA32);
+    if (surface == NULL) {
+        renderer_error(error, capacity, SDL_GetError());
+        return 0;
+    }
+    memset(surface->pixels, 0, (size_t)surface->pitch * surface->h);
+    for (glyph = 0; glyph < SDL_DEBUG_FONT_NUM_GLYPHS; glyph++) {
+        int left = (glyph % columns) * cell + 1;
+        int top = (glyph / columns) * cell + 1;
+        for (row = 0; row < 8; row++) for (column = 0; column < 8; column++) {
+            if ((SDL_RenderDebugTextFontData[glyph * 8 + row] & (1u << column)) != 0) {
+                unsigned char *pixel = (unsigned char *)surface->pixels +
+                    (size_t)(top + row) * surface->pitch + (left + column) * 4;
+                memset(pixel, 255, 4);
+            }
+        }
+    }
+    renderer->xr_font_atlas = surface;
+    return 1;
+}
+
+static int world_ui_quad(const WorldUITransform *transform,
+                          float left, float bottom, float right, float top,
+                          float offset, unsigned rgb, float opacity,
+                          size_t ui_button_id,
+                          SDL_Surface *atlas, const float texture[4],
+                          ZSharpGameTriangleSink sink, void *user,
+                          char *error, size_t capacity) {
+    static const int indices[2][3] = {{0, 1, 2}, {0, 2, 3}};
+    float points[4][3];
+    float local[4][2] = {{left, bottom}, {right, bottom}, {right, top}, {left, top}};
+    float uv[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
+    SDL_FColor color = float_color_value(rgb);
+    int corner, axis, triangle;
+    if (left >= right || bottom >= top) return 1;
+    for (corner = 0; corner < 4; corner++) for (axis = 0; axis < 3; axis++) {
+        points[corner][axis] = transform->origin[axis] +
+            transform->basis[0][axis] * local[corner][0] * transform->scale[0] +
+            transform->basis[1][axis] * local[corner][1] * transform->scale[1] +
+            transform->basis[2][axis] * offset;
+        if (!isfinite(points[corner][axis])) {
+            renderer_error(error, capacity, "non-finite world-space UI geometry");
+            return 0;
+        }
+    }
+    if (texture != NULL) for (corner = 0; corner < 4; corner++) {
+        uv[corner][0] = texture[0] + uv[corner][0] * (texture[2] - texture[0]);
+        uv[corner][1] = texture[1] + uv[corner][1] * (texture[3] - texture[1]);
+    }
+    for (triangle = 0; triangle < 2; triangle++) {
+        ZSharpGameWorldTriangle result = {0};
+        result.ui_button_id = ui_button_id;
+        for (corner = 0; corner < 3; corner++) {
+            memcpy(result.points[corner], points[indices[triangle][corner]], sizeof(result.points[corner]));
+            memcpy(result.uv[corner], uv[indices[triangle][corner]], sizeof(result.uv[corner]));
+        }
+        result.color[0] = color.r;
+        result.color[1] = color.g;
+        result.color[2] = color.b;
+        result.color[3] = opacity;
+        if (atlas != NULL) {
+            result.texture_key = atlas;
+            result.pixels = atlas->pixels;
+            result.texture_width = atlas->w;
+            result.texture_height = atlas->h;
+            result.texture_pitch = atlas->pitch;
+        }
+        if (!sink(user, &result)) {
+            renderer_error(error, capacity, "world UI geometry callback failed");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static size_t world_ui_line_length(const char *text) {
+    size_t count = 0;
+    Uint32 character;
+    while ((character = SDL_StepUTF8(&text, NULL)) != 0 && character != '\n') {
+        if (character != '\r') count += character == '\t' ? 4 : 1;
+    }
+    return count;
+}
+
+static int world_ui_object(ZSharpGameVulkan *renderer,
+                            const ZSharpGameRenderFrame *frame,
+                            const ZSharpGameRenderObject *object,
+                            ZSharpGameTriangleSink sink, void *user,
+                            char *error, size_t capacity) {
+    const char *text = object->text == NULL ? "" : object->text;
+    const int button = object->shape == ZGAME_SHAPE_BUTTON;
+    const float font = object->font_size > 0 ? object->font_size : 8;
+    const float width = fabsf(object->width), height = fabsf(object->height);
+    const float left = -width * .5f, right = width * .5f;
+    const float bottom = -height * .5f, top = height * .5f;
+    WorldUITransform transform;
+    unsigned color = object->color;
+    float x = 0, y = 0;
+    size_t lines = 1;
+    Uint32 character;
+    world_ui_transform(object, &transform);
+    if (button) {
+        const char *cursor;
+        unsigned contrast = object->transparent_background ? frame->background : object->color;
+        unsigned brightness = ((contrast >> 16) & 255) + ((contrast >> 8) & 255) + (contrast & 255);
+        if (!object->transparent_background &&
+            !world_ui_quad(&transform, left, bottom, right, top, 0,
+                object->color, object->opacity, object->render_id,
+                NULL, NULL, sink, user, error, capacity)) return 0;
+        color = brightness > 382 ? 0 : 0xffffff;
+        for (cursor = text; *cursor; cursor++) if (*cursor == '\n') lines++;
+        y = (float)lines * font * .5f;
+        x = -(float)world_ui_line_length(text) * font * .5f;
+    }
+    if (*text == '\0') return 1;
+    if (!world_ui_atlas(renderer, error, capacity)) return 0;
+    while ((character = SDL_StepUTF8(&text, NULL)) != 0) {
+        float glyph_left, glyph_right, glyph_bottom, glyph_top, texture[4];
+        int glyph;
+        if (character == '\r') continue;
+        if (character == '\n') {
+            y -= font;
+            x = button ? -(float)world_ui_line_length(text) * font * .5f : 0;
+            continue;
+        }
+        if (character == '\t') { x += font * 4; continue; }
+        glyph_left = x; glyph_right = x + font;
+        glyph_top = y; glyph_bottom = y - font;
+        x += font;
+        if (character <= 32 || (character >= 127 && character <= 160)) continue;
+        glyph = character < 127 ? (int)character - 33 :
+            character <= 255 ? (int)character - 67 : SDL_DEBUG_FONT_NUM_GLYPHS - 1;
+        texture[0] = (float)((glyph % 14) * 10 + 1) / renderer->xr_font_atlas->w;
+        texture[1] = (float)((glyph / 14) * 10 + 1) / renderer->xr_font_atlas->h;
+        texture[2] = texture[0] + 8.0f / renderer->xr_font_atlas->w;
+        texture[3] = texture[1] + 8.0f / renderer->xr_font_atlas->h;
+        if (button) {
+            float original_left = glyph_left, original_bottom = glyph_bottom;
+            float original_texture[4];
+            memcpy(original_texture, texture, sizeof(texture));
+            glyph_left = fmaxf(glyph_left, left); glyph_right = fminf(glyph_right, right);
+            glyph_bottom = fmaxf(glyph_bottom, bottom); glyph_top = fminf(glyph_top, top);
+            if (glyph_left >= glyph_right || glyph_bottom >= glyph_top) continue;
+            texture[0] = original_texture[0] + (glyph_left - original_left) / font * (original_texture[2] - original_texture[0]);
+            texture[2] = original_texture[0] + (glyph_right - original_left) / font * (original_texture[2] - original_texture[0]);
+            texture[1] = original_texture[3] - (glyph_top - original_bottom) / font * (original_texture[3] - original_texture[1]);
+            texture[3] = original_texture[3] - (glyph_bottom - original_bottom) / font * (original_texture[3] - original_texture[1]);
+        }
+        /* A small normal offset prevents glyph/background z-fighting while
+           keeping the whole panel depth-tested against the game world. */
+        if (!world_ui_quad(&transform, glyph_left, glyph_bottom, glyph_right, glyph_top,
+            button ? .0005f : 0, color, object->opacity,
+            button ? object->render_id : 0, renderer->xr_font_atlas,
+            texture, sink, user, error, capacity)) return 0;
+    }
+    return 1;
+}
+
+int zsharp_game_vulkan_world_filtered(ZSharpGameVulkan *renderer,const ZSharpGameRenderFrame *input,
+    ZSharpGameTriangleSink sink,ZSharpGameObjectFilter filter,void *user,char *error,size_t capacity) {
+    ZSharpGameRenderFrame frame;size_t i;int face,corner,axis;
+    static const int indices[6][4]={{0,2,3,1},{4,5,7,6},{0,1,5,4},{2,6,7,3},{0,4,6,2},{1,3,7,5}};
+    static const float brightness[]={.58f,.82f,.68f,1,.74f,.90f};
+    static const float uv[4][2]={{0,1},{1,1},{1,0},{0,0}};
+    if(!renderer || !input || !sink){renderer_error(error,capacity,"invalid world geometry request");return 0;}
+    frame=*input;
+    if(!shadow_prepare(&renderer->shadows,&frame)){renderer_error(error,capacity,"out of memory building XR shadow index");return 0;}
+    frame.shadow_index=&renderer->shadows;
+    if(frame.object_count>renderer->light_capacity) {
+        void *memory=realloc(renderer->lights,frame.object_count*sizeof(*renderer->lights));
+        if(!memory){renderer_error(error,capacity,"out of memory indexing XR lights");return 0;}
+        renderer->lights=memory;renderer->light_capacity=frame.object_count;
+    }
+    frame.lights=renderer->lights;frame.light_count=0;frame.indexed_lights=1;
+    for(i=0;i<frame.object_count;i++)if(frame.objects[i].visible && frame.objects[i].shape==ZGAME_SHAPE_LIGHT)
+        renderer->lights[frame.light_count++]=&frame.objects[i];
+    for(i=0;i<frame.object_count;i++) {
+        const ZSharpGameRenderObject *o=&frame.objects[i];
+        if(!o->visible || o->opacity<=0 || o->shape==ZGAME_SHAPE_LIGHT || o->shape==ZGAME_SHAPE_NAV)continue;
+        if(filter && !filter(user,o))continue;
+        if(o->shape==ZGAME_SHAPE_CUBE) {
+            float points[8][3];ZSharpMeshCache unit={0};unit.source_extent[0]=unit.source_extent[1]=unit.source_extent[2]=1;
+            if(o->transparent_background && (!o->asset_path || !*o->asset_path))continue;
+            for(corner=0;corner<8;corner++) {
+                points[corner][0]=(corner&1)?.5f:-.5f;points[corner][1]=(corner&2)?.5f:-.5f;points[corner][2]=(corner&4)?.5f:-.5f;
+                rotate_mesh_point(points[corner],o,&unit);
+            }
+            for(face=0;face<6;face++) {
+                float center[3]={0},ab[3],ac[3],normal[3],length;int t;
+                for(corner=0;corner<4;corner++)for(axis=0;axis<3;axis++)center[axis]+=points[indices[face][corner]][axis]*.25f;
+                for(axis=0;axis<3;axis++){ab[axis]=points[indices[face][1]][axis]-points[indices[face][0]][axis];ac[axis]=points[indices[face][2]][axis]-points[indices[face][0]][axis];}
+                normal[0]=ab[1]*ac[2]-ab[2]*ac[1];normal[1]=ab[2]*ac[0]-ab[0]*ac[2];normal[2]=ab[0]*ac[1]-ab[1]*ac[0];
+                length=sqrtf(normal[0]*normal[0]+normal[1]*normal[1]+normal[2]*normal[2]);
+                if(length<.00001f)continue;for(axis=0;axis<3;axis++)normal[axis]/=length;
+                for(t=0;t<2;t++) {
+                    int c[3]={0,t?2:1,t?3:2};float p[3][3],tex[3][2];
+                    for(corner=0;corner<3;corner++){memcpy(p[corner],points[indices[face][c[corner]]],sizeof(p[corner]));memcpy(tex[corner],uv[c[corner]],sizeof(tex[corner]));}
+                    if(!world_triangle(renderer,&frame,o,p,tex,o->asset_path,brightness[face],center,normal,sink,user,error,capacity))return 0;
+                }
+            }
+        } else if(o->shape==ZGAME_SHAPE_MESH) {
+            ZSharpMeshCache *mesh=load_mesh(renderer,&frame,o->mesh_path,error,capacity);ufbx_scene *posed;char pose_error[256]={0};size_t t;
+            if(!mesh)return 0;posed=evaluate_bone_pose(mesh,o,pose_error,sizeof(pose_error));
+            if(*pose_error){renderer_error(error,capacity,pose_error);return 0;}
+            for(t=0;t<mesh->triangle_count;t++) {
+                const ZSharpCachedTriangle *source=&mesh->triangles[t];float points[3][3],tex[3][2];int ok;
+                for(corner=0;corner<3;corner++) {
+                    if(posed && source->node->mesh && source->node->mesh->skin_deformers.count) {
+                        const ufbx_node *node=posed->nodes.data[source->node->typed_id];const ufbx_mesh *skinned=node->mesh;
+                        ufbx_vec3 p=ufbx_get_vertex_vec3(&skinned->skinned_position,source->vertex_indices[corner]);
+                        if(skinned->skinned_is_local)p=ufbx_transform_position(&node->geometry_to_world,p);
+                        points[corner][0]=(float)p.x;points[corner][1]=(float)p.y;points[corner][2]=(float)p.z;
+                    }else {memcpy(points[corner],source->points[corner],sizeof(points[corner]));animate_mesh_part(points[corner],source,o);}
+                    rotate_mesh_point(points[corner],o,mesh);tex[corner][0]=source->uv[corner][0];tex[corner][1]=1-source->uv[corner][1];
+                }
+                ok=world_triangle(renderer,&frame,o,points,tex,mesh_texture_path(o,source->material),1,NULL,NULL,sink,user,error,capacity);
+                if(!ok){if(posed)ufbx_free_scene(posed);return 0;}
+            }
+            if(posed)ufbx_free_scene(posed);
+        } else if(o->shape==ZGAME_SHAPE_BUTTON || o->shape==ZGAME_SHAPE_TEXT) {
+            if(!world_ui_object(renderer,&frame,o,sink,user,error,capacity))return 0;
+        } else {
+            renderer_error(error,capacity,"PCVR world renderer does not yet support sprite/rectangle/circle/triangle geometry");return 0;
+        }
+    }
+    return 1;
+}
+
+int zsharp_game_vulkan_world(ZSharpGameVulkan *renderer,const ZSharpGameRenderFrame *frame,
+    ZSharpGameTriangleSink sink,void *user,char *error,size_t capacity) {
+    return zsharp_game_vulkan_world_filtered(renderer,frame,sink,NULL,user,error,capacity);
+}
+
+typedef struct WorldProbe {size_t count,textured;float front,low[3],high[3];double sum[3];} WorldProbe;
+static int only_receiver(void *user,const ZSharpGameRenderObject *object){(void)user;return object->render_id==1;}
+static int probe_world(void *user,const ZSharpGameWorldTriangle *triangle) {
+    WorldProbe *probe=user;int c,a;probe->count++;
+    if(triangle->pixels && triangle->texture_width>0 && triangle->texture_height>0)probe->textured++;
+    if(fabsf(triangle->points[0][2]+1)<.00001f && fabsf(triangle->points[1][2]+1)<.00001f && fabsf(triangle->points[2][2]+1)<.00001f)probe->front=triangle->color[0];
+    for(c=0;c<3;c++)for(a=0;a<3;a++) {
+        float p=triangle->points[c][a];if(!isfinite(p))return 0;
+        probe->sum[a]+=p;
+        if(p<probe->low[a])probe->low[a]=p;if(p>probe->high[a])probe->high[a]=p;
+    }return 1;
+}
+static int world_regression(ZSharpGameVulkan *renderer,const char *assets,char *error,size_t capacity) {
+    ZSharpGameRenderObject objects[3]={{0}};ZSharpGameRenderFrame frame={0};WorldProbe probe={0};
+    float lit,shadowed;int i;
+    for(i=0;i<3;i++) {
+        objects[i].shape=ZGAME_SHAPE_CUBE;objects[i].visible=1;objects[i].opacity=1;
+        objects[i].width=objects[i].height=objects[i].depth=2;objects[i].color=0xffffff;
+        objects[i].scale_x=objects[i].scale_y=objects[i].scale_z=1;objects[i].render_id=i+1;
+    }
+    frame.objects=objects;frame.object_count=1;frame.is_3d=1;frame.project_root=assets;
+    if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || probe.count!=12 || fabsf(probe.front-.58f)>.0001f)goto failed;
+    objects[1].shape=ZGAME_SHAPE_LIGHT;objects[1].light_intensity=100;objects[1].light_range=10;
+    objects[1].light_type=1;objects[1].cast_shadows=1;objects[1].z=-5;frame.object_count=2;
+    memset(&probe,0,sizeof(probe));
+    if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity))goto failed;lit=probe.front;
+    objects[2].z=-3;objects[2].depth=.2f;frame.object_count=3;memset(&probe,0,sizeof(probe));
+    if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity))goto failed;shadowed=probe.front;
+    if(!(lit>shadowed+.05f))goto failed;
+    memset(&probe,0,sizeof(probe));
+    if(!zsharp_game_vulkan_world_filtered(renderer,&frame,probe_world,only_receiver,&probe,error,capacity) || probe.count!=12 || fabsf(probe.front-shadowed)>.001f)goto failed;
+    objects[1].cast_shadows=0;memset(&probe,0,sizeof(probe));
+    if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || fabsf(probe.front-lit)>.001f)goto failed;
+    frame.object_count=2;objects[1].light_type=2;objects[1].light_angle=60;objects[1].rotation_y=180;
+    memset(&probe,0,sizeof(probe));if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity))goto failed;lit=probe.front;
+    objects[1].rotation_y=0;memset(&probe,0,sizeof(probe));
+    if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || !(lit>probe.front+.05f))goto failed;
+    objects[1].light_type=3;objects[1].rotation_y=180;memset(&probe,0,sizeof(probe));
+    if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || probe.front<.5f)goto failed;
+    frame.object_count=3;
+    objects[2].visible=0;objects[1].visible=0;objects[0].x=3;objects[0].width=4;objects[0].height=2;objects[0].depth=6;objects[0].rotation_y=90;
+    memset(&probe,0,sizeof(probe));
+    if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || probe.count!=12 || fabsf(probe.high[0]-6)>.001f || fabsf(probe.low[2]+2)>.001f)goto failed;
+    if(assets && strcmp(assets,"1")) {
+        ZSharpMeshCache *mesh;ZSharpGamePartPose pose={0};size_t n;double before;
+        objects[0].shape=ZGAME_SHAPE_MESH;objects[0].mesh_path="model.fbx";objects[0].asset_path="checker.png";
+        frame.object_count=1;memset(&probe,0,sizeof(probe));
+        if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || !probe.count || probe.count!=probe.textured)goto failed;
+        before=probe.sum[0]+probe.sum[1]+probe.sum[2];mesh=load_mesh(renderer,&frame,"model.fbx",error,capacity);
+        if(!mesh)goto failed;
+        for(n=0;n<mesh->scene->nodes.count;n++)if(mesh->scene->nodes.data[n]->bone){pose.name=mesh->scene->nodes.data[n]->name.data;break;}
+        if(!pose.name)for(n=0;n<mesh->scene->nodes.count;n++)if(mesh->scene->nodes.data[n]->mesh){pose.name=mesh->scene->nodes.data[n]->name.data;break;}
+        if(!pose.name)goto failed;pose.position[0]=5;pose.rotation[2]=30;
+        objects[0].part_pose_count=1;objects[0].part_poses=&pose;memset(&probe,0,sizeof(probe));
+        if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || fabs(probe.sum[0]+probe.sum[1]+probe.sum[2]-before)<.001)goto failed;
+    }
+    fprintf(stderr,"PASS: XR shared world transforms, FBX/material stream, lights and moving shadow state\n");
+    return 1;
+failed:
+    if(!*error)renderer_error(error,capacity,"shared world geometry/light/shadow regression failed");return 0;
+}
+
+typedef struct WorldUIProbe {
+    size_t count, textured, white, black;
+    size_t button_owned, wrong_owner;
+    float low[3], high[3], first[3], alpha;
+    const void *texture_key;
+} WorldUIProbe;
+
+static void world_ui_probe_reset(WorldUIProbe *probe) {
+    int axis;
+    memset(probe, 0, sizeof(*probe));
+    for (axis = 0; axis < 3; axis++) {
+        probe->low[axis] = FLT_MAX;
+        probe->high[axis] = -FLT_MAX;
+    }
+}
+
+static int probe_world_ui(void *user, const ZSharpGameWorldTriangle *triangle) {
+    WorldUIProbe *probe = user;
+    int corner, axis;
+    if (!probe->count) memcpy(probe->first, triangle->points[0], sizeof(probe->first));
+    probe->count++;
+    if (triangle->ui_button_id == 7) probe->button_owned++;
+    else if (triangle->ui_button_id != 0) probe->wrong_owner++;
+    probe->alpha = triangle->color[3];
+    if (triangle->texture_key != NULL) {
+        if (probe->texture_key != NULL && probe->texture_key != triangle->texture_key) return 0;
+        probe->texture_key = triangle->texture_key;
+        probe->textured++;
+        if (triangle->color[0] == 1 && triangle->color[1] == 1 && triangle->color[2] == 1) probe->white++;
+        if (triangle->color[0] == 0 && triangle->color[1] == 0 && triangle->color[2] == 0) probe->black++;
+    }
+    for (corner = 0; corner < 3; corner++) for (axis = 0; axis < 3; axis++) {
+        float value = triangle->points[corner][axis];
+        if (!isfinite(value)) return 0;
+        probe->low[axis] = fminf(probe->low[axis], value);
+        probe->high[axis] = fmaxf(probe->high[axis], value);
+    }
+    return 1;
+}
+
+/* Opt-in execution test of the same geometry stream consumed by both eyes.
+   No headset or GPU readback is required; the atlas is the real cached one. */
+static int world_ui_regression(ZSharpGameVulkan *renderer,
+                                char *error, size_t capacity) {
+    ZSharpGameRenderObject objects[2] = {{0}};
+    ZSharpGameRenderFrame frame = {0};
+    ZSharpGameRenderObject *button = objects;
+    WorldUIProbe probe;
+    const void *atlas;
+    const char *stage = "button dimensions/font scale";
+    int axis, row, column, solid = 0, clear = 0;
+    button->shape = ZGAME_SHAPE_BUTTON;
+    button->render_id = 7;
+    button->visible = 1;
+    button->opacity = 1;
+    button->width = 160;
+    button->height = 32;
+    button->font_size = 16;
+    button->scale_x = button->scale_y = .005f;
+    button->scale_z = 1;
+    button->x = 1; button->y = 2; button->z = -3;
+    button->color = 0xffffff;
+    button->text = "Hi";
+    frame.objects = objects; frame.object_count = 1; frame.is_3d = 1;
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) ||
+        probe.count != 6 || probe.textured != 4 || probe.black != 4 ||
+        probe.button_owned != 6 || probe.wrong_owner ||
+        fabsf(probe.low[0] - .6f) > .0001f || fabsf(probe.high[0] - 1.4f) > .0001f ||
+        fabsf(probe.low[1] - 1.92f) > .0001f || fabsf(probe.high[1] - 2.08f) > .0001f) goto failed;
+    atlas = probe.texture_key;
+    stage = "immutable binary-alpha RGBA font atlas";
+    if (!atlas || atlas != renderer->xr_font_atlas) goto failed;
+    for (row = 0; row < renderer->xr_font_atlas->h; row++)
+        for (column = 0; column < renderer->xr_font_atlas->w; column++) {
+            const unsigned char *pixel = (const unsigned char *)renderer->xr_font_atlas->pixels +
+                (size_t)row * renderer->xr_font_atlas->pitch + column * 4;
+            if (pixel[3] == 255) {
+                solid++;
+                if (pixel[0] != 255 || pixel[1] != 255 || pixel[2] != 255) goto failed;
+            } else if (pixel[3] == 0) clear++;
+            else goto failed;
+        }
+    if (!solid || !clear) goto failed;
+    stage = "UI remains unlit beside bright scene light";
+    objects[1].shape = ZGAME_SHAPE_LIGHT; objects[1].visible = 1;
+    objects[1].light_type = 1; objects[1].light_intensity = 1000;
+    objects[1].light_range = 100; objects[1].color = 0xff0000;
+    frame.object_count = 2;
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) ||
+        probe.count != 6 || probe.black != 4 || probe.texture_key != atlas) goto failed;
+    frame.object_count = 1;
+    stage = "transparent button retains stable contrast label";
+    button->transparent_background = 1; button->color = 0xffffff;
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) ||
+        probe.count != 4 || probe.white != 4 || probe.texture_key != atlas) goto failed;
+    if (probe.button_owned != 4 || probe.wrong_owner) goto failed;
+    button->color = 0;
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) ||
+        probe.count != 4 || probe.white != 4) goto failed;
+    stage = "button label clips to its logical bounds";
+    button->width = button->height = 8; button->text = "H";
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) ||
+        probe.count != 2 || fabsf(probe.low[0] - .98f) > .0001f ||
+        probe.button_owned != 2 || probe.wrong_owner ||
+        fabsf(probe.high[0] - 1.02f) > .0001f ||
+        fabsf(probe.low[1] - 1.98f) > .0001f || fabsf(probe.high[1] - 2.02f) > .0001f) goto failed;
+    stage = "world text multiline, per-axis scale and rotation";
+    button->shape = ZGAME_SHAPE_TEXT; button->text = "A\nB";
+    button->font_size = 8; button->scale_x = .01f; button->scale_y = .02f;
+    button->rotation_y = 90; button->opacity = .35f;
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) ||
+        probe.count != 4 || probe.texture_key != atlas || fabsf(probe.alpha - .35f) > .0001f ||
+        probe.button_owned != 0 || probe.wrong_owner ||
+        fabsf(probe.low[0] - 1) > .0001f || fabsf(probe.high[0] - 1) > .0001f ||
+        fabsf(probe.low[1] - 1.68f) > .0001f || fabsf(probe.high[1] - 2) > .0001f ||
+        fabsf(probe.low[2] + 3.08f) > .0001f || fabsf(probe.high[2] + 3) > .0001f) goto failed;
+    stage = "UTF-8 Latin glyphs and unsupported-codepoint fallback";
+    button->text = "A\xc3\xa9\xf0\x9f\x99\x82";
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) ||
+        probe.count != 6 || probe.texture_key != atlas) goto failed;
+    stage = "button XYZ and legacy rotation match cubes";
+    button->shape = ZGAME_SHAPE_BUTTON; button->text = "";
+    button->transparent_background = 0; button->width = 160; button->height = 32;
+    button->rotation = 20; button->rotation_x = 25;
+    button->rotation_y = 15; button->rotation_z = 35;
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) ||
+        probe.count != 2) goto failed;
+    if (probe.button_owned != 2 || probe.wrong_owner) goto failed;
+    {
+        ZSharpMeshCache unit = {0};
+        ZSharpGameRenderObject transform = *button;
+        float point[3] = {-80, -16, 0};
+        unit.source_extent[0] = unit.source_extent[1] = unit.source_extent[2] = 1;
+        transform.width = transform.height = transform.depth = 1;
+        rotate_mesh_point(point, &transform, &unit);
+        for (axis = 0; axis < 3; axis++) if (fabsf(point[axis] - probe.first[axis]) > .0001f) goto failed;
+    }
+    stage = "hidden and zero-opacity UI skip geometry";
+    button->visible = 0;
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) || probe.count) goto failed;
+    button->visible = 1; button->opacity = 0;
+    world_ui_probe_reset(&probe);
+    if (!zsharp_game_vulkan_world(renderer, &frame, probe_world_ui, &probe, error, capacity) || probe.count) goto failed;
+    fprintf(stderr, "PASS: XR world UI buttons/text, scale/rotation, clipping, unlit contrast, opacity, UTF-8 and cached font cutouts\n");
+    return 1;
+failed:
+    if (error != NULL && capacity != 0 && *error == '\0')
+        snprintf(error, capacity, "XR world UI regression failed: %s", stage);
+    return 0;
+}
+
 static int raster_regression(void) {
     ZSharpGameVulkan test = {0};
     ZSharpProjectedCubeFace face = {0};
@@ -1581,6 +2111,12 @@ ZSharpGameVulkan *zsharp_game_vulkan_create(SDL_Window *window, char *error,
         renderer_error(error,error_size,"GPU depth/blend regression failed");
         zsharp_game_vulkan_destroy(renderer);return NULL;
     }
+    if(getenv("ZSHARP_GAME_WORLD_TEST") && !world_regression(renderer,getenv("ZSHARP_GAME_WORLD_TEST"),error,error_size)) {
+        zsharp_game_vulkan_destroy(renderer);return NULL;
+    }
+    if(getenv("ZSHARP_GAME_WORLD_UI_TEST") && !world_ui_regression(renderer,error,error_size)) {
+        zsharp_game_vulkan_destroy(renderer);return NULL;
+    }
     if(getenv("ZSHARP_GAME_PROFILE"))fprintf(stderr,"[Z# renderer] %s\n",renderer->driver);
     return renderer;
 }
@@ -1623,6 +2159,10 @@ int zsharp_game_vulkan_draw(ZSharpGameVulkan *renderer, int resized,
     if (renderer == NULL || renderer->renderer == NULL || frame == NULL) {
         renderer_error(error, error_size, "invalid Vulkan frame");
         return 0;
+    }
+    if(getenv("ZSHARP_GAME_WORLD_TEST")) {
+        WorldProbe probe={0};
+        if(!zsharp_game_vulkan_world(renderer,frame,probe_world,&probe,error,error_size))return 0;
     }
     indexed=*frame;
     zsharp_game_prepare_projection(&indexed);
@@ -1867,6 +2407,8 @@ void zsharp_game_vulkan_destroy(ZSharpGameVulkan *renderer) {
     ZSharpTextureCache *texture;
     ZSharpMeshCache *mesh;
     if (renderer == NULL) return;
+    if (renderer->xr_font_atlas != NULL)
+        SDL_DestroySurface(renderer->xr_font_atlas);
     if (renderer->depth_texture != NULL)
         SDL_DestroyTexture(renderer->depth_texture);
     free(renderer->color_buffer);

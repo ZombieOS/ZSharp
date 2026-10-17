@@ -1,5 +1,557 @@
 # Z# syntax guide
 
+## Experimental PCVR and hand tracking (1.3.0.0, desktop only)
+
+```javascript
+AllowedDevices (
+ Windows: true:
+ Linux: true:
+ MacOS: true:
+ XR: true:
+):
+XR (
+ required: false:
+):
+```
+
+These blocks belong in `project.zsettings`. Omitting AllowedDevices preserves
+existing OS support and disables XR. When the block is present, omitted OS
+fields are disabled. Values are literal `true`/`false`; duplicate/unknown
+fields are errors. XR required true requires AllowedDevices XR true. OS
+restriction checks happen at execution, not packaging, so cross-platform
+packaging is still possible. These settings require ZSharp 1.3.0.0 or newer.
+Android/iOS entries are not accepted by this desktop prototype.
+
+Optional XR shows a VR/Desktop launch menu. VR checks for a usable OpenXR
+runtime/headset; failure offers Close (cancel launch) or Play in Desktop Mode.
+Required XR skips mode selection and has no desktop fallback. Desktop-only
+projects never initialize OpenXR. The initial PCVR backend is Windows-only;
+enabling Linux/MacOS permits desktop execution there, not PCVR support.
+
+All XR script properties/commands require this import in their using room:
+
+```javascript
+import ZSharp.XR():
+
+XR.available
+XR.active
+XR.focused
+XR.head.tracked
+XR.head.positionX
+XR.head.positionY
+XR.head.positionZ
+XR.head.rotationX
+XR.head.rotationY
+XR.head.rotationZ
+
+number.set:XR.rig.positionX = 0:
+number.set:XR.rig.positionY = 0:
+number.set:XR.rig.positionZ = 0:
+number.set:XR.rig.rotationY = 90:
+
+XR.left.tracked
+XR.left.positionX
+XR.left.rotationY
+XR.right.trigger.value
+XR.right.trigger.held
+XR.right.trigger.pressed
+XR.right.trigger.released
+XR.left.grip.value
+XR.left.grip.held
+XR.left.grip.pressed
+XR.left.grip.released
+XR.right.stick.x
+XR.right.stick.y
+XR.right.stick.angle
+XR.right.stick.magnitude
+XR.right.stick.held
+XR.right.stick.pressed
+XR.right.stick.released
+XR.right.a.pressed
+XR.right.b.pressed
+XR.left.x.pressed
+XR.left.y.pressed
+XR.right.vibrate(75, 200ms):
+```
+
+Both hands expose positionX/Y/Z and rotationX/Y/Z. Poses are read-only,
+tracked-space coordinates relative to the rig, measured in meters and degrees.
+Tracked flags indicate whether the pose is currently tracked; a lost pose can
+retain its last valid coordinates, so check tracked before using it. Rig
+translation and yaw are writable and transform the player's tracked space,
+without overwriting physical head/controller tracking. The floor/stage origin
+is preferred; local-space fallback assumes 1.6 m eye height. Scale and rig
+pitch/roll are not writable in this prototype.
+
+Trigger/grip values are decimals 0..1; held uses a 0.5 threshold. Stick axes are
+-1..1, with positive Y forward and a radial 0.15 center deadzone. Angle is
+clockwise 0..360 degrees (0 forward, 90 right, 180 back, 270 left); centered
+angle is 0. Magnitude is a decimal 0..1, clamped to the circular range. Stick
+held/pressed/released refer to pressing the stick button, not tilting it.
+A/B belong to the right hand and X/Y to the left; each supports held, pressed
+and released. Button edges are retained until read once by each Z# task;
+multiple queued edges are consumed on successive reads. New tasks ignore
+earlier edges. Focus loss clears held input and generates releases.
+
+Vibration strength is 0..100, with a duration literal in ms/s (0..10 seconds).
+Strength 0 or duration 0 stops that controller's vibration. Calls queue a
+request for the XR frame thread; the latest queued request wins. No haptics
+are sent without XR focus. Unavailable/desktop mode returns dead/zero for XR
+reads and does not vibrate controllers. `available` currently describes the
+successfully initialized XR session, not a separate desktop hardware probe.
+
+The first backend uses OpenXR stereo projection and Direct3D 11 on the
+runtime-selected GPU, without replacing the desktop SDL/Vulkan renderer.
+Headset rendering supports cubes and imported FBX meshes, including existing
+mesh-part/bone poses, material textures, opacity, cutouts, point/spot/directional
+lights and shadows. Use the same `.zobject`, `.zmodel`, scene `texture`,
+`surface`, `rotations`, light attributes and `.zanimation` syntax as desktop.
+World preparation shares the desktop mesh caches, lighting and shadow index;
+texture sampling, depth tests, alpha blending and rasterization run on the GPU.
+Opaque triangles batch by texture; translucent triangles sort back-to-front
+per eye. Cube bounds outside both eye frusta skip scene submission while
+remaining in the shadow index. Meshes remain conservatively unculled because
+their imported origin may be outside their bounds. The projection currently
+uses a 0.05 m near plane and a 100 m far plane. Touch bindings are the initial
+controller profile. Existing game buttons support world-space panels and
+left/right controller pointers as described below. Optional bare-hand
+joint/pinch input depends on extensions exposed by the active PC
+OpenXR runtime; a headset supporting a feature in standalone mode does not
+guarantee that feature over a PC connection. Direct-touch UI, automatic hand
+meshes, hand physics, headset-locked UI and standalone Quest deployment are
+not implemented. See
+`examples/pcvr-test` for the test game. Successful packaging does not verify
+headset visuals, performance, tracking alignment or comfort.
+
+Mixed-reality passthrough is deferred pending compatible-runtime hardware
+testing and is not included in 1.3.0.0.
+
+### Bare-hand joints and pinch input
+
+Controller grip poses remain `XR.left` and `XR.right`; bare-hand data is
+separate and never replaces them. Hand tracking is optional and uses
+`XR_EXT_hand_tracking` when the PC runtime supports it. All hand reads require
+`import ZSharp.XR():`.
+
+```zsharp
+XR.hands.available
+XR.left.hand.tracked
+XR.right.hand.tracked
+XR.left.hand.indexTip.tracked
+XR.left.hand.indexTip.positionX
+XR.left.hand.indexTip.positionY
+XR.left.hand.indexTip.positionZ
+XR.left.hand.indexTip.rotationX
+XR.left.hand.indexTip.rotationY
+XR.left.hand.indexTip.rotationZ
+XR.left.hand.pinch.value
+XR.left.hand.pinch.held
+XR.left.hand.pinch.pressed
+XR.left.hand.pinch.released
+```
+
+Both hands expose the following 26 joint names. Every joint has read-only
+`tracked`, `positionX/Y/Z` and `rotationX/Y/Z` properties:
+
+```text
+palm, wrist
+thumbMetacarpal, thumbProximal, thumbDistal, thumbTip
+indexMetacarpal, indexProximal, indexIntermediate, indexDistal, indexTip
+middleMetacarpal, middleProximal, middleIntermediate, middleDistal, middleTip
+ringMetacarpal, ringProximal, ringIntermediate, ringDistal, ringTip
+littleMetacarpal, littleProximal, littleIntermediate, littleDistal, littleTip
+```
+
+Positions use tracked-space meters and rotations use degrees, like the
+controller/head poses. Check each joint's `tracked` status before using its
+coordinates. `XR.hands.available` reports runtime hand-tracking capability;
+`hand.tracked` reports the live, focused tracked hand. No public joint radius
+is exposed.
+
+Pinch strength is derived from thumb-tip/index-tip distance: `value` is 1 at
+contact and falls to 0 at 0.06 meters apart. The status becomes held at a
+distance of 0.02 meters or less and releases at 0.04 meters or more, avoiding
+flicker near a single threshold. `pressed` and `released` are retained per-task
+edges like controller buttons; new tasks ignore earlier edges. Losing focus,
+hand tracking or either required fingertip clears held input, generates a
+release and discards pending stale presses. After acquisition or tracking loss,
+open the fingers at least 0.04 meters before a new pinch can press.
+
+```zsharp
+noticed brain Start[] (
+ loop (
+  if[XR.left.hand.pinch.pressed] (
+   Print("Left pinch at X: " + XR.left.hand.indexTip.positionX):
+  )
+  wait(16ms):
+ )
+)
+```
+
+The prototype provides joint/input data, not rendered skeletons, hand collision
+or automatic pinch activation of world-space buttons. Controller aim/trigger
+interaction remains unchanged. Hand tracking and pinch behavior still need
+compatible-runtime hardware testing; controller-only VR continues to work when
+bare-hand tracking is unavailable.
+
+### World-space VR buttons
+
+In VR mode, existing `shape: button` placements become world-space XY panels.
+No separate ray/event syntax is required. Place and rotate a button like any
+other scene instance; XYZ rotation and the legacy `rotation` yaw follow normal
+3D object transforms. Position is measured in meters. Keep the usual logical
+button width/height and font size, then scale the panel to a suitable physical
+size. For example, 160 x 32 at scale 0.005 is 0.8 x 0.16 meters; its 16-unit
+label is scaled with the panel.
+
+```zsharp
+zsharp = type.object
+noticed object StartButton[] (
+ shape: button:
+ text: "Start":
+ width: 160:
+ height: 32:
+ fontSize: 16:
+ scaleX: 0.005:
+ scaleY: 0.005:
+ color: #205281:
+ hoverColor: #347FB5:
+ event(
+  left: "Main:Main:Begin":
+ )
+)
+```
+
+Place it in a scene using the existing JSON layout:
+
+```zsharp
+objects[JSON] (
+ [
+  {"id":"StartButton","name":"StartMenuButton",
+   "location":{"x":0,"y":1.1,"z":-1.6},
+   "rotations":{"x":0,"y":0,"z":0}}
+ ]
+)
+```
+
+Either tracked controller projects an aim ray up to 10 meters. Point at the
+button for `hoverColor`; squeeze that same controller's trigger through the
+existing 0.5 threshold to invoke the existing `event.left` callback. Both
+controllers activate the primary/left action; the left controller does not map
+to a right-click action. Controller pointers use OpenXR aim poses internally;
+`XR.left` and `XR.right` positions/rotations still expose their unchanged grip
+poses. Normal XR trigger properties remain readable by scripts independently
+of button callbacks.
+
+Both faces are rendered and interactive. The closest button along each ray is
+selected, rather than desktop overlay `layer` priority. Solid scene geometry
+with effective alpha at least 0.5 blocks a farther button; texture cutout holes
+do not block it. Rays are displayed only when the active scene has visible
+buttons. Trigger presses are tracked independently for both controllers and
+do not repeatedly fire while held. Holding a trigger and moving onto a button
+does not click it; after scene changes, focus loss or tracking loss, release
+the trigger before clicking again. Hidden/fully transparent buttons do not
+receive pointer interaction. Desktop mode keeps the existing screen-space
+button behavior; world-space panels do not introduce desktop UI layout changes.
+
+## Desktop gamepad input (1.3.0.0)
+
+Gamepad properties and vibration require `import ZSharp.Gamepad():` in their
+using room and `ZSharp: [1.3.0.0]:` or newer in `project.zsettings`. This is a
+desktop game API, not native-window or bZVM input. It uses the selected
+SDL-recognized controller, including mapped Xbox, Nintendo and PlayStation
+controllers; availability depends on the controller, connection and driver.
+One controller is selected at a time, with automatic disconnect/reconnect
+handling. No XR settings are required for ordinary gamepads.
+
+```zsharp
+import ZSharp.Gamepad():
+
+Gamepad.connected
+Gamepad.name
+Gamepad.type
+Gamepad.rumbleAvailable
+Gamepad.south.label
+Gamepad.south.held
+Gamepad.south.pressed
+Gamepad.south.released
+Gamepad.dpad.up.held
+Gamepad.left.stick.x
+Gamepad.left.stick.y
+Gamepad.left.stick.angle
+Gamepad.left.stick.magnitude
+Gamepad.left.stick.pressed
+Gamepad.right.stick.x
+Gamepad.right.stick.y
+Gamepad.right.trigger.value
+Gamepad.right.trigger.held
+Gamepad.right.trigger.pressed
+Gamepad.right.trigger.released
+Gamepad.left.bumper.held
+Gamepad.vibrate(75, 200ms):
+```
+
+Face-button names describe physical position, not the printed letter:
+
+| Position | Xbox | Nintendo Switch | PlayStation |
+| --- | --- | --- | --- |
+| `south` | A | B | Cross |
+| `east` | B | A | Circle |
+| `west` | X | Y | Square |
+| `north` | Y | X | Triangle |
+
+Each face has a text `.label` for on-screen prompts. The backend uses the
+controller's mapped label when available; generic controllers use physical
+position names. `name` is the device name; `type` is `xbox`, `nintendo`,
+`playstation` or `generic`, and `none` when disconnected. `connected` and
+`rumbleAvailable` are statuses.
+
+All of these controls expose `.held`, `.pressed` and `.released` statuses:
+
+```text
+south, east, west, north
+dpad.up, dpad.down, dpad.left, dpad.right
+left.stick, right.stick, left.trigger, right.trigger
+left.bumper, right.bumper, start, back, guide
+misc1, misc2, misc3, misc4, misc5, misc6
+left.paddle1, right.paddle1, left.paddle2, right.paddle2, touchpad
+```
+
+Controls absent from the selected hardware remain dead. Stick button statuses
+refer to clicking the stick, not tilting it. Stick `.x` and `.y` range from -1
+to 1, positive X is right and positive Y is forward/up. A radial 0.15 center
+deadzone is removed and the remaining range rescaled. `.magnitude` is 0..1;
+`.angle` is clockwise degrees, with 0 forward, 90 right, 180 back and 270 left.
+A centered stick has zero magnitude and angle. Trigger `.value` is 0..1;
+trigger statuses use a 0.5 threshold.
+
+Button edges survive short presses between script polls. Each Z# task reads
+its own queue, consuming one pending edge per read; another task can read the
+same transition independently. New tasks ignore historical edges. Read edges
+once into a variable when several conditions need the same result. Focus loss
+or disconnect clears held/analogue input, generates needed releases, discards
+stale queued presses and stops vibration. Regaining focus or connecting while
+a button is already down does not synthesize a new press.
+
+All input/identity properties are read-only. Vibration takes a numeric strength
+expression from 0 to 100 and a literal duration in `ms` or `s`, up to 10 seconds:
+
+```zsharp
+number Strength = 50:
+Gamepad.vibrate(Strength + 25, 0.2s):
+Gamepad.vibrate(0, 0ms):
+```
+
+Zero strength or duration stops rumble. Unsupported/disconnected hardware does
+not rumble, and the latest queued request wins. `rumbleAvailable` lets games
+offer feedback without assuming every controller or connection supports it.
+A Nintendo controller has been hardware-tested; Xbox and PlayStation devices
+have not yet been physically verified. These tests and mappings do not certify
+every hardware model or driver.
+
+## Browser events and networking (1.3.0.0)
+
+The loader registers source maps for loaded `.zsharp` files, including imports.
+With JavaScript source maps enabled in DevTools, the original `.zsharp` entries
+show the exact Z# source without JavaScript wrappers. The `.bzvm-view.js`
+entries are empty viewer anchors, not transpiled Z#. Breakpoints, stepping and
+live editing of Z# are not implemented. Set `data-sources="false"` on the `bzvm.js` script
+tag to disable source registration. Restrictive CSP can also disable this
+optional viewer without stopping the WebAssembly runtime; do not loosen CSP
+just to enable it. Source served to the browser is already publicly readable.
+
+Networking requires these imports on both desktop ZVM and bZVM:
+
+```javascript
+import ZSharp.HTTP():
+import ZSharp.Websocket():
+```
+
+### Browser DOM and input
+
+```javascript
+Browser.save.clicked: ( Browser.result.content.set: "Saved": ):
+Browser.name.inputted: ( Browser.result.content.set: Browser.name.getInput: ):
+Browser.choice.changed: ( Browser.result.content.set: Browser.choice.getOption: ):
+Browser.form.submitted: ( Function.call(Main:Main:Submit): ):
+
+text Link = Browser.link.getattr[href]: // readattr is an alias
+Browser.link.setattr[class]: "selected":
+Browser.item[2].html.set: '''<strong>First two matching IDs</strong>''':
+text() Classes = Browser.item[*].getattr[class]:
+text Title = Browser.page.title:
+Browser.page.title.set: "New title":
+text Platform = "" + Browser.platform:
+```
+
+Inline events and the existing `Function.call` event form are supported.
+Submitted events prevent the browser's default form reload. `getInput` and
+`getOption` read an element's value. `[2]` means the first two elements with
+that exact ID in document order, regardless of tag; `[*]` means all. Unqualified
+IDs use the first match. Multi-element reads return text arrays. Missing
+multi-element matches return an empty array or make writes a no-op; missing
+single elements are errors. Repeated IDs are supported for this API, although
+unique IDs remain recommended for ordinary HTML. Attribute names currently use
+identifier characters. `Browser.index.readelement[title]` reads the current
+`index.html` title, not another unopened page.
+
+```javascript
+loop (
+ if[Browser.input.e.pressed] ( Print("E pressed"): ) else ()
+ if[Browser.input.e.released] ( Print("E released"): ) else ()
+ // Browser.input.e.held is the current held state.
+ // Browser.pointer.xpos / ypos are viewport coordinates.
+ wait(100ms):
+)
+```
+
+Press/release counters are consumed once per task and property-read instruction.
+A quick down/up between reads is retained; multiple queued edges are consumed
+over successive reads. New tasks do not receive edges predating their creation.
+Blur releases held keys. Use an empty `else` when a false condition should
+continue execution: Z#'s existing no-else conditional is a function guard.
+
+`Browser.platform` is best effort and returns null when unknown. Examples are
+`win11x8664`, `win10arm64`, `linuxx8664`, `macarm64`, `iosarm64`,
+`androidarm64`, `zosx8664`; without available details it returns `windows`,
+`linux`, `mac`, `ios`, `android` or `zos`. Version/architecture suffixes are
+included only when available; reduced user-agent information is not a reliable
+way to distinguish Windows 10 from 11. Platform is informational, not a security
+or capability check.
+
+### HTTP / HTTPS
+
+```javascript
+HTTP.request(
+ name: "News":
+ method: "GET":
+ url: "https://example.com/news":
+ timeout: 10s:
+ headers[JSON] ( {"Accept":"application/json"} )
+ onResponse: [Main:Main:Loaded]:
+ onError: [Main:Main:Failed]:
+):
+
+noticed brain Loaded[number Status, text Body] (
+ Print("HTTP " + Status + " " + Body):
+ text Headers = HTTP.responseHeaders("News"):
+)
+noticed brain Failed[text Message] ( Print(Message): )
+
+HTTP.requestCancel("News"):
+```
+
+`url`, `onResponse` and `onError` are required. Other fields are optional.
+Default method is GET, timeout is 30 seconds, and omitted names are generated.
+Use a name for cancellation/header lookup. POST/PUT/PATCH/DELETE may include
+`body: "text":`; GET/HEAD cannot have a nonempty body. Headers may also be a
+JSON-text expression. Supported methods: GET, POST, PUT, PATCH, DELETE, HEAD,
+OPTIONS. Timeouts use duration literals, between 1 ms and 300 seconds.
+HTTP status errors such as 404 still invoke onResponse; transport failures,
+timeouts and cancellation invoke onError. `requestionCancel` is a compatibility
+alias for `requestCancel`. Response headers are returned as JSON text.
+
+Requests are asynchronous. Callbacks use normal file/room/function visibility
+rules and the signatures shown above. Native callbacks run on the owning Z#
+task thread, not I/O threads. Active network services keep console scripts alive
+after Start returns. They are cancelled during task/window shutdown. Long
+blocking native calls delay callback delivery. Desktop cancellation suppresses
+the request result immediately; the background socket may remain until timeout.
+
+Both runtimes allow at most 32 active requests, 1 MiB text request/response bodies,
+and no credentials embedded in URLs. Browser requests obey CORS, mixed-content
+and browser TLS rules and omit cookies. Desktop uses its bundled CPython standard
+library with certificate verification; relative URLs are browser-only.
+
+### Named WebSockets
+
+```javascript
+Websocket.connect("wss://example.com/socket", "Game"):
+Websocket.connected("Game", [Main:Main:Opened]):
+Websocket.callback("Game", [Main:Main:Received]):
+Websocket.error("Game", [Main:Main:SocketError]):
+Websocket.closed("Game", [Main:Main:Closed]):
+
+noticed brain Opened[] ( Websocket.send("Game", "Hello"): )
+noticed brain Received[text Message] ( Print(Message): )
+noticed brain SocketError[text Message] ( Print(Message): )
+noticed brain Closed[number Code, text Reason] ( Print("Closed " + Code): )
+
+text State = Websocket.state("Game"):
+Websocket.close("Game"):
+```
+
+States are `connecting`, `open`, `closing`, `closed`. Register callbacks directly
+after connecting; use connected before sending. Connections accept ws/wss and
+text messages only, with a 1 MiB message/send-buffer limit and at most 32 active
+sockets. Duplicate active names and sending before open are errors. Names can
+be reused after closure. Browser sockets obey browser security restrictions.
+Connections/request names belong to the running task's networking context;
+they are not process-global or shared between independent Start tasks.
+
+HTTP response bodies remain text. Browser project-asset JSON schema loading
+is described in [Browser JSON and project asset reads](#browser-json-and-project-asset-reads-1300).
+Existing desktop JSON syntax is unchanged.
+
+## Time (1.3.0.0, desktop and browser)
+
+Time methods return expression values; they do not print automatically. No import
+is required. Projects using them must declare `ZSharp: [1.3.0.0]:` or newer.
+
+```javascript
+number Stamp = Time.convert("1/1/26", "00:00", UTC):
+text Elapsed = Time.since(Stamp):
+text Remaining = Time.until("1790000000"):
+text FromMilliseconds = Time.since(1767225600000, "ms"):
+Print(Time.since(Time.convert("2026-01-01", "00:00:00", UTC))):
+```
+
+`since` and `until` are intent-based aliases: either returns `"... ago"` for a
+past timestamp or `"in ..."` for a future timestamp. Durations use days, hours,
+minutes and seconds, with singular/plural names and zero units omitted. For
+example: `"1 day, 2 hours, 3 minutes, 50 seconds ago"`. Days are elapsed 24-hour
+periods, not calendar months/years. Equal timestamps return `"0 seconds ago"`;
+sub-second differences round down to `"0 seconds ago"` or `"in 0 seconds"`.
+Seconds are the default unit; optional `"s"` or `"ms"` explicitly selects units.
+Timestamps may be text or numbers. Second timestamps support millisecond
+fractions; millisecond timestamps must be whole milliseconds. Invalid timestamps
+and values outside Gregorian years 1..9999 are errors, not guessed units.
+
+`Time.convert(Date, Clock, Zone)` returns a numeric Unix timestamp in seconds.
+Dates accept **month/day/year** (`M/D/YY`, `M/D/YYYY`) or `YYYY-MM-DD`.
+Two-digit years always mean 2000..2099. Clock text uses 24-hour `HH:MM` or
+`HH:MM:SS`. Leap years are checked; invalid dates, times and leap seconds are
+rejected rather than normalized. Zones are `UTC`, `LOCAL`, or quoted fixed
+offsets such as `"UTC+05:30"` and `"UTC-04:00"` (maximum offset 14 hours).
+`UTC` and `LOCAL` may be bare identifiers in this argument position; zone text
+variables also work. Abbreviations such as EST and named IANA zones are not
+supported. Nonexistent/ambiguous daylight-saving local times are rejected;
+use UTC/an explicit offset to disambiguate. Historical local dates may also be
+limited by the host OS's timezone facilities. UTC conversion is independent of
+the machine's timezone.
+
+All getters use the machine/browser's **local timezone**:
+
+| Expression | Returned value |
+| --- | --- |
+| `Time.getYear()` | Number, e.g. 2026 |
+| `Time.getMonth()` | Number, 1..12 |
+| `Time.getDay()` | Number, day of month 1..31 |
+| `Time.getWeek()` | English weekday text, e.g. `"Monday"` |
+| `Time.getHour()` | Number, 0..23 |
+| `Time.getHour().formatted` | 12-hour text, e.g. `"2 PM"` or `"12 AM"` |
+| `Time.getMinute()` | Number, 0..59 |
+| `Time.getSecond()` | Number, 0..59 |
+| `Time.getMS()` / `Time.getMS(1)` | Number, tenths digit 0..9 |
+| `Time.getMS(2)` | Number, hundredths 0..99 |
+| `Time.getMS(3)` | Number, milliseconds 0..999 |
+
+At `.427` seconds the fractional values are `4`, `42`, and `427`. They are
+numbers, not zero-padded strings, and do not round up. Precision must be 1..3;
+no extra clock precision is invented. Each call reads the current system clock,
+so multiple calls can straddle a second/day boundary. Wall-clock adjustments
+affect relative results; these APIs are not monotonic performance timers.
+
 ## Development preview: input submission (1.2.2.0)
 
 Native text inputs may declare `Submit[Chat:Chat:Send]:`, using the same callback
@@ -978,6 +1530,12 @@ Project.File.Room.User.set.X = 25:
 Room-level `text` and `number` values persist between repeated brain calls.
 Use `text.set.Name = ...:` and `number.set:Name = ...:` to update them. Local
 values remain local to the brain call.
+
+In app/game tasks, `wait(...)` also lets callbacks in the same room run. Scalar
+room fields (`text`, `number`, `status`, and `function`) are saved before the
+wait and refreshed when that task resumes. Local values and function parameters
+retain their own values across the wait. Include waits in long-running polling
+loops; a task that never yields can still delay other callbacks in its room.
 
 ## Conditions
 
@@ -2545,13 +3103,16 @@ Place the button in the scene's `objects[JSON]` like any other object.
 `right` callback. Both are optional individually. Targets use the existing
 `File:Room:Function` window callback format (or `Project:File:Room:Function`).
 Callbacks must take no arguments and execute as Z# tasks on button-down, not
-by polling held-state. Hidden buttons do not receive clicks. Overlapping
-buttons use the highest `layer`, with later placements winning ties.
+by polling held-state. Hidden buttons do not receive clicks. In desktop mode,
+overlapping buttons use the highest `layer`, with later placements winning ties.
 `color` is the background; `hoverColor` is optional. The label is centered
-with automatically contrasting text. Buttons are axis-aligned, respect size
-and scale, and overlay the scene. In 2D they follow the scene camera; in 3D
-their X/Y placement is screen-space (center = 0,0). Release mouse capture
-before using menu buttons. Their press events remain available to scripts.
+with automatically contrasting text. Desktop buttons are axis-aligned,
+respect size and scale, and overlay the scene. In 2D they follow the scene
+camera; in desktop 3D their X/Y placement is screen-space (center = 0,0).
+Release mouse capture before using desktop menu buttons. Their press events
+remain available to scripts. In VR, see [World-space VR buttons](#world-space-vr-buttons)
+for scene-space placement and either-controller trigger activation using these
+same object/event declarations.
 
 `input.mouse.left` and `input.mouse.right` are held-state statuses. A complete
 click between script reads can leave both held-state reads `dead`.
@@ -3426,10 +3987,41 @@ room variables, visibility checks, indexed text/number arrays, `Math` and
 imports and cross-file calls are supported as described below.
 
 This is not yet full desktop language parity: object/class instance execution,
-JSON loading, file operations, and additional browser events still need browser
+file writes/directory searches and additional browser events still need browser
 runtime implementations. Native apps/games and foreign-language integrations
 are outside the browser target. Unsupported instructions report an error rather
 than silently executing with different semantics.
+
+### Browser JSON and project asset reads (1.3.0.0)
+
+Use the same JSON schemas and `import ZSharp.JSON():` as on desktop:
+
+```javascript
+noticed room Data[] (
+ import ZSharp.JSON():
+ noticed JSON PersonSchema[] ( name: text: score: number: enabled: status: )
+ noticed brain Load[] (
+  text Path = "Data/Person.json":
+  JSON Person = JSON.load(PersonSchema, Path):
+  Print(Person.name + " " + Person.score + " " + Person.enabled):
+  status Exists = File.exists(Path):
+  text Source = File.read(Path):
+ )
+)
+```
+
+Room-level JSON values, bracket keys and typed field reads/writes use the
+desktop syntax too. Field changes affect the loaded value, not its source file.
+Required keys and text/number/status types must match the schema; undeclared
+keys, malformed JSON and wrong types fail. Decimal tokens preserve their digits.
+
+The browser fetches public assets from the same-origin project root (or page
+directory without settings). Paths cannot escape that root. Downloads yield
+without blocking other tasks, time out after 15 seconds, and are cached for the
+page lifetime: at most 128 files, each smaller than 64 KiB. Reload to fetch edited
+assets. `File.exists` returns `dead` for HTTP 404; network/access errors are not
+silently treated as missing files. This is not access to a visitor's disk or a
+way to write/delete server files. Do not place secrets in public project assets.
 
 ### Browser project imports and cross-file calls
 

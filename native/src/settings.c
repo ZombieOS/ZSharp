@@ -510,6 +510,21 @@ static char *read_settings_source(const char *path) {
 
 void zsharp_settings_init(ZSharpSettings *settings) {
     memset(settings, 0, sizeof(*settings));
+    settings->allowed_devices = 7;
+}
+
+int zsharp_settings_host_allowed(const ZSharpSettings *settings, char *error, size_t capacity) {
+#if defined(__ANDROID__)
+    unsigned bit=0;const char *name="Android";
+#elif defined(_WIN32)
+    unsigned bit=1;const char *name="Windows";
+#elif defined(__APPLE__)
+    unsigned bit=4;const char *name="MacOS";
+#else
+    unsigned bit=2;const char *name="Linux";
+#endif
+    if(!settings->has_allowed_devices || (settings->allowed_devices&bit))return 1;
+    snprintf(error,capacity,"AllowedDevices does not allow this project to run on %s",name);return 0;
 }
 
 void zsharp_settings_free(ZSharpSettings *settings) {
@@ -706,6 +721,43 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
                                   "')' after dependencies");
             settings_consume_type(&parser, ZTOKEN_COLON,
                                   "':' after Dependencies");
+        } else if (settings_match_word(&parser, "AllowedDevices")) {
+            unsigned fields = 0;
+            if (seen & 4096u) { settings_fail(&parser, &parser.current, "duplicate AllowedDevices setting"); break; }
+            seen |= 4096u; settings->has_allowed_devices = 1;
+            settings->allowed_devices = 0;
+            settings_consume_type(&parser, ZTOKEN_LEFT_PAREN, "'(' after AllowedDevices");
+            while (!parser.failed && parser.current.type != ZTOKEN_RIGHT_PAREN) {
+                unsigned bit = 0; int value;
+                if (settings_match_word(&parser, "Windows")) bit = 1;
+                else if (settings_match_word(&parser, "Linux")) bit = 2;
+                else if (settings_match_word(&parser, "MacOS")) bit = 4;
+                else if (settings_match_word(&parser, "XR")) bit = 8;
+                else { settings_fail(&parser, &parser.current, "AllowedDevices expects Windows, Linux, MacOS or XR"); break; }
+                if (fields & bit) { settings_fail(&parser, &parser.current, "duplicate AllowedDevices field"); break; }
+                fields |= bit;
+                settings_consume_type(&parser, ZTOKEN_COLON, "':' after device name");
+                if (settings_match_word(&parser, "true")) value = 1;
+                else if (settings_match_word(&parser, "false")) value = 0;
+                else { settings_fail(&parser, &parser.current, "AllowedDevices values require true or false"); break; }
+                if (bit == 8) settings->xr_allowed = value;
+                else if (value) settings->allowed_devices |= bit;
+                settings_consume_type(&parser, ZTOKEN_COLON, "':' after device value");
+            }
+            settings_consume_type(&parser, ZTOKEN_RIGHT_PAREN, "')' after AllowedDevices");
+            settings_consume_type(&parser, ZTOKEN_COLON, "':' after AllowedDevices");
+        } else if (settings_match_word(&parser, "XR")) {
+            if (seen & 8192u) { settings_fail(&parser, &parser.current, "duplicate XR setting"); break; }
+            seen |= 8192u;
+            settings_consume_type(&parser, ZTOKEN_LEFT_PAREN, "'(' after XR");
+            settings_consume_word(&parser, "required");
+            settings_consume_type(&parser, ZTOKEN_COLON, "':' after required");
+            if (settings_match_word(&parser, "true")) settings->xr_required = 1;
+            else if (settings_match_word(&parser, "false")) settings->xr_required = 0;
+            else settings_fail(&parser, &parser.current, "XR required expects true or false");
+            settings_consume_type(&parser, ZTOKEN_COLON, "':' after required value");
+            settings_consume_type(&parser, ZTOKEN_RIGHT_PAREN, "')' after XR");
+            settings_consume_type(&parser, ZTOKEN_COLON, "':' after XR");
         } else if (settings_match_word(&parser, "Window")) {
             unsigned window_seen = 0;
             if ((seen & 128u) != 0) {
@@ -907,6 +959,11 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
                           (int)parser.current.length, parser.current.start);
         }
     }
+    if (!parser.failed && settings->xr_required && !settings->xr_allowed)
+        settings_fail(&parser, &parser.current, "XR required: true requires AllowedDevices XR: true");
+    if (!parser.failed && (seen & (4096u | 8192u)) &&
+        settings->zsharp_version[0] == 1 && settings->zsharp_version[1] < 3)
+        settings_fail(&parser, &parser.current, "AllowedDevices/XR require ZSharp: [1.3.0.0]: or newer");
     if (!parser.failed && (seen & 127u) != 127u) {
         settings_fail(&parser, &parser.current,
                       "project.zsettings must define Project, PID, Version, "

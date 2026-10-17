@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.3.0.0 - 2026-10-16
+
+- Added experimental Windows PCVR through OpenXR: optional/required VR launch
+  modes, stereo GPU rendering for cubes and imported FBX meshes, headset/controller
+  poses, controller inputs, retained press/release edges, stick angle/magnitude,
+  rig translation/yaw and controller vibration. Requires `ZSharp.XR` imports.
+  Initial bindings target Touch controllers. Initial headset testing confirmed
+  tracking, trigger input and vibration; broader hardware testing is required.
+  This is not standalone Quest support or full renderer feature parity.
+  Mixed-reality passthrough is deferred pending compatible-runtime testing.
+- Added shared desktop/PCVR mesh posing, material textures, point/spot/directional
+  lighting and cached shadow queries, plus GPU texture sampling, alpha blending,
+  cutout depth handling, texture batching and conservative stereo cube culling.
+  Scene fields and animation syntax are unchanged. The expanded renderer has
+  offscreen GPU and shared-scene tests; it still needs headset retesting.
+- Added world-space VR game buttons using existing object/event syntax, scaled
+  labels, hover backgrounds and independent left/right controller aim pointers.
+  Either trigger invokes the primary click action; nearest-button selection
+  respects solid geometry and texture cutout holes. Held triggers do not repeat
+  or click on hover entry, and focus/tracking/scene changes require release
+  before reactivation. Headset-locked UI and automatic pinch activation are not
+  included.
+- Added optional experimental bare-hand tracking with 26 named joint poses,
+  thumb/index pinch strength and per-task press/release input. Controller grip poses stay
+  unchanged; tracking/focus loss releases pinch and requires open-to-rearm.
+  Hand meshes, physics and pinch-driven UI are not included. Availability is
+  conditional on the PC OpenXR runtime; hardware validation is pending.
+- Added imported `ZSharp.Gamepad` input for desktop games: physical face-button
+  names and device labels, analogue sticks/triggers, stick angle/magnitude,
+  D-pad/bumper/system/extra buttons, retained task-local press/release edges,
+  hotplug/focus handling and optional 0..100 vibration. Xbox, Nintendo and
+  PlayStation mappings use SDL; actual device/driver capabilities vary.
+  A Nintendo controller has been hardware-tested; Xbox and PlayStation devices
+  have not yet been physically verified.
+- Added `AllowedDevices` operating-system restrictions and XR launch settings.
+- Fixed empty click actions being interpreted as layout edge positions, which
+  pushed Hub controls to the right. The installed-project list now scrolls in
+  its own panel without overlapping project details.
+
+- Added shared desktop/browser Time expressions: Unix date conversion,
+  human-readable since/until durations, local calendar/time getters, weekday
+  names, 12-hour hour formatting, and selectable fractional-second precision.
+  Includes strict date validation, explicit timestamp units and UTC offsets.
+- Added asynchronous HTTP/HTTPS requests, named cancellation, response headers
+  and named text WebSocket connections with message/lifecycle callbacks in
+  desktop ZVM and bZVM. Both require explicit networking imports.
+- Added browser input/change/submit handlers, latched keyboard press/release
+  reads, pointer coordinates, best-effort platform information, input/select
+  getters, attribute access and first-N/all duplicate-ID selection.
+- Added bZVM JSON schema loading using the existing desktop `JSON.load` syntax,
+  including variable filenames, room/local JSON values, typed field reads and
+  writes, bracket-key access and exact decimal tokens. Browser downloads are
+  asynchronous, same-origin, project-relative, cached and size-limited.
+- Added browser `File.read` and `File.exists` for public project assets through
+  the same bounded asynchronous download cache; this does not grant local-disk
+  or server-side write access.
+
 ## 1.2.2.0 - 2026-10-10
 
 - Added the experimental first bZVM prototype, executing Z# bytecode in

@@ -5,6 +5,7 @@
 #include "zsharp_c.h"
 #include "decimal.h"
 #include "game_runtime.h"
+#include "time_api.h"
 #include "hash.h"
 #include "project.h"
 #include "updater.h"
@@ -132,7 +133,17 @@ typedef struct RuntimeModuleCache {
     struct RuntimeNativeService *services;
     size_t service_count;
     int pumping_services;
+    struct RuntimeNetworkService *network;
+    size_t network_count;
+    uint64_t network_poll;
+    struct WindowTaskYield *window_yield;
 } RuntimeModuleCache;
+
+typedef struct RuntimeNetworkService {
+    ZSharpProgram *owner;
+    char *root;
+    char scope[128];
+} RuntimeNetworkService;
 
 typedef struct RuntimeNativeService {
     ZSharpCServiceV1 entry;
@@ -143,6 +154,9 @@ typedef struct RuntimeNativeService {
 static int pump_native_services(RuntimeHeap *heap, RuntimeModuleCache *cache,
     const ZSharpProviderBinding *providers, size_t provider_count,
     int *active, char *error, size_t error_size);
+
+static int cooperative_window_wait(RuntimeModuleCache *cache, RuntimeHeap *heap,
+    const char *milliseconds, char *error, size_t error_size);
 
 static char *heap_add_text(RuntimeHeap *heap, char *text);
 
@@ -661,6 +675,16 @@ static int execute_python_call_unlocked(const ZSharpProgram *program,
              '/',
 #endif
              relative);
+    if(!strcmp(instruction->call_file,"@zsharp-network")) {
+        char *slash;
+        snprintf(module,sizeof(module),"%s",bridge);
+        slash=strrchr(module,'/');
+#ifdef _WIN32
+        {char *back=strrchr(module,'\\');if(back && (!slash || back>slash))slash=back;}
+#endif
+        if(!slash){snprintf(error,error_size,"networking worker path is invalid");return 0;}
+        strcpy(slash+1,"zsharp_network.py");
+    }
     snprintf(input_path, sizeof(input_path), "%s%c.zsharp-python-%lu-%lu.in",
              project_root,
 #ifdef _WIN32
@@ -2732,7 +2756,7 @@ static int resolve_value_path(
     if ((part_count == 2 &&
          !lookup_name(room, current_object, locals, local_count, parts[0],
                       value)) ||
-        part_count == 3) {
+        part_count >= 3) {
         int window_read = read_runtime_property(
             module_cache, heap, instruction->operand, value, error,
             error_size);
@@ -3145,6 +3169,78 @@ static int resolve_object_path(
     return 0;
 }
 
+static uint64_t network_tick(void) {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
+    return (uint64_t)t.tv_sec*1000+(uint64_t)t.tv_nsec/1000000;
+#endif
+}
+static char *network_bridge(RuntimeNetworkService *service,const char *operation,
+    const char *payload,char *error,size_t error_size) {
+    ZSharpInstruction call={0};RuntimeValue args[3]={{0}},result={0};RuntimeHeap scratch={0};char *copy=NULL;
+    call.call_file="@zsharp-network";call.call_function="command";call.argument_count=3;
+    args[0].type=args[1].type=args[2].type=ZVALUE_TEXT;
+    args[0].text=service->scope;args[1].text=operation;args[2].text=payload;
+    if(execute_python_call(service->owner,&call,args,service->root,&scratch,&result,error,error_size) &&
+       result.type==ZVALUE_TEXT)copy=zsharp_copy_text(result.text,strlen(result.text));
+    heap_free(&scratch);return copy;
+}
+static RuntimeNetworkService *network_scope(RuntimeModuleCache *cache,ZSharpProgram *program,
+    const char *root,char *error,size_t error_size) {
+    RuntimeNetworkService *service;
+    if(cache->network_count)return &cache->network[0];
+    service=calloc(1,sizeof(*service));if(!service){snprintf(error,error_size,"out of memory");return NULL;}
+    service->owner=program;service->root=zsharp_copy_text(root,strlen(root));
+    if(!service->root){free(service);return NULL;}
+    snprintf(service->scope,sizeof(service->scope),"%p:%p",(void*)cache,(void*)program);
+    cache->network=service;cache->network_count=1;return service;
+}
+static int network_instruction(ZSharpProgram *program,ZSharpRoom *room,const ZSharpInstruction *in,
+    RuntimeValue *args,RuntimeHeap *heap,const char *root,RuntimeModuleCache *cache,
+    const ZSharpProviderBinding *providers,size_t provider_count,RuntimeValue *result,
+    char *error,size_t error_size) {
+    JSRuntime *rt=JS_NewRuntime();JSContext *ctx=rt?JS_NewContext(rt):NULL;JSValue list,json;
+    const char *encoded=NULL;char *response=NULL;size_t i;int ok=1;
+    RuntimeNetworkService *service=network_scope(cache,program,root,error,error_size);
+    if(!ctx || !service){if(ctx)JS_FreeContext(ctx);if(rt)JS_FreeRuntime(rt);return 0;}
+    list=JS_NewArray(ctx);
+    for(i=0;i<in->argument_count;i++) {
+        JSValue value;
+        if(args[i].type!=ZVALUE_TEXT && args[i].type!=ZVALUE_NUMBER){snprintf(error,error_size,"network arguments require text or numbers");ok=0;break;}
+        if(args[i].type==ZVALUE_TEXT &&
+           ((!strcmp(in->operand,"HTTP.request") && i>0 && args[i-1].type==ZVALUE_TEXT && (!strcmp(args[i-1].text,"onResponse") || !strcmp(args[i-1].text,"onError"))) ||
+            (i==1 && (!strcmp(in->operand,"Websocket.callback") || !strcmp(in->operand,"Websocket.connected") || !strcmp(in->operand,"Websocket.error") || !strcmp(in->operand,"Websocket.closed"))))) {
+            ZSharpInstruction target={0};char storage[2048],canonical[2048];ZSharpProgram *owner=program;
+            ZSharpRoom *target_room;ZSharpFunction *function;
+            if(!zsharp_call_target_decode(args[i].text,&target,storage,sizeof(storage),error,error_size)){ok=0;break;}
+            if(strcmp(target.call_file,program->source_name))
+                owner=load_project_module(cache,target.call_file,heap,root,providers,provider_count,1,error,error_size);
+            target_room=owner?find_room(owner,target.call_room):NULL;
+            function=target_room?find_function(target_room,target.call_function):NULL;
+            if(!function || !room_is_visible(target_room,room,owner!=program) ||
+               (owner!=program && !function->is_public)) {snprintf(error,error_size,"invalid or inaccessible network callback");ok=0;break;}
+            snprintf(canonical,sizeof(canonical),"%s:%s:%s",owner->source_name,target.call_room,target.call_function);
+            value=JS_NewString(ctx,canonical);
+        }else value=args[i].type==ZVALUE_TEXT?JS_NewString(ctx,args[i].text):JS_NewFloat64(ctx,strtod(args[i].number_text,NULL));
+        JS_SetPropertyUint32(ctx,list,(uint32_t)i,value);
+    }
+    json=ok?JS_JSONStringify(ctx,list,JS_UNDEFINED,JS_UNDEFINED):JS_UNDEFINED;
+    if(ok)encoded=JS_ToCString(ctx,json);
+    if(ok && encoded)response=network_bridge(service,in->operand,encoded,error,error_size);
+    if(!response)ok=0;
+    if(ok && in->number_operand) {
+        JSValue decoded=JS_ParseJSON(ctx,response,strlen(response),"network result");const char *text=JS_ToCString(ctx,decoded);
+        if(!text || !JS_IsString(decoded)){snprintf(error,error_size,"invalid network response");ok=0;}
+        else {memset(result,0,sizeof(*result));result->type=ZVALUE_TEXT;
+            result->text=heap_add_text(heap,zsharp_copy_text(text,strlen(text)));if(!result->text)ok=0;}
+        JS_FreeCString(ctx,text);JS_FreeValue(ctx,decoded);
+    }
+    free(response);JS_FreeCString(ctx,encoded);JS_FreeValue(ctx,json);JS_FreeValue(ctx,list);JS_FreeContext(ctx);JS_FreeRuntime(rt);
+    return ok;
+}
+
 static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                             ZSharpFunction *function,
                             RuntimeObject *current_object,
@@ -3231,8 +3327,9 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
             ok = 0;
             goto done;
         }
-        if (!module_cache->pumping_services && module_cache->service_count &&
-            (instruction_index % 64 == 0)) {
+        if (!module_cache->pumping_services &&
+            ((module_cache->service_count && instruction_index % 64 == 0) ||
+             (module_cache->network_count && network_tick()-module_cache->network_poll>=10))) {
             int active;
             if (!pump_native_services(heap, module_cache, providers, provider_count,
                                        &active, error, error_size)) { ok = 0; goto done; }
@@ -3342,16 +3439,8 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 break;
             }
             case ZOP_DELAY:
-                if (module_cache->window_runtime != NULL &&
-                    module_cache->window_runtime->wait != NULL) {
-                    if (!module_cache->window_runtime->wait(
-                            module_cache->window_runtime->state,
-                            instruction->operand, error, error_size)) {
-                        ok = 0;
-                        goto done;
-                    }
-                } else if (!runtime_wait(instruction->operand, error,
-                                         error_size)) {
+                if (!cooperative_window_wait(module_cache, heap,
+                        instruction->operand, error, error_size)) {
                     ok = 0;
                     goto done;
                 }
@@ -3630,6 +3719,39 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     goto done;
                 }
                 break;
+            case ZOP_NETWORK: {
+                RuntimeValue *args;size_t i,n=instruction->argument_count;
+                if(n>32 || stack_count<n){snprintf(error,error_size,"invalid network argument stack");ok=0;goto done;}
+                args=calloc(n?n:1,sizeof(*args));
+                if(!args){snprintf(error,error_size,"out of memory");ok=0;goto done;}
+                for(i=n;i>0;i--)if(!pop(stack,&stack_count,&args[i-1],error,error_size)){free(args);ok=0;goto done;}
+                ok=network_instruction(program,room,instruction,args,heap,project_root,module_cache,providers,provider_count,&value,error,error_size);
+                free(args);if(!ok)goto done;
+                if(instruction->number_operand && !push(stack,stack_capacity,&stack_count,value,error,error_size)){ok=0;goto done;}
+                break;
+            }
+            case ZOP_TIME: {
+                RuntimeValue args[3]; const char *texts[3];
+                size_t n=instruction->argument_count, i; char result[512]; int is_text;
+                if(n>3 || stack_count<n) { snprintf(error,error_size,"invalid Time bytecode");ok=0;goto done; }
+                for(i=n;i>0;i--) {
+                    if(!pop(stack,&stack_count,&args[i-1],error,error_size)) {ok=0;goto done;}
+                    if(args[i-1].type!=ZVALUE_TEXT && args[i-1].type!=ZVALUE_NUMBER) {
+                        snprintf(error,error_size,"Time arguments must be text or numbers");ok=0;goto done;
+                    }
+                    texts[i-1]=args[i-1].type==ZVALUE_TEXT?args[i-1].text:args[i-1].number_text;
+                }
+                if(!zsharp_time_evaluate(instruction->number_operand,texts,n,NULL,result,sizeof(result),&is_text,error,error_size)) {ok=0;goto done;}
+                memset(&value,0,sizeof(value));
+                value.type=is_text?ZVALUE_TEXT:ZVALUE_NUMBER;
+                {
+                    char *owned=heap_add_text(heap,zsharp_copy_text(result,strlen(result)));
+                    if(!owned) {snprintf(error,error_size,"out of memory");ok=0;goto done;}
+                    if(is_text)value.text=owned;else value.number_text=owned;
+                }
+                if(!push(stack,stack_capacity,&stack_count,value,error,error_size)){ok=0;goto done;}
+                break;
+            }
             case ZOP_REGEX: {
                 RuntimeValue regex_arguments[4];size_t i;
                 if(instruction->number_operand<1 || instruction->number_operand>3 ||
@@ -5519,6 +5641,67 @@ static int pump_native_services(RuntimeHeap *heap, RuntimeModuleCache *cache,
     *active = 0;
     if (cache->pumping_services) return 1;
     cache->pumping_services = 1;
+    cache->network_poll = network_tick();
+    for (s = 0; s < cache->network_count && ok; s++) {
+        RuntimeNetworkService *service = &cache->network[s];
+        char *reply = network_bridge(service, "poll", "[]", error, error_size);
+        JSRuntime *rt = JS_NewRuntime();
+        JSContext *ctx = rt ? JS_NewContext(rt) : NULL;
+        JSValue data = JS_UNDEFINED, events = JS_UNDEFINED;
+        uint32_t count = 0, e;
+        if (!reply || !ctx) { ok = 0; }
+        if (ok) {
+            JSValue state, length;
+            data = JS_ParseJSON(ctx, reply, strlen(reply), "network events");
+            if (JS_IsException(data)) { snprintf(error, error_size, "invalid network event response"); ok = 0; }
+            state = JS_GetPropertyStr(ctx, data, "active");
+            *active |= JS_ToBool(ctx, state) > 0;
+            JS_FreeValue(ctx, state);
+            events = JS_GetPropertyStr(ctx, data, "events");
+            length = JS_GetPropertyStr(ctx, events, "length");
+            JS_ToUint32(ctx, &count, length); JS_FreeValue(ctx, length);
+            /* A callback can start another operation; re-poll before exiting. */
+            *active |= count != 0;
+        }
+        for (e = 0; ok && e < count && e < 16; e++) {
+            JSValue event = JS_GetPropertyUint32(ctx, events, e);
+            JSValue target_value = JS_GetPropertyStr(ctx, event, "target");
+            JSValue list = JS_GetPropertyStr(ctx, event, "args");
+            JSValue length = JS_GetPropertyStr(ctx, list, "length");
+            const char *target_text = JS_ToCString(ctx, target_value);
+            ZSharpInstruction target = {0}; char storage[2048];
+            ZSharpProgram *owner = service->owner;
+            ZSharpRoom *room = NULL; ZSharpFunction *function = NULL;
+            RuntimeValue args[4] = {{0}}, ignored = {0};
+            uint32_t n = 0, a; int returned = 0;
+            JS_ToUint32(ctx, &n, length);
+            if (!target_text || !zsharp_call_target_decode(target_text, &target, storage, sizeof(storage), error, error_size)) ok = 0;
+            if (ok && strcmp(target.call_file, owner->source_name))
+                owner = load_project_module(cache, target.call_file, heap, service->root, providers, provider_count, 1, error, error_size);
+            if (ok && owner) { room = find_room(owner, target.call_room); function = room ? find_function(room, target.call_function) : NULL; }
+            if (ok && (!function || n > 4 || n != function->parameter_count)) {
+                snprintf(error, error_size, "network callback has an invalid target or argument count"); ok = 0;
+            }
+            for (a = 0; ok && a < n; a++) {
+                JSValue value = JS_GetPropertyUint32(ctx, list, a);
+                const char *text = JS_ToCString(ctx, value);
+                args[a].type = JS_IsString(value) ? ZVALUE_TEXT : ZVALUE_NUMBER;
+                if (!text || args[a].type != function->parameters[a].type) {
+                    snprintf(error, error_size, "network callback argument type mismatch"); ok = 0;
+                } else if (args[a].type == ZVALUE_TEXT)
+                    args[a].text = heap_add_text(heap, zsharp_copy_text(text, strlen(text)));
+                else args[a].number_text = heap_add_text(heap, zsharp_copy_text(text, strlen(text)));
+                JS_FreeCString(ctx, text); JS_FreeValue(ctx, value);
+            }
+            if (ok) ok = execute_function(owner, room, function, NULL, heap, service->root,
+                providers, provider_count, cache, 1, args, n, NULL, &ignored, &returned, error, error_size);
+            JS_FreeCString(ctx, target_text); JS_FreeValue(ctx, length);
+            JS_FreeValue(ctx, list); JS_FreeValue(ctx, target_value); JS_FreeValue(ctx, event);
+        }
+        if (ctx) { JS_FreeValue(ctx, events); JS_FreeValue(ctx, data); JS_FreeContext(ctx); }
+        if (rt) JS_FreeRuntime(rt);
+        free(reply);
+    }
     for (s = 0; s < cache->service_count && ok; s++) {
         RuntimeNativeService service = cache->services[s];
         ZSharpCEventV1 event = {0};
@@ -5687,6 +5870,12 @@ static void cleanup_program_objects(ZSharpProgram *program) {
 
 static void cleanup_module_cache(RuntimeModuleCache *cache) {
     size_t index;
+    for (index = 0; index < cache->network_count; index++) {
+        char ignored[256] = {0};
+        free(network_bridge(&cache->network[index], "shutdown", "[]", ignored, sizeof(ignored)));
+        free(cache->network[index].root);
+    }
+    free(cache->network);
     for (index = 0; index < cache->service_count; index++) {
         ZSharpCEventV1 event = {0};
         char ignored[256] = {0};
@@ -5764,6 +5953,15 @@ typedef struct WindowTask {
 #endif
 } WindowTask;
 
+/* A task owns its parsed program, stack, locals and heap. Only the persistent
+   scalar room state is shared with other callback tasks. Publish/reload that
+   state at explicit wait boundaries instead of holding its mutex while asleep. */
+typedef struct WindowTaskYield {
+    WindowRoomState *state;
+    ZSharpRoom *room;
+    int *state_locked;
+} WindowTaskYield;
+
 static void lock_window_room_state(WindowRoomState *state) {
 #ifdef _WIN32
     EnterCriticalSection(&state->mutex);
@@ -5780,20 +5978,63 @@ static void unlock_window_room_state(WindowRoomState *state) {
 #endif
 }
 
+static char *window_room_source_key(const char *path, char *error,
+                                    size_t error_size) {
+#ifdef _WIN32
+    DWORD size = GetFullPathNameA(path, 0, NULL, NULL);
+    DWORD written;
+    char *key;
+    size_t index;
+    if (size == 0) {
+        snprintf(error, error_size, "could not resolve window task source");
+        return NULL;
+    }
+    key = (char *)malloc(size);
+    if (key == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return NULL;
+    }
+    written = GetFullPathNameA(path, size, key, NULL);
+    if (written == 0 || written >= size) {
+        free(key);
+        snprintf(error, error_size, "could not resolve window task source");
+        return NULL;
+    }
+    for (index = 0; key[index] != '\0'; index++)
+        if (key[index] == '/') key[index] = '\\';
+    return key;
+#else
+    char *key = realpath(path, NULL);
+    if (key == NULL)
+        snprintf(error, error_size, "could not resolve window task source");
+    return key;
+#endif
+}
+
 static WindowRoomState *find_or_add_window_room_state(
     WindowExecutionContext *context, const char *source_path,
     const char *room_name, char *error, size_t error_size) {
     size_t index;
     WindowRoomState *state;
     WindowRoomState **resized;
+    char *source_key = window_room_source_key(source_path, error, error_size);
+    if (source_key == NULL) return NULL;
     for (index = 0; index < context->room_state_count; index++) {
         state = context->room_states[index];
-        if (strcmp(state->source_path, source_path) == 0 &&
-            strcmp(state->room_name, room_name) == 0) return state;
+        if (
+#ifdef _WIN32
+            _stricmp(state->source_path, source_key) == 0 &&
+#else
+            strcmp(state->source_path, source_key) == 0 &&
+#endif
+            strcmp(state->room_name, room_name) == 0) {
+            free(source_key);
+            return state;
+        }
     }
     state = (WindowRoomState *)calloc(1, sizeof(*state));
-    if (state == NULL) goto out_of_memory;
-    state->source_path = zsharp_copy_text(source_path, strlen(source_path));
+    if (state == NULL) { free(source_key); goto out_of_memory; }
+    state->source_path = source_key;
     state->room_name = zsharp_copy_text(room_name, strlen(room_name));
     if (state->source_path == NULL || state->room_name == NULL) {
         free(state->source_path);
@@ -5837,27 +6078,39 @@ out_of_memory:
 }
 
 static int restore_window_room_state(WindowRoomState *state,
-                                     ZSharpRoom *room, char *error,
+                                     ZSharpRoom *room, RuntimeHeap *suspended_values,
+                                     char *error,
                                      size_t error_size) {
     size_t index;
     if (!state->initialized) return 1;
     for (index = 0; index < state->variable_count; index++) {
         WindowSharedVariable *saved = &state->variables[index];
         ZSharpVariable *variable = find_variable(room, saved->name);
-        char *copy;
+        char *copy, **slot;
+        const char *text;
         if (variable == NULL || variable->type != saved->type) continue;
         if (saved->type == ZVALUE_STATUS) {
             variable->number_value = saved->number;
-        } else if (saved->type == ZVALUE_NUMBER) {
-            copy = zsharp_copy_text(saved->text, strlen(saved->text));
+        } else if (saved->type == ZVALUE_NUMBER || saved->type == ZVALUE_TEXT ||
+                   saved->type == ZVALUE_FUNCTION) {
+            slot = saved->type == ZVALUE_NUMBER ? &variable->number_text :
+                                                  &variable->text_value;
+            text = saved->text == NULL ? "" : saved->text;
+            if (*slot != NULL && strcmp(*slot, text) == 0) continue;
+            copy = zsharp_copy_text(text, strlen(text));
             if (copy == NULL) goto out_of_memory;
-            free(variable->number_text);
-            variable->number_text = copy;
-        } else if (saved->type == ZVALUE_TEXT || saved->type == ZVALUE_FUNCTION) {
-            copy = zsharp_copy_text(saved->text, strlen(saved->text));
-            if (copy == NULL) goto out_of_memory;
-            free(variable->text_value);
-            variable->text_value = copy;
+            if (suspended_values != NULL && *slot != NULL) {
+                /* Parameters, locals or an outer expression may still refer to
+                   the old scalar buffer across a nested wait. Transfer that
+                   buffer to this task's heap instead of freeing live aliases.
+                   Allocate first so an OOM leaves the old variable untouched. */
+                char **resized = (char **)realloc(suspended_values->texts,
+                    (suspended_values->text_count + 1) * sizeof(*resized));
+                if (resized == NULL) { free(copy); goto out_of_memory; }
+                suspended_values->texts = resized;
+                suspended_values->texts[suspended_values->text_count++] = *slot;
+            } else free(*slot);
+            *slot = copy;
         }
     }
     return 1;
@@ -5916,6 +6169,33 @@ out_of_memory:
     return 0;
 }
 
+static int cooperative_window_wait(RuntimeModuleCache *cache, RuntimeHeap *heap,
+    const char *milliseconds, char *error, size_t error_size) {
+    WindowTaskYield *yield = cache->window_yield;
+    int released = 0, ok;
+    if (yield != NULL && *yield->state_locked) {
+        if (!save_window_room_state(yield->state, yield->room, error, error_size))
+            return 0;
+        unlock_window_room_state(yield->state);
+        *yield->state_locked = 0;
+        released = 1;
+    }
+    if (cache->window_runtime != NULL && cache->window_runtime->wait != NULL)
+        ok = cache->window_runtime->wait(cache->window_runtime->state,
+            milliseconds, error, error_size);
+    else ok = runtime_wait(milliseconds, error, error_size);
+    if (released) {
+        /* Always reacquire, even on cancellation or wait failure: unwinding and
+           the final state save must have exactly the same ownership contract
+           as normal execution. Never restore another task's locals or stack. */
+        lock_window_room_state(yield->state);
+        *yield->state_locked = 1;
+        if (!restore_window_room_state(yield->state, yield->room, heap,
+                                        error, error_size)) return 0;
+    }
+    return ok;
+}
+
 static void cleanup_window_room_states(WindowExecutionContext *context) {
     size_t index;
     for (index = 0; index < context->room_state_count; index++) {
@@ -5951,6 +6231,7 @@ static void run_window_task(WindowTask *task) {
     ZSharpDiagnostic diagnostic;
     RuntimeHeap heap;
     RuntimeModuleCache module_cache;
+    WindowTaskYield yield = {0};
     ZSharpRoom *room;
     ZSharpFunction *function;
     RuntimeValue ignored_return;
@@ -5994,21 +6275,26 @@ static void run_window_task(WindowTask *task) {
                  task->room_name, task->function_name);
         goto done;
     }
+    yield.state = task->room_state;
+    yield.room = room;
+    yield.state_locked = &state_locked;
     lock_window_room_state(task->room_state);
     state_locked = 1;
-    if (!restore_window_room_state(task->room_state, room, task->error,
+    if (!restore_window_room_state(task->room_state, room, NULL, task->error,
                                    sizeof(task->error))) goto done;
+    module_cache.window_yield = &yield;
     ok = execute_function(
         &program, room, function, NULL, &heap, task->context->project_root,
         task->context->providers, task->context->provider_count,
         &module_cache, 1, NULL, 0, NULL, &ignored_return,
         &ignored_did_return, task->error, sizeof(task->error));
-    while (ok && module_cache.service_count && !window_task_cancelled(task)) {
+    while (ok && (module_cache.service_count || module_cache.network_count) && !window_task_cancelled(task)) {
         int active = 0;
         if (!pump_native_services(&heap, &module_cache, task->context->providers,
             task->context->provider_count, &active, task->error, sizeof(task->error))) { ok = 0; break; }
         if (!active) break;
-        if (!runtime_wait("10", task->error, sizeof(task->error))) { ok = 0; break; }
+        if (!cooperative_window_wait(&module_cache, &heap, "10", task->error,
+                                      sizeof(task->error))) { ok = 0; break; }
     }
     if ((ok || window_task_cancelled(task)) && !save_window_room_state(task->room_state, room, task->error,
                                       sizeof(task->error))) ok = 0;
@@ -6233,14 +6519,29 @@ static int execute_project_starts(WindowExecutionContext *context,
     for (source_index = 0; ok && source_index < sources.count;
          source_index++) {
         char *source_path = sources.items[source_index];
+        const char *task_source_path = NULL;
         ZSharpProgram *program;
-        size_t room_index;
+        size_t room_index, module_index;
         sources.items[source_index] = NULL;
         program = load_project_module_path(
             context->module_cache, source_path, context->heap,
             context->project_root, context->providers,
             context->provider_count, 1, error, error_size);
         if (program == NULL) {
+            ok = 0;
+            break;
+        }
+        /* The loader consumes source_path, including freeing it on a cache
+           hit. Use its retained canonical module path to identify/start tasks,
+           never the possibly freed incoming allocation. */
+        for (module_index = 0; module_index < context->module_cache->module_count;
+             module_index++)
+            if (context->module_cache->modules[module_index].program == program) {
+                task_source_path = context->module_cache->modules[module_index].source_path;
+                break;
+            }
+        if (task_source_path == NULL) {
+            snprintf(error, error_size, "could not resolve loaded startup module");
             ok = 0;
             break;
         }
@@ -6255,7 +6556,7 @@ static int execute_project_starts(WindowExecutionContext *context,
                 if (strcmp(function->name, "Start") != 0 ||
                     function->disable_auto_run || function->parameter_count != 0) continue;
                 if (!start_window_task(
-                        context, runtime, source_path,
+                        context, runtime, task_source_path,
                         room->qualified_name == NULL ? room->name
                                                      : room->qualified_name,
                         function->name, error, error_size)) {
@@ -6360,6 +6661,13 @@ int zsharp_vm_run_with_providers(
     RuntimeHeap heap;
     RuntimeModuleCache module_cache;
     int ok = 1;
+    if(project_root && *project_root) {
+        ZSharpSettings host_settings;ZSharpDiagnostic host_diagnostic;char ignored[512]={0};
+        if(zsharp_settings_load(project_root,&host_settings,&host_diagnostic,ignored,sizeof(ignored))) {
+            int allowed=zsharp_settings_host_allowed(&host_settings,error,error_size);
+            zsharp_settings_free(&host_settings);if(!allowed)return 0;
+        }
+    }
     memset(&heap, 0, sizeof(heap));
     memset(&module_cache, 0, sizeof(module_cache));
     if (!initialize_program_objects(program, &heap, project_root, providers,
@@ -6419,7 +6727,7 @@ int zsharp_vm_run_with_providers(
             }
         }
     }
-    while (ok && module_cache.service_count) {
+    while (ok && (module_cache.service_count || module_cache.network_count)) {
         int active = 0;
         if (!pump_native_services(&heap, &module_cache, providers, provider_count,
                                    &active, error, error_size)) { ok = 0; break; }

@@ -5,6 +5,27 @@ Official website and downloads: <https://www.zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
+## Version 1.3.0.0
+
+This update adds shared desktop/browser Time expressions, HTTP/HTTPS and named
+WebSockets, plus expanded browser events, DOM access, JSON schemas and public
+project-asset reads. Desktop games gain imported Gamepad input and experimental
+Windows OpenXR PCVR with stereo rendering, tracked controllers, vibration and
+world-space buttons.
+
+PCVR has initial headset testing, but extended renderer coverage and broader
+headset/runtime validation remain incomplete. Optional experimental hand joints
+and pinch input require runtime support and still need hardware validation;
+hand meshes, hand physics and pinch-driven UI are not included. Mixed-reality
+passthrough is deferred, and this is not standalone Quest support.
+
+A Nintendo controller has been hardware-tested. Xbox and PlayStation mappings
+use SDL but have not yet been physically verified; device/driver capabilities
+vary. See [CHANGELOG.md](CHANGELOG.md) for the update and [SYNTAX.md](SYNTAX.md)
+for feature imports, examples and limitations.
+
+## Existing desktop foundation
+
 Version 1.1.0.0 uses separate `.zscene`, `.zobject`, and `.zaudio` files for
 game scenes, objects, and scene-owned WAV sources. It adds executable `.zgame` packages, the
 `zsharpgame:1.0.0.1` dependency, Vulkan drawing, named-key input, cameras, frame timing,

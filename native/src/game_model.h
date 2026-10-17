@@ -8,6 +8,7 @@
 #include "style_transition.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef enum ZSharpGameBodyType {
     ZGAME_BODY_STATIC = 1,
@@ -190,6 +191,9 @@ typedef struct ZSharpGameInput {
 
 typedef struct ZSharpGameModel {
     size_t focused_button; /* Object index + 1, zero means no focus. */
+    size_t xr_hovered_buttons[2]; /* Global object index + 1, independently per controller. */
+    int xr_ui_active; /* XR pointers replace desktop screen-space hover while active. */
+    uint64_t scene_generation; /* Invalidates rendered interaction snapshots on scene changes. */
     int is_3d;
     struct ZSharpMeshCollision *mesh_collisions;
     ZSharpGameScene *scenes;
@@ -238,5 +242,7 @@ const char *zsharp_game_model_scene_icon(const ZSharpGameModel *model);
 const ZSharpGameObject *zsharp_game_model_button_at(const ZSharpGameModel *model,
                                                    float mouse_x, float mouse_y);
 void zsharp_game_model_focus_next(ZSharpGameModel *model, int backwards);
+/* Opt-in executable regression; never runs during normal game loading. */
+int zsharp_game_model_ui_regression(char *error, size_t error_size);
 
 #endif

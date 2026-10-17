@@ -20,6 +20,9 @@ static const char *value(const ZSharpUIElement *element, const char *name) {
     for (i = 0; i < element->property_count; i++) {
         const char *field = element->properties[i].name;
         if (element->properties[i].type == ZUI_PROPERTY_CALLBACK) continue;
+        if ((!strcmp(field,"left") || !strcmp(field,"right")) &&
+            (element->properties[i].type==ZUI_PROPERTY_EMPTY_ARRAY ||
+             element->properties[i].type==ZUI_PROPERTY_IDENTIFIER_ARRAY)) continue;
         if (strcmp(field,name) == 0) result = element->properties[i].text_value;
         else if (strncmp(field,"media/",6) == 0) {
             double min_w,max_w,min_h,max_h;

@@ -171,6 +171,7 @@ jobs:
           New-Item -ItemType Directory -Path build/python-runtime -Force | Out-Null
           tar -xzf python-download.tar.gz -C build/python-runtime
           Copy-Item native/python/zsharp_bridge.py build/python-runtime/python/zsharp_bridge.py -Force
+          Copy-Item native/python/zsharp_network.py build/python-runtime/python/zsharp_network.py -Force
           tar -czf stage/bin/python-runtime.tar.gz -C build/python-runtime python
 
       - name: Stage checksummed runtime files

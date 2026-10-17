@@ -24,6 +24,8 @@ typedef struct ZSharpGamePartPose {
 
 typedef struct ZSharpGameRenderObject {
     size_t render_id; /* stable across the per-frame painter sort */
+    size_t model_index; /* Global source object index + 1; zero for renderer-only overlays. */
+    float ui_base_scale_x, ui_base_scale_y; /* Button hit bounds exclude hover/focus styling. */
     ZSharpGameShape shape;
     float x;
     float y;
@@ -83,10 +85,30 @@ typedef struct ZSharpGameRenderFrame {
     float view_basis[9], projection_focal, projection_tangent;
 } ZSharpGameRenderFrame;
 
+typedef struct ZSharpGameVulkan ZSharpGameVulkan;
+
+/* Shared world-space scene stream for stereo backends. Pixels are cached
+   RGBA32 surfaces owned by the desktop renderer, valid until it is destroyed.
+   The callback must copy triangles it retains and must not throw across C. */
+typedef struct ZSharpGameWorldTriangle {
+    float points[3][3], uv[3][2], color[4];
+    size_t ui_button_id; /* Owning button render_id, including its glyphs; zero otherwise. */
+    const void *texture_key;
+    const unsigned char *pixels;
+    int texture_width, texture_height, texture_pitch;
+} ZSharpGameWorldTriangle;
+typedef int (*ZSharpGameTriangleSink)(void *, const ZSharpGameWorldTriangle *);
+typedef int (*ZSharpGameObjectFilter)(void *,const ZSharpGameRenderObject *);
+
 #ifdef ZSHARP_HAS_GAME_RUNTIME
 #include <SDL3/SDL.h>
-
-typedef struct ZSharpGameVulkan ZSharpGameVulkan;
+#ifdef __cplusplus
+extern "C" {
+#endif
+int zsharp_game_vulkan_world(ZSharpGameVulkan *,const ZSharpGameRenderFrame *,
+    ZSharpGameTriangleSink,void *,char *,size_t);
+int zsharp_game_vulkan_world_filtered(ZSharpGameVulkan *,const ZSharpGameRenderFrame *,
+    ZSharpGameTriangleSink,ZSharpGameObjectFilter,void *,char *,size_t);
 
 ZSharpGameVulkan *zsharp_game_vulkan_create(SDL_Window *window, char *error,
                                              size_t error_size);
@@ -95,6 +117,9 @@ int zsharp_game_vulkan_draw(ZSharpGameVulkan *renderer, int resized,
                             char *error, size_t error_size);
 const char *zsharp_game_vulkan_driver(const ZSharpGameVulkan *renderer);
 void zsharp_game_vulkan_destroy(ZSharpGameVulkan *renderer);
+#ifdef __cplusplus
+}
+#endif
 #endif
 
 #endif

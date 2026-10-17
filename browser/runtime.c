@@ -4,15 +4,20 @@
 #include "zsharp.h"
 #include "decimal.h"
 #include "quickjs.h"
+#include "time_api.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 
 __attribute__((import_module("bzvm"), import_name("read")))
-extern int host_read(const char *, char *, int);
+extern int host_read(const char *, char *, int, unsigned, const char *);
+__attribute__((import_module("bzvm"), import_name("input_session")))
+extern void host_input_session(unsigned, int);
 __attribute__((import_module("bzvm"), import_name("write")))
 extern int host_write(const char *, const char *);
+__attribute__((import_module("bzvm"), import_name("network")))
+extern int host_network(const char *,const char *,char *,int);
 __attribute__((import_module("bzvm"), import_name("bind")))
 extern int host_bind(const char *, const char *);
 __attribute__((import_module("bzvm"), import_name("raw")))
@@ -23,10 +28,33 @@ __attribute__((import_module("bzvm"), import_name("schedule")))
 extern int host_schedule(unsigned, double);
 __attribute__((import_module("bzvm"), import_name("now")))
 extern double host_now(void);
+__attribute__((import_module("bzvm"), import_name("wall_time")))
+extern double host_wall_time(void);
+__attribute__((import_module("bzvm"), import_name("local_time")))
+extern double host_local_time(double, int);
+__attribute__((import_module("bzvm"), import_name("convert_local_time")))
+extern double host_convert_local_time(int, int, int, int, int, int);
+
+static int browser_now(int64_t *ms) {
+    double n=host_wall_time();
+    if(!isfinite(n) || n < -62135596800000.0 || n > 253402300799999.0)return 0;
+    *ms=(int64_t)n;return 1;
+}
+static int browser_local(int64_t ms,int fields[7]) {
+    int i;for(i=0;i<7;i++){double n=host_local_time((double)ms,i);if(!isfinite(n))return 0;fields[i]=(int)n;}return 1;
+}
+static int browser_convert(const int f[7],int64_t *ms) {
+    double n=host_convert_local_time(f[0],f[1],f[2],f[3],f[4],f[5]);
+    if(!isfinite(n) || n < -62135596800000.0 || n > 253402300799999.0)return 0;
+    *ms=(int64_t)n;return 1;
+}
+static const ZSharpTimeHost time_host={browser_now,browser_local,browser_convert};
 
 typedef struct Array Array;
-typedef struct Value { int type; char *text; double number; Array *array; } Value;
+typedef struct Object Object;
+typedef struct Value { int type; char *text; double number; Array *array; Object *object; } Value;
 struct Array { unsigned references; size_t count; Value *items; };
+struct Object { unsigned references; size_t count; const ZSharpJsonSchema *schema; Value *fields; };
 typedef struct Global { ZSharpVariable *definition; Value value; struct Global *next; } Global;
 static Global *globals;
 typedef struct Local { const char *name; Value value; } Local;
@@ -56,10 +84,41 @@ static ZSharpSettings settings;
 static int has_settings;
 static void drop(Value *v) { free(v->text);
     if(v->array && !--v->array->references){size_t i;for(i=0;i<v->array->count;i++)drop(&v->array->items[i]);free(v->array->items);free(v->array);}
+    if(v->object && !--v->object->references){size_t i;for(i=0;i<v->object->count;i++)drop(&v->object->fields[i]);free(v->object->fields);free(v->object);}
     memset(v,0,sizeof(*v)); }
-static Value copy(Value v) { if (v.text) v.text = zsharp_copy_text(v.text,strlen(v.text));if(v.array)v.array->references++; return v; }
+static Value copy(Value v) { if (v.text) v.text = zsharp_copy_text(v.text,strlen(v.text));if(v.array)v.array->references++;if(v.object)v.object->references++; return v; }
 static Value text(const char *s) { Value v = {ZVALUE_TEXT,NULL,0}; v.text = zsharp_copy_text(s,strlen(s)); return v; }
 static Value number(const char *s) {Value v=text(s);v.type=ZVALUE_NUMBER;v.number=strtod(s,NULL);return v;}
+static int json_value(const char *source,Value *out) {
+    JSRuntime *rt=JS_NewRuntime();JSContext *ctx;JSValue value;int ok=1;
+    if(!rt)return 0;JS_SetMemoryLimit(rt,4*1024*1024);ctx=JS_NewContext(rt);
+    if(!ctx){JS_FreeRuntime(rt);return 0;}
+    value=JS_ParseJSON(ctx,source,strlen(source),"Browser value");
+    if(JS_IsException(value))ok=0;
+    else if(JS_IsNull(value)){memset(out,0,sizeof(*out));out->type=ZVALUE_NULL;}
+    else if(JS_IsBool(value)){out->type=ZVALUE_STATUS;out->number=JS_ToBool(ctx,value);}
+    else if(JS_IsArray(value)){
+        JSValue length=JS_GetPropertyStr(ctx,value,"length");uint32_t n=0,i;
+        JS_ToUint32(ctx,&n,length);JS_FreeValue(ctx,length);
+        if(n>10000)ok=0;else {
+            out->type=ZVALUE_TEXT_ARRAY;out->array=calloc(1,sizeof(Array));
+            if(!out->array)ok=0;else {
+                out->array->references=1;out->array->count=n;out->array->items=calloc(n?n:1,sizeof(Value));
+                if(!out->array->items){out->array->count=0;ok=0;}
+                else for(i=0;i<n;i++){JSValue item=JS_GetPropertyUint32(ctx,value,i);const char *s=JS_ToCString(ctx,item);
+                    if(!s)ok=0;else out->array->items[i]=text(s);
+                    JS_FreeCString(ctx,s);JS_FreeValue(ctx,item);if(!ok)break;}
+            }
+        }
+    }else {
+        const char *s=JS_ToCString(ctx,value);if(!s)ok=0;else *out=JS_IsNumber(value)?number(s):text(s);
+        JS_FreeCString(ctx,s);
+    }
+    JS_FreeValue(ctx,value);JS_FreeContext(ctx);JS_FreeRuntime(rt);
+    if(!ok)drop(out);return ok;
+}
+static Value event_args[4];
+static size_t event_count;
 static const char *string(Value *v, char *buffer) {
     if (v->type == ZVALUE_TEXT) return v->text ? v->text : "";
     if (v->type == ZVALUE_STATUS) return v->number ? "alive" : "dead";
@@ -68,6 +127,85 @@ static const char *string(Value *v, char *buffer) {
     snprintf(buffer,64,"%.17g",v->number); return buffer;
 }
 static int fail(const char *message) { snprintf(failure,sizeof(failure),"%s",message); return 0; }
+static Value *json_field(Value *base,const char *key) {
+    size_t i;if(!base || !base->object)return NULL;
+    for(i=0;i<base->object->count;i++)if(!strcmp(base->object->schema->fields[i].name,key))return &base->object->fields[i];
+    fail("JSON object has no field with that name");return NULL;
+}
+static int safe_asset_path(const char *path) {
+    const char *part=path,*p=path;if(!path || !*path)return 0;
+    for(;;p++) {
+        if(*p && (unsigned char)*p<32)return 0;
+        if(*p=='\\' || *p=='%' || *p=='?' || *p=='#' || *p==':')return 0;
+        if(*p=='/' || !*p) {
+            size_t n=(size_t)(p-part);
+            if(!n || (n==1 && part[0]=='.') || (n==2 && part[0]=='.' && part[1]=='.'))return 0;
+            if(!*p)return 1;part=p+1;
+        }
+    }
+}
+// Keep the original decimal token, not QuickJS's rounded IEEE-754 conversion.
+static char *json_number_token(JSContext *ctx,const char *source,const char *wanted) {
+    const char *p=source;char *result=NULL;while(*p && *p!='{')p++;if(*p)p++;
+    while(*p) {
+        const char *key,*end,*value;JSValue decoded;const char *name;int match;
+        while(*p && (unsigned char)*p<=32)p++;if(*p!='"')return result;
+        key=p++;while(*p && *p!='"'){if(*p=='\\' && p[1])p++;p++;}if(!*p)return NULL;end=++p;
+        char *key_copy=zsharp_copy_text(key,(size_t)(end-key));if(!key_copy)return NULL;
+        decoded=JS_ParseJSON(ctx,key_copy,(size_t)(end-key),"JSON key");free(key_copy);name=JS_ToCString(ctx,decoded);
+        match=name && !strcmp(name,wanted);JS_FreeCString(ctx,name);JS_FreeValue(ctx,decoded);
+        while(*p && (unsigned char)*p<=32)p++;if(*p++!=':')return NULL;
+        while(*p && (unsigned char)*p<=32)p++;value=p;
+        if(*p=='"'){p++;while(*p && *p!='"'){if(*p=='\\' && p[1])p++;p++;}if(*p)p++;}
+        else while(*p && *p!=',' && *p!='}')p++;
+        end=p;while(end>value && (unsigned char)end[-1]<=32)end--;
+        if(match){free(result);result=zsharp_copy_text(value,(size_t)(end-value));}
+        while(*p && (unsigned char)*p<=32)p++;if(*p!=',')return result;p++;
+    }return result;
+}
+static int load_json(ZSharpRoom *room,const char *schema_name,const char *path,Value *out) {
+    size_t i;ZSharpJsonSchema *schema=NULL;int imported=0,read_result,ok=0;
+    char request[4096],source[65536];JSRuntime *rt=NULL;JSContext *ctx=NULL;JSValue parsed=JS_UNDEFINED;
+    for(i=0;i<room->import_count;i++)if(!strcmp(room->imports[i].path,"ZSharp.JSON"))imported=1;
+    if(!imported)return fail("JSON.load requires import ZSharp.JSON()");
+    for(i=0;i<room->json_schema_count;i++)if(!strcmp(room->json_schemas[i].name,schema_name))schema=&room->json_schemas[i];
+    if(!schema)return fail("JSON schema does not exist in this room");
+    if(!safe_asset_path(path) || strlen(path)>4000)return fail("JSON.load requires a safe project-relative path");
+    snprintf(request,sizeof(request),"JSON.file:%s",path);
+    read_result=host_read(request,source,sizeof(source),active ? active->id : 0,"JSON.load");
+    if(read_result==-2)return 2;
+    if(read_result<0)return fail("could not read JSON file (safe project-relative path and at most 64 KiB required)");
+    rt=JS_NewRuntime();if(!rt)return fail("out of memory");JS_SetMemoryLimit(rt,4*1024*1024);ctx=JS_NewContext(rt);
+    if(!ctx)goto done;
+    parsed=JS_ParseJSON(ctx,source,strlen(source),path);
+    if(JS_IsException(parsed) || !JS_IsObject(parsed) || JS_IsArray(parsed) || JS_IsNull(parsed))goto done;
+    {JSPropertyEnum *keys=NULL;uint32_t count=0;
+        if(JS_GetOwnPropertyNames(ctx,&keys,&count,parsed,JS_GPN_STRING_MASK|JS_GPN_ENUM_ONLY)<0)goto done;
+        JS_FreePropertyEnum(ctx,keys,count);if(count!=schema->field_count)goto done;
+    }
+    out->type=ZVALUE_OBJECT;out->object=calloc(1,sizeof(Object));if(!out->object)goto done;
+    out->object->references=1;out->object->schema=schema;
+    out->object->fields=calloc(schema->field_count ? schema->field_count : 1,sizeof(Value));if(!out->object->fields)goto done;
+    out->object->count=schema->field_count;
+    for(i=0;i<schema->field_count;i++) {
+        JSValue field=JS_GetPropertyStr(ctx,parsed,schema->fields[i].name);Value *v=&out->object->fields[i];int valid=0;
+        if(schema->fields[i].type==ZVALUE_STATUS && JS_IsBool(field)){v->type=ZVALUE_STATUS;v->number=JS_ToBool(ctx,field);valid=1;}
+        else if(schema->fields[i].type==ZVALUE_NUMBER && JS_IsNumber(field)) {
+            char *raw=json_number_token(ctx,source,schema->fields[i].name);
+            if(raw){*v=number(raw);valid=v->text!=NULL;free(raw);}
+        }
+        else if(schema->fields[i].type==ZVALUE_TEXT && JS_IsString(field)) {
+            size_t length;const char *s=JS_ToCStringLen(ctx,&length,field);
+            if(s && !memchr(s,0,length)){*v=text(s);valid=v->text!=NULL;}
+            JS_FreeCString(ctx,s);
+        }
+        JS_FreeValue(ctx,field);if(!valid)goto done;
+    }
+    ok=1;
+done:
+    if(ctx){JS_FreeValue(ctx,parsed);JS_FreeContext(ctx);}JS_FreeRuntime(rt);
+    if(!ok){drop(out);return fail("JSON file does not match schema (required keys and text/number/status types must match exactly)");}return 1;
+}
 static int engine_interrupt(JSRuntime *runtime,void *opaque){(void)runtime;return host_now()>*(double *)opaque;}
 static int regex_execute(const ZSharpInstruction *in,Value *arguments,Value *result){
     static const char code[]="(function(text,pattern,replacement,flags,kind){"
@@ -140,6 +278,8 @@ static Global *global_value(ZSharpRoom *room,const char *name){size_t i;Global *
         g->value.array->references=1;g->value.array->count=n;g->value.array->items=calloc(n ? n : 1,sizeof(Value));
         if(!g->value.array->items){free(g->value.array);free(g);fail("out of memory");return NULL;}
         for(i=0;i<n;i++)g->value.array->items[i]=g->value.type==ZVALUE_TEXT_ARRAY ? text(g->definition->text_items[i]) : number(g->definition->number_items[i]);
+    }else if(g->value.type==ZVALUE_OBJECT && g->definition->object_type && !strncmp(g->definition->object_type,"$json:",6)) {
+        if(load_json(room,g->definition->object_type+6,g->definition->constructor_arguments[0].text_value,&g->value)!=1){drop(&g->value);free(g);return NULL;}
     }else {free(g);fail("object instances are not ported to bZVM yet");return NULL;}
     g->next=globals;globals=g;return g;
 }
@@ -170,6 +310,20 @@ static Global *path_global(ZSharpRoom *caller,const char *path){
     g=global_value(target_room,parts[n-1]);
     if(g && target_room!=caller && !g->definition->is_public){fail("room variable is silent outside its own room");return NULL;}
     return g;
+}
+static Value *json_path_field(ZSharpRoom *room,Local *locals,size_t count,const char *path,int *found) {
+    char prefix[1024];const char *dot=strchr(path,'.');size_t i,n;Global *g;
+    *found=0;if(!dot)return NULL;n=(size_t)(dot-path);
+    for(i=count;i>0;i--)if(strlen(locals[i-1].name)==n && !strncmp(locals[i-1].name,path,n))break;
+    if(i && locals[i-1].value.object){*found=1;return json_field(&locals[i-1].value,dot+1);}
+    for(i=0;i<room->variable_count;i++)if(strlen(room->variables[i].name)==n && !strncmp(room->variables[i].name,path,n))break;
+    if(i<room->variable_count && room->variables[i].object_type && !strncmp(room->variables[i].object_type,"$json:",6)) {
+        *found=1;g=global_value(room,room->variables[i].name);return g ? json_field(&g->value,dot+1) : NULL;
+    }
+    dot=strrchr(path,'.');n=(size_t)(dot-path);if(n>=sizeof(prefix))return NULL;
+    memcpy(prefix,path,n);prefix[n]=0;g=path_global(room,prefix);
+    if(g && g->value.object){*found=1;return json_field(&g->value,dot+1);}
+    failure[0]=0;return NULL;
 }
 static ZSharpProgram *resolve_target(ZSharpRoom *caller,const ZSharpInstruction *in){
     ZSharpProgram *target;size_t i;int imported=0;
@@ -261,12 +415,24 @@ static int execute_frame(ZSharpRoom *room, ZSharpFunction *function, Frame *save
             else {Global *g=global_value(room,in->operand);if(!g){ok=0;break;}stack[sp++]=copy(g->value);}break;
         case ZOP_LOAD_PATH: {
             char buffer[65536];
-            if(strncmp(in->operand,"Browser.",8)) {Global *g=path_global(room,in->operand);if(!g)ok=0;else stack[sp++]=copy(g->value);break;}
-            if(host_read(in->operand,buffer,sizeof(buffer))<0) {ok=fail("browser element/property read failed (missing ID, duplicate ID or oversized value)");break;}
-            stack[sp++]=text(buffer);break;
+            if(strncmp(in->operand,"Browser.",8)) {
+                int object_found=0;Value *field=json_path_field(room,locals,nl,in->operand,&object_found);
+                if(object_found){if(!field)ok=0;else stack[sp++]=copy(*field);}
+                else {Global *g=path_global(room,in->operand);if(!g)ok=0;else stack[sp++]=copy(g->value);}break;
+            }
+            {char site[512];snprintf(site,sizeof(site),"%s:%s:%zu",owner->source_name,function->name,pc);
+            if(host_read(in->operand,buffer,sizeof(buffer),active->id,site)<0) {ok=fail("browser element/property read failed (missing ID or oversized value)");break;}}
+            if(buffer[0]==30){if(!json_value(buffer+1,&v))ok=fail("invalid typed Browser result");else stack[sp++]=v;}
+            else stack[sp++]=text(buffer);break;
         }
         case ZOP_STORE_PATH: {
-            Global *g;if(!sp){ok=fail("assignment stack underflow");break;}
+            Global *g;int found=0;Value *field;if(!sp){ok=fail("assignment stack underflow");break;}
+            field=json_path_field(room,locals,nl,in->operand,&found);
+            if(found){
+                v=stack[--sp];memset(&stack[sp],0,sizeof(Value));
+                if(!field)ok=0;else if(field->type!=v.type)ok=fail("JSON field assignment requires the declared type");
+                else {drop(field);*field=v;memset(&v,0,sizeof(v));}drop(&v);break;
+            }
             v=stack[--sp];memset(&stack[sp],0,sizeof(Value));g=path_global(room,in->operand);
             if(!g)ok=0;else if(g->value.type!=v.type)ok=fail("qualified assignment has the wrong type");
             else {drop(&g->value);g->value=v;memset(&v,0,sizeof(Value));}
@@ -283,6 +449,14 @@ static int execute_frame(ZSharpRoom *room, ZSharpFunction *function, Frame *save
             if(sp<(in->op==ZOP_SET_INDEX ? 3u : 2u)){ok=fail("array stack underflow");break;}
             if(in->op==ZOP_SET_INDEX){v=stack[--sp];memset(&stack[sp],0,sizeof(Value));}
             b=stack[--sp];a=stack[--sp];memset(&stack[sp],0,2*sizeof(Value));
+            if(a.object && b.type==ZVALUE_TEXT){
+                Value *field=json_field(&a,b.text);
+                if(!field)ok=0;
+                else if(in->op==ZOP_GET_INDEX)stack[sp++]=copy(*field);
+                else if(field->type!=v.type)ok=fail("JSON field assignment requires the declared type");
+                else {drop(field);*field=v;memset(&v,0,sizeof(v));}
+                drop(&a);drop(&b);drop(&v);break;
+            }
             if(!a.array || b.type!=ZVALUE_NUMBER || !zsharp_decimal_to_size(b.text,&index) || index>=a.array->count)ok=fail("array index must be a whole nonnegative number inside the array");
             else if(in->op==ZOP_GET_INDEX)stack[sp++]=copy(a.array->items[index]);
             else {
@@ -313,6 +487,62 @@ static int execute_frame(ZSharpRoom *room, ZSharpFunction *function, Frame *save
                 while(end>buffer && end[-1]=='0')*--end=0;if(end>buffer && end[-1]=='.')*--end=0;
                 if(!strcmp(buffer,"-0"))strcpy(buffer,"0");stack[sp++]=number(buffer);
             }drop(&a);drop(&b);break;
+        }
+        case ZOP_NETWORK: {
+            size_t n=in->argument_count,j;JSRuntime *rt;JSContext *ctx;JSValue list;
+            const char *encoded=NULL;char result[65536];
+            if(n>32 || sp<n){ok=fail("invalid network argument stack");break;}
+            rt=JS_NewRuntime();ctx=rt?JS_NewContext(rt):NULL;
+            if(!ctx){if(rt)JS_FreeRuntime(rt);ok=fail("out of memory");break;}
+            list=JS_NewArray(ctx);
+            for(j=0;j<n;j++) {
+                Value *arg=&stack[sp-n+j];JSValue item;
+                if(arg->type!=ZVALUE_TEXT && arg->type!=ZVALUE_NUMBER){ok=fail("network arguments require text or numbers");break;}
+                if(arg->type==ZVALUE_TEXT &&
+                   ((!strcmp(in->operand,"HTTP.request") && j>0 && (!strcmp(stack[sp-n+j-1].text,"onResponse") || !strcmp(stack[sp-n+j-1].text,"onError"))) ||
+                    (j==1 && (!strcmp(in->operand,"Websocket.callback") || !strcmp(in->operand,"Websocket.connected") || !strcmp(in->operand,"Websocket.error") || !strcmp(in->operand,"Websocket.closed"))))) {
+                    ZSharpInstruction target={0};char storage[2048],canonical[2048];ZSharpProgram *module;
+                    if(!zsharp_call_target_decode(arg->text,&target,storage,sizeof(storage),failure,sizeof(failure)) || !(module=resolve_target(room,&target))){ok=0;break;}
+                    snprintf(canonical,sizeof(canonical),"@%s:%s:%s",module->source_name,target.call_room,target.call_function);
+                    item=JS_NewString(ctx,canonical);
+                }else item=arg->type==ZVALUE_TEXT?JS_NewString(ctx,arg->text):JS_NewFloat64(ctx,arg->number);
+                JS_SetPropertyUint32(ctx,list,(uint32_t)j,item);
+            }
+            if(ok){JSValue json=JS_JSONStringify(ctx,list,JS_UNDEFINED,JS_UNDEFINED);encoded=JS_ToCString(ctx,json);JS_FreeValue(ctx,json);
+                if(!encoded || !host_network(in->operand,encoded,result,sizeof(result)))ok=fail("network operation failed; see host error");
+                else if(in->number_operand){if(!json_value(result,&v))ok=fail("invalid network result");}
+            }
+            JS_FreeCString(ctx,encoded);JS_FreeValue(ctx,list);JS_FreeContext(ctx);JS_FreeRuntime(rt);
+            for(j=0;j<n;j++)drop(&stack[--sp]);
+            if(ok && in->number_operand)stack[sp++]=v;break;
+        }
+        case ZOP_FILE_READ: case ZOP_FILE_EXISTS: {
+            char request[4096],source[65536];int result;
+            if(!sp || stack[sp-1].type!=ZVALUE_TEXT || !safe_asset_path(stack[sp-1].text) || strlen(stack[sp-1].text)>4000){ok=fail("File read requires a safe project-relative text path");break;}
+            snprintf(request,sizeof(request),"%s%s",in->op==ZOP_FILE_READ ? "JSON.file:" : "File.exists:",stack[sp-1].text);
+            result=host_read(request,source,sizeof(source),active->id,"File.read");
+            if(result==-2){active->delay=10;pc--;ok=2;break;}
+            if(result<0){ok=fail("could not read project file");break;}
+            drop(&stack[--sp]);
+            if(in->op==ZOP_FILE_READ)stack[sp++]=text(source);
+            else {v.type=ZVALUE_STATUS;v.number=!strcmp(source,"alive");stack[sp++]=v;}
+            break;
+        }
+        case ZOP_JSON_LOAD: {
+            if(!sp || stack[sp-1].type!=ZVALUE_TEXT){ok=fail("JSON.load requires a text file path");break;}
+            int loaded=load_json(room,in->operand,stack[sp-1].text,&v);
+            if(loaded==2){active->delay=10;pc--;ok=2;break;}
+            drop(&stack[--sp]);if(!loaded)ok=0;else stack[sp++]=v;break;
+        }
+        case ZOP_TIME: {
+            Value args[3]={{0}};const char *texts[3];size_t n=in->argument_count,j;
+            char result[512],error[512];int is_text;
+            if(n>3 || sp<n){ok=fail("invalid Time argument stack");break;}
+            for(j=n;j>0;j--){args[j-1]=stack[--sp];memset(&stack[sp],0,sizeof(Value));texts[j-1]=args[j-1].text;
+                if(args[j-1].type!=ZVALUE_TEXT && args[j-1].type!=ZVALUE_NUMBER)ok=fail("Time arguments must be text or numbers");}
+            if(ok && !zsharp_time_evaluate(in->number_operand,texts,n,&time_host,result,sizeof(result),&is_text,error,sizeof(error)))ok=fail(error);
+            if(ok)stack[sp++]=is_text?text(result):number(result);
+            for(j=0;j<n;j++)drop(&args[j]);break;
         }
         case ZOP_REGEX: {
             Value arguments[4]={{0}};size_t n=in->argument_count;
@@ -423,7 +653,7 @@ static int execute_frame(ZSharpRoom *room, ZSharpFunction *function, Frame *save
                 if(v.text){snprintf(v.text,n,"%s%s",as,bs);}else ok=fail("out of memory");
             }else if(in->op==ZOP_EQUAL || in->op==ZOP_NOT_EQUAL){
                 v.type=ZVALUE_STATUS;v.number=a.type==b.type && (a.type==ZVALUE_TEXT || a.type==ZVALUE_FUNCTION ? !strcmp(a.text,b.text) :
-                    a.type==ZVALUE_NUMBER ? zsharp_decimal_compare(a.text,b.text)==0 : a.array || b.array ? a.array==b.array : a.number==b.number);
+                    a.type==ZVALUE_NUMBER ? zsharp_decimal_compare(a.text,b.text)==0 : a.array || b.array ? a.array==b.array : a.object || b.object ? a.object==b.object : a.number==b.number);
                 if(in->op==ZOP_NOT_EQUAL)v.number=!v.number;
             }else if(in->op==ZOP_AND || in->op==ZOP_OR){
                 if(a.type!=ZVALUE_STATUS || b.type!=ZVALUE_STATUS)ok=fail("boolean operation requires status operands");
@@ -477,7 +707,7 @@ static int finish_task(Task *task,int result) {
     if(result==2)result=fail("could not schedule browser wait");
     {Task **link=&tasks;while(*link && *link!=task)link=&(*link)->next;
         if(*link)*link=task->next;}
-    free_frames(task->head);drop(&task->returned);free(task);return result;
+    host_input_session(task->id,0);free_frames(task->head);drop(&task->returned);free(task);return result;
 }
 static Task *new_task(void) {
     Task *task,*other;size_t count=0;
@@ -485,7 +715,7 @@ static Task *new_task(void) {
     if(count>=256){fail("browser task limit exceeded (256 suspended tasks)");return NULL;}
     task=calloc(1,sizeof(Task));
     if(!task){fail("out of memory");return NULL;}
-    task->id=++next_task_id;task->next=tasks;tasks=task;active=task;return task;
+    task->id=++next_task_id;host_input_session(task->id,1);task->next=tasks;tasks=task;active=task;return task;
 }
 __attribute__((visibility("default"))) int bzvm_resume(unsigned id) {
     Task *task;int result=1;
@@ -502,7 +732,7 @@ __attribute__((visibility("default"))) int bzvm_resume(unsigned id) {
     return finish_task(task,result);
 }
 __attribute__((visibility("default"))) void bzvm_cancel(void) {
-    while(tasks){Task *next=tasks->next;free_frames(tasks->head);drop(&tasks->returned);free(tasks);tasks=next;}
+    while(tasks){Task *next=tasks->next;host_input_session(tasks->id,0);free_frames(tasks->head);drop(&tasks->returned);free(tasks);tasks=next;}
     active=NULL;
 }
 __attribute__((visibility("default"))) const char *bzvm_error(void){return failure;}
@@ -543,6 +773,18 @@ __attribute__((visibility("default"))) int bzvm_load(const char *source,const ch
         snprintf(failure,sizeof(failure),"%s:%u:%u: %s",name,diagnostic.line,diagnostic.column,diagnostic.message);return 0;
     }
     if(modules[module_count].has_window){zsharp_program_free(&modules[module_count]);return fail("native windows are not supported in bZVM");}
+    if(has_settings && (settings.zsharp_version[0]<1 ||
+       (settings.zsharp_version[0]==1 && settings.zsharp_version[1]<3))) {
+        size_t r,f,i;
+        for(r=0;r<modules[module_count].room_count;r++)
+            for(f=0;f<modules[module_count].rooms[r].function_count;f++)
+                for(i=0;i<modules[module_count].rooms[r].functions[f].instruction_count;i++)
+                    if(modules[module_count].rooms[r].functions[f].instructions[i].op==ZOP_TIME ||
+                       modules[module_count].rooms[r].functions[f].instructions[i].op==ZOP_NETWORK) {
+                        zsharp_program_free(&modules[module_count]);
+                        return fail("Time/networking requires ZSharp: [1.3.0.0]: or newer in project.zsettings");
+                    }
+    }
     return (int)++module_count;
 }
 __attribute__((visibility("default"))) unsigned bzvm_import_count(unsigned module){size_t r;unsigned count=0;
@@ -557,9 +799,22 @@ __attribute__((visibility("default"))) const char *bzvm_import(unsigned module,u
         index-=(unsigned)modules[module].rooms[r].import_count;
     }return "";
 }
+__attribute__((visibility("default"))) const char *bzvm_json_path(unsigned module,unsigned index){size_t r,v;
+    if(module>=module_count)return "";
+    for(r=0;r<modules[module].room_count;r++)for(v=0;v<modules[module].rooms[r].variable_count;v++) {
+        ZSharpVariable *value=&modules[module].rooms[r].variables[v];
+        if(value->object_type && !strncmp(value->object_type,"$json:",6)) {
+            if(!index--)return value->constructor_arguments[0].text_value;
+        }
+    }return "";
+}
 __attribute__((visibility("default"))) int bzvm_run(void){size_t r,f;
     if(!module_count)return fail("no browser startup script loaded");
     current_program=&modules[0];initialized=1;budget=100000;depth=0;
+    {size_t m,v;for(m=0;m<module_count;m++)for(r=0;r<modules[m].room_count;r++)for(v=0;v<modules[m].rooms[r].variable_count;v++) {
+        ZSharpVariable *definition=&modules[m].rooms[r].variables[v];
+        if(definition->object_type && !strncmp(definition->object_type,"$json:",6) && !global_value(&modules[m].rooms[r],definition->name))return 0;
+    }}
     for(r=0;r<program.room_count;r++)for(f=0;f<program.rooms[r].function_count;f++)
         if(!strcmp(program.rooms[r].functions[f].name,"Start") && !program.rooms[r].functions[f].parameter_count &&
             !program.rooms[r].functions[f].disable_auto_run) {
@@ -589,5 +844,24 @@ __attribute__((visibility("default"))) int bzvm_call(const char *target){
         if(!*entry_text || *end){free(s);return fail("invalid inline callback entry");}}
     failure[0]=0;budget=100000;
     {Task *task=new_task();if(!task){free(s);return 0;}
-        ok=call_at(s,colon,entry,NULL,0,NULL);free(s);return finish_task(task,ok);}
+        ok=call_at(s,colon,entry,event_args,event_count,NULL);free(s);return finish_task(task,ok);}
+}
+__attribute__((visibility("default"))) int bzvm_event(const char *target,const char *arguments) {
+    JSRuntime *rt=JS_NewRuntime();JSContext *ctx;JSValue list,len;uint32_t count=0,i;int ok=1;
+    if(!rt)return fail("out of memory");ctx=JS_NewContext(rt);
+    if(!ctx){JS_FreeRuntime(rt);return fail("out of memory");}
+    list=JS_ParseJSON(ctx,arguments,strlen(arguments),"network callback");
+    if(!JS_IsArray(list))ok=0;
+    len=ok?JS_GetPropertyStr(ctx,list,"length"):JS_UNDEFINED;
+    if(ok && (JS_ToUint32(ctx,&count,len)<0 || count>4))ok=0;JS_FreeValue(ctx,len);
+    event_count=0;
+    for(i=0;ok && i<count;i++) {
+        JSValue item=JS_GetPropertyUint32(ctx,list,i);const char *s=JS_ToCString(ctx,item);
+        if(!s || (!JS_IsString(item) && !JS_IsNumber(item)))ok=0;
+        else {event_args[i]=JS_IsNumber(item)?number(s):text(s);event_count++;}
+        JS_FreeCString(ctx,s);JS_FreeValue(ctx,item);
+    }
+    JS_FreeValue(ctx,list);JS_FreeContext(ctx);JS_FreeRuntime(rt);
+    if(ok)ok=bzvm_call(target);else fail("invalid callback argument payload");
+    for(i=0;i<event_count;i++)drop(&event_args[i]);event_count=0;return ok;
 }

@@ -84,5 +84,15 @@ int main(void) {
         CHECK(NEAR(rects[2].x, 618) && NEAR(rects[2].y, 344));
         CHECK(edges[1].type == ZUI_PROPERTY_CALLBACK);
     }
+    {
+        ZSharpUIProperty click={0};
+        memset(elements,0,sizeof(elements));memset(rects,0,sizeof(rects));
+        elements[0].type=ZUI_DESIGN;elements[1].type=ZUI_BUTTON;
+        click.name="right";click.type=ZUI_PROPERTY_EMPTY_ARRAY;click.text_value="";
+        elements[1].properties=&click;elements[1].property_count=1;
+        rects[1].x=40;rects[1].y=50;rects[1].width=100;rects[1].height=30;
+        CHECK(zsharp_window_layout(&window,1000,650,1,rects));
+        CHECK(NEAR(rects[1].x,40) && NEAR(rects[1].y,50));
+    }
     puts("ZSS color and layout checks passed"); return 0;
 }

@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.2.2.0 LANGUAGES C)
+project(zsharp VERSION 1.3.0.0 LANGUAGES C)
+if(MSVC)
+    # The bootstrap installs one native executable, not a machine-wide VC++
+    # redistributable. Keep the C and C++ runtimes inside that executable.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 if(ANDROID)
     enable_language(CXX)
 endif()
@@ -160,7 +165,24 @@ add_custom_command(TARGET zsharp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/native/python/zsharp_bridge.py"
             "$<TARGET_FILE_DIR:zsharp>/python/zsharp_bridge.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/native/python/zsharp_network.py"
+            "$<TARGET_FILE_DIR:zsharp>/python/zsharp_network.py"
     VERBATIM)
+
+if(MSVC)
+    get_filename_component(ZSHARP_MSVC_TOOL_DIRECTORY "${CMAKE_LINKER}" DIRECTORY)
+    find_program(ZSHARP_DUMPBIN_EXECUTABLE NAMES dumpbin
+        HINTS "${ZSHARP_MSVC_TOOL_DIRECTORY}" REQUIRED)
+    # Also runs in release CI, where BUILD_TESTING is off. A developer machine
+    # already has the redistributable and cannot otherwise expose this omission.
+    add_custom_command(TARGET zsharp POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            "-DRUNTIME=$<TARGET_FILE:zsharp>"
+            "-DDUMPBIN=${ZSHARP_DUMPBIN_EXECUTABLE}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows-runtime-dependencies.cmake"
+        VERBATIM)
+endif()
 
 add_executable(zsharp_installer
     installer/main.c
@@ -218,6 +240,30 @@ if(ZSHARP_BUILD_GAME_RUNTIME)
         EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(SDL3 VulkanHeaders)
+    if(WIN32)
+        enable_language(CXX)
+        set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+        set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+        set(BUILD_LOADER ON CACHE BOOL "" FORCE)
+        set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(OpenXRSDK
+            URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.53.tar.gz
+            URL_HASH SHA256=3ccd6835e213e3226e828660b80b8e2178f1571ba743f16088c942ebce84f6ef
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE EXCLUDE_FROM_ALL)
+        FetchContent_MakeAvailable(OpenXRSDK)
+        if(MSVC)
+            # The SDK overrides the parent CRT selection for its static loader.
+            # Match the VM and the other static libraries to avoid /MD mixing.
+            set_property(TARGET openxr_loader PROPERTY MSVC_RUNTIME_LIBRARY
+                "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+        endif()
+        target_sources(zsharp PRIVATE native/src/game_xr.cpp)
+        target_compile_features(zsharp PRIVATE cxx_std_17)
+        target_compile_definitions(zsharp PRIVATE ZSHARP_HAS_OPENXR=1)
+        target_link_libraries(zsharp PRIVATE OpenXR::openxr_loader d3d11 dxgi d3dcompiler)
+        install(FILES "${openxrsdk_SOURCE_DIR}/LICENSE" DESTINATION licenses RENAME OPENXR-LICENSE.txt)
+    endif()
     target_compile_definitions(zsharp PRIVATE ZSHARP_HAS_GAME_RUNTIME=1)
     if(ANDROID)
         target_link_libraries(zsharp PRIVATE SDL3::SDL3-shared Vulkan::Headers)
@@ -281,6 +327,7 @@ if(WIN32)
     install(TARGETS zsharp_setup RUNTIME DESTINATION bin)
 endif()
 install(FILES native/python/zsharp_bridge.py DESTINATION bin/python)
+install(FILES native/python/zsharp_network.py DESTINATION bin/python)
 install(FILES native/rust/zsharp_ffi.rs DESTINATION share/zsharp/rust)
 install(FILES
     native/include/zsharp.h
@@ -319,7 +366,52 @@ set(CPACK_GENERATOR "ZIP")
 include(CPack)
 
 if(BUILD_TESTING)
+    if(WIN32 AND TARGET openxr_loader)
+        add_executable(zsharp_test_xr_d3d11 tests/xr-d3d11-tests.cpp)
+        target_include_directories(zsharp_test_xr_d3d11 PRIVATE native/src)
+        target_link_libraries(zsharp_test_xr_d3d11 PRIVATE d3d11 d3dcompiler)
+        add_test(NAME zsharp_xr_d3d11 COMMAND zsharp_test_xr_d3d11)
+        # MR/passthrough is deferred; retain the experiment but do not build it.
+        # add_executable(zsharp_test_xr_passthrough tests/xr-passthrough-tests.cpp)
+        # target_include_directories(zsharp_test_xr_passthrough PRIVATE native/src)
+        # target_compile_features(zsharp_test_xr_passthrough PRIVATE cxx_std_17)
+        # target_link_libraries(zsharp_test_xr_passthrough PRIVATE openxr_loader)
+        # add_test(NAME zsharp_xr_passthrough COMMAND zsharp_test_xr_passthrough)
+        add_executable(zsharp_test_xr_hand_backend tests/xr-hand-backend-tests.cpp)
+        target_include_directories(zsharp_test_xr_hand_backend PRIVATE native/src)
+        target_compile_features(zsharp_test_xr_hand_backend PRIVATE cxx_std_17)
+        target_link_libraries(zsharp_test_xr_hand_backend PRIVATE openxr_loader zsharp_language_core)
+        add_test(NAME zsharp_xr_hand_backend COMMAND zsharp_test_xr_hand_backend)
+    endif()
+    add_executable(zsharp_test_xr tests/xr-tests.c)
+    target_link_libraries(zsharp_test_xr PRIVATE zsharp_language_core)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_xr PRIVATE m)
+    endif()
+    add_test(NAME zsharp_xr COMMAND zsharp_test_xr)
+    add_executable(zsharp_test_gamepad tests/gamepad-tests.c)
+    target_link_libraries(zsharp_test_gamepad PRIVATE zsharp_language_core)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_gamepad PRIVATE m)
+    endif()
+    add_test(NAME zsharp_gamepad COMMAND zsharp_test_gamepad)
+    add_executable(zsharp_test_xr_hands tests/xr-hand-tests.c)
+    target_link_libraries(zsharp_test_xr_hands PRIVATE zsharp_language_core)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_xr_hands PRIVATE m)
+    endif()
+    add_test(NAME zsharp_xr_hands COMMAND zsharp_test_xr_hands)
+    add_executable(zsharp_test_xr_ui tests/xr-ui-tests.c)
+    target_link_libraries(zsharp_test_xr_ui PRIVATE zsharp_language_core)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_xr_ui PRIVATE m)
+    endif()
+    add_test(NAME zsharp_xr_ui COMMAND zsharp_test_xr_ui)
     enable_language(CXX)
+    add_executable(zsharp_test_xr_ui_world tests/xr-ui-world-tests.cpp)
+    target_compile_features(zsharp_test_xr_ui_world PRIVATE cxx_std_17)
+    target_link_libraries(zsharp_test_xr_ui_world PRIVATE zsharp_language_core)
+    add_test(NAME zsharp_xr_ui_world COMMAND zsharp_test_xr_ui_world)
     set(ZSHARP_C_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/c-project")
     file(REMOVE_RECURSE "${ZSHARP_C_TEST_DIR}")
     file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/tests/c_project/"
@@ -399,6 +491,9 @@ if(BUILD_TESTING)
                           DEPENDS "${ZSHARP_RUST_TEST_LIBRARY}")
     endif()
     add_executable(zsharp_test_zip tests/create-stored-zip.c)
+    add_executable(zsharp_test_time tests/time-tests.c)
+    target_link_libraries(zsharp_test_time PRIVATE zsharp_language_core)
+    add_test(NAME zsharp_time COMMAND zsharp_test_time)
     add_executable(zsharp_test_game_projection
         tests/game-projection-tests.c
         native/src/game_projection.c

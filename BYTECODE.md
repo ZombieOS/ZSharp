@@ -1,5 +1,16 @@
 # Z# bytecode identity and integrity
 
+Format `0.23` adds `ZOP_NETWORK` (70), carrying an operation string, a u32
+expression-result flag and a u32 argument count. Arguments are stack values;
+HTTP request fields are alternating names/values, and callbacks are target text.
+Readers retain support for `0.22`.
+
+Format `0.22` adds `ZOP_TIME` (69), carrying a u32 method selector and u32
+argument count. Arguments are pushed in source order. Selectors 1..12 are
+since, until, convert, getYear, getMonth, getDay, getWeek, getHour, getMinute,
+getSecond, getMS and getHour().formatted. Readers retain support for `0.21`
+and previously supported formats. Time requires Z# 1.2.3.0.
+
 Format `0.21` adds `ZOP_REGEX` (65), carrying a u32 operation selector
 (1=test, 2=matches, 3=replace) and u32 argument count. Arguments are pushed
 in source order; an optional final text argument supplies flags. The reader

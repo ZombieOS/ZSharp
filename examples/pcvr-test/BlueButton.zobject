@@ -1,0 +1,15 @@
+zsharp = type.object
+noticed object BlueButton[] (
+ shape: button:
+ text: "Blue feedback":
+ width: 160:
+ height: 32:
+ fontSize: 16:
+ scaleX: 0.005:
+ scaleY: 0.005:
+ color: #205281:
+ hoverColor: #347FB5:
+ event(
+  left: "Main:Main:UIBlue":
+ )
+)

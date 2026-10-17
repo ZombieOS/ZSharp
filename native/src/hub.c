@@ -419,6 +419,7 @@ static int build_hub_program(ZSharpProgram *program,
     ZSharpUIElement *design;
     char section[128];
     size_t index;
+    size_t list_parent;
     zsharp_program_init(program);
     program->script_type = ZSCRIPT_WINDOW;
     program->has_window = 1;
@@ -492,6 +493,16 @@ static int build_hub_program(ZSharpProgram *program,
                   "Nothing is installed yet. Open a package or paste its path above.",
                   "#858596", -180, 72, 460, 54, "paragraph", 14, 0))
         return set_error(error, error_size, "out of memory");
+    {
+        ZSharpUIElement *list = add_element(program,ZUI_CONTAINER,"InstalledList");
+        if(!list || !add_measurement(list,"locationX",-215) ||
+           !add_measurement(list,"locationY",-105) ||
+           !add_measurement(list,"width",520) || !add_measurement(list,"height",400) ||
+           !add_property(list,"overflowY",ZUI_PROPERTY_IDENTIFIER,"auto",0,ZUI_UNIT_NONE) ||
+           !add_property(list,"overflowX",ZUI_PROPERTY_IDENTIFIER,"hidden",0,ZUI_UNIT_NONE))
+            return set_error(error,error_size,"out of memory");
+        list_parent=program->window.element_count;
+    }
     for (index = 0; index < packages->count; index++) {
         const ZSharpInstalledPackage *item = &packages->items[index];
         char name[64];
@@ -502,7 +513,7 @@ static int build_hub_program(ZSharpProgram *program,
         char details_target[64];
         char icon_name[64];
         char label[512];
-        int y = 78 - (int)index * 52;
+        int y = 8 + (int)index * 52;
         snprintf(name, sizeof(name), "Entry%lu", (unsigned long)index);
         snprintf(launch_name, sizeof(launch_name), "Launch%lu",
                  (unsigned long)index);
@@ -523,16 +534,22 @@ static int build_hub_program(ZSharpProgram *program,
                  item->version[3]);
         if ((item->icon_path != NULL
                  ? !add_image(program, icon_name, item->icon_path,
-                              details_target, -450, y, 38, 38)
+                              details_target, 0, y, 38, 38)
                  : !add_button(program, icon_name, "Z#", details_target,
-                               -450, y, 38, "#D92E49")) ||
-            !add_button(program, name, label, details_target, -285, y, 270,
+                               0, y, 38, "#D92E49")) ||
+            !add_button(program, name, label, details_target, 48, y, 250,
                         "#15151F") ||
-            !add_button(program, launch_name, "Launch", launch_target, -92,
-                        y, 92, "#236B4D") ||
-            !add_button(program, remove_name, "Forget", remove_target, 10,
-                        y, 92, "#542633"))
+            !add_button(program, launch_name, "Launch", launch_target, 308,
+                        y, 82, "#236B4D") ||
+            !add_button(program, remove_name, "Forget", remove_target, 400,
+                        y, 82, "#542633"))
             return set_error(error, error_size, "out of memory");
+        {
+            size_t child;char parent[32];snprintf(parent,sizeof(parent),"%zu",list_parent);
+            for(child=program->window.element_count-4;child<program->window.element_count;child++)
+                if(!add_property(&program->window.elements[child],"__parent",ZUI_PROPERTY_IDENTIFIER,parent,0,ZUI_UNIT_NONE))
+                    return set_error(error,error_size,"out of memory");
+        }
     }
     return 1;
 }

@@ -2,6 +2,7 @@
 
 #include "decimal.h"
 #include "lexer.h"
+#include "time_api.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -285,11 +286,43 @@ static int parse_custom_statement(Parser *parser, ZSharpFunction *function,
                                   const ZSharpCustomSyntaxRule *rule);
 static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
                                 int produces_value);
+static int parse_network(Parser *parser,ZSharpFunction *function,int value);
+
+/* Browser selectors count ID matches, not numeric indexing into a value. */
+static int browser_part(Parser *parser, char **part, int selector) {
+    char *suffix,*joined;size_t n;
+    if(parser->current.type!=ZTOKEN_LEFT_BRACKET)return 1;
+    if(!selector && strcmp(*part,"getattr") && strcmp(*part,"readattr") &&
+       strcmp(*part,"setattr") && strcmp(*part,"readelement"))return 1;
+    advance_token(parser);
+    if(selector) {
+        if(parser->current.type!=ZTOKEN_NUMBER && parser->current.type!=ZTOKEN_STAR) {
+            fail_at(parser,&parser->current,"Browser selectors require a positive count or '*'");return 0;
+        }
+        suffix=copy_token(parser,&parser->current);advance_token(parser);
+        if(suffix && strcmp(suffix,"*")) {
+            size_t i;for(i=0;suffix[i];i++)if(suffix[i]<'0'||suffix[i]>'9')break;
+            if(suffix[i] || strtoul(suffix,NULL,10)==0 || strtoul(suffix,NULL,10)>10000) {
+                free(suffix);fail_at(parser,&parser->current,"Browser count must be 1..10000");return 0;
+            }
+        }
+    } else suffix=consume_name(parser,"an attribute/element name");
+    if(!suffix || !consume_type(parser,ZTOKEN_RIGHT_BRACKET,"']' after Browser selector")){free(suffix);return 0;}
+    n=strlen(*part)+strlen(suffix)+3;joined=malloc(n);
+    if(!joined){free(suffix);return 0;}
+    snprintf(joined,n,"%s[%s]",*part,suffix);free(suffix);free(*part);*part=joined;return 1;
+}
+static char *browser_event(const char *id,const char *event) {
+    size_t n=strlen(id)+strlen(event)+2;char *result=malloc(n);
+    if(result) {if(!strcmp(event,"clicked"))snprintf(result,n,"%s",id);else snprintf(result,n,"%s|%s",id,event);}return result;
+}
 
 static int parse_primary(Parser *parser, ZSharpFunction *function) {
     ZSharpToken token = parser->current;
     ZSharpInstruction *instruction;
     size_t syntax_index;
+    if(zsharp_token_equals(&parser->current,"Websocket") || zsharp_token_equals(&parser->current,"HTTP"))
+        return parse_network(parser,function,1);
     for (syntax_index = 0; syntax_index < parser->syntax_rule_count; syntax_index++) {
         const ZSharpCustomSyntaxRule *rule = &parser->syntax_rules[syntax_index];
         if (rule->is_expression && custom_expression_matches(parser, rule->pattern))
@@ -417,6 +450,50 @@ static int parse_primary(Parser *parser, ZSharpFunction *function) {
             }
             return 1;
         }
+        if (zsharp_token_equals(&token, "Time") && match_type(parser, ZTOKEN_DOT)) {
+            char *method = consume_name(parser, "a Time method");
+            int kind = !method ? 0 : !strcmp(method,"since") ? ZTIME_SINCE :
+                !strcmp(method,"until") ? ZTIME_UNTIL : !strcmp(method,"convert") ? ZTIME_CONVERT :
+                !strcmp(method,"getYear") ? ZTIME_YEAR : !strcmp(method,"getMonth") ? ZTIME_MONTH :
+                !strcmp(method,"getDay") ? ZTIME_DAY : !strcmp(method,"getWeek") ? ZTIME_WEEK :
+                !strcmp(method,"getHour") ? ZTIME_HOUR : !strcmp(method,"getMinute") ? ZTIME_MINUTE :
+                !strcmp(method,"getSecond") ? ZTIME_SECOND : !strcmp(method,"getMS") ? ZTIME_MS : 0;
+            uint32_t count=0, min=kind==ZTIME_CONVERT?3u:kind<=ZTIME_UNTIL?1u:0u;
+            uint32_t max=kind==ZTIME_CONVERT?3u:kind<=ZTIME_UNTIL?2u:kind==ZTIME_MS?1u:0u;
+            free(method);
+            if(!kind) { fail_at(parser,&token,"unknown Time method"); return 0; }
+            if(!consume_type(parser,ZTOKEN_LEFT_PAREN,"'(' after Time method")) return 0;
+            if(parser->current.type!=ZTOKEN_RIGHT_PAREN) {
+                do {
+                    if(count>=max) { fail_at(parser,&token,"too many Time arguments"); return 0; }
+                    if(kind==ZTIME_CONVERT && count==2 &&
+                       (zsharp_token_equals(&parser->current,"UTC") || zsharp_token_equals(&parser->current,"LOCAL"))) {
+                        ZSharpToken zone=parser->current;
+                        advance_token(parser);
+                        instruction=emit(parser,function,ZOP_PUSH_TEXT);
+                        if(!instruction) return 0;
+                        instruction->operand=zsharp_copy_text(zone.start,zone.length);
+                        if(!instruction->operand) return 0;
+                    } else if(!parse_expression(parser,function)) return 0;
+                    count++;
+                } while(match_type(parser,ZTOKEN_COMMA));
+            }
+            if(count<min || !consume_type(parser,ZTOKEN_RIGHT_PAREN,"')' after Time arguments")) {
+                if(count<min) fail_at(parser,&token,"too few Time arguments");
+                return 0;
+            }
+            if(match_type(parser,ZTOKEN_DOT)) {
+                char *suffix=consume_name(parser,"formatted after getHour()");
+                int valid=kind==ZTIME_HOUR && suffix && !strcmp(suffix,"formatted");
+                free(suffix);
+                if(!valid) { fail_at(parser,&token,"only Time.getHour().formatted is supported"); return 0; }
+                kind=ZTIME_HOUR_FORMATTED;
+            }
+            instruction=emit(parser,function,ZOP_TIME);
+            if(!instruction) return 0;
+            instruction->number_operand=kind; instruction->argument_count=count;
+            return 1;
+        }
         if (zsharp_token_equals(&token, "Math") &&
             match_type(parser, ZTOKEN_DOT)) {
             char *method = consume_name(parser, "a Math function name");
@@ -527,6 +604,9 @@ static int parse_primary(Parser *parser, ZSharpFunction *function) {
                 return 0;
             }
             part_count++;
+            if(!strcmp(parts[0],"Browser") && !browser_part(parser,&parts[part_count-1],part_count==2)) {
+                for(part_index=0;part_index<part_count;part_index++)free(parts[part_index]);return 0;
+            }
         }
         {
         int reads_length = part_count > 1 &&
@@ -1211,11 +1291,36 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
             break;
         }
         parts[part_count++] = consume_name(parser, "a name after '.'");
+        if(parts[part_count-1] && !strcmp(parts[0],"Browser") &&
+           !browser_part(parser,&parts[part_count-1],part_count==2))goto failed;
     }
     if (parser->failed) goto failed;
 
+    if((part_count==3 && !strcmp(parts[0],"XR") && !strcmp(parts[2],"vibrate") &&
+       (!strcmp(parts[1],"left") || !strcmp(parts[1],"right"))) ||
+       (part_count==2 && !strcmp(parts[0],"Gamepad") && !strcmp(parts[1],"vibrate"))) {
+        char *duration=NULL,*ms=NULL,error[128],path[80];
+        if(!consume_type(parser,ZTOKEN_LEFT_PAREN,"'(' after vibrate") ||
+           !parse_expression(parser,function) || !consume_type(parser,ZTOKEN_COMMA,"',' after vibration strength"))goto failed;
+        instruction=emit(parser,function,ZOP_PUSH_TEXT);if(!instruction)goto failed;
+        instruction->operand=zsharp_copy_text("|",1);
+        if(!emit(parser,function,ZOP_ADD) || !consume_number_text(parser,&duration))goto failed;
+        if(match_word(parser,"s")){ms=zsharp_decimal_multiply(duration,"1000",error,sizeof(error));free(duration);}
+        else if(match_word(parser,"ms"))ms=duration;
+        else {free(duration);fail_at(parser,&parser->current,"vibration duration requires s or ms");goto failed;}
+        if(!ms)goto failed;
+        instruction=emit(parser,function,ZOP_PUSH_TEXT);if(!instruction){free(ms);goto failed;}instruction->operand=ms;
+        if(!emit(parser,function,ZOP_ADD) || !consume_type(parser,ZTOKEN_RIGHT_PAREN,"')' after vibration") ||
+           !consume_type(parser,ZTOKEN_COLON,"':' after vibration"))goto failed;
+        if(part_count==2)snprintf(path,sizeof(path),"Gamepad.vibrate");
+        else snprintf(path,sizeof(path),"XR.%s.vibrate",parts[1]);
+        instruction=emit(parser,function,ZOP_UI_SET_VALUE);if(!instruction)goto failed;
+        instruction->operand=zsharp_copy_text(path,strlen(path));
+        for(index=0;index<part_count;index++)free(parts[index]);return 1;
+    }
     if (part_count == 3 && strcmp(parts[0], "Browser") == 0 &&
-        strcmp(parts[2], "clicked") == 0 && !is_ui_setter) {
+        (!strcmp(parts[2],"clicked") || !strcmp(parts[2],"changed") ||
+         !strcmp(parts[2],"submitted") || !strcmp(parts[2],"inputted")) && !is_ui_setter) {
         if (!consume_type(parser, ZTOKEN_COLON, "':' after Browser.ID.clicked")) goto failed;
         if (parser->current.type == ZTOKEN_LEFT_PAREN) {
             size_t bind_index = function->instruction_count, jump_index;
@@ -1225,7 +1330,7 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
             if (!parser->member_room) { fail_at(parser, &first_token, "inline browser handlers require a room"); goto failed; }
             instruction = emit(parser, function, ZOP_BROWSER_BIND);
             if (!instruction) goto failed;
-            instruction->operand = zsharp_copy_text(parts[1], strlen(parts[1]));
+            instruction->operand = browser_event(parts[1], parts[2]);
             instruction->call_file = zsharp_copy_text(parser->source_name, strlen(parser->source_name));
             instruction->call_room = zsharp_copy_text(parser->member_room->name, strlen(parser->member_room->name));
             instruction->call_function = zsharp_copy_text(function->name, strlen(function->name));
@@ -1252,11 +1357,11 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
         }
         instruction->op = ZOP_BROWSER_BIND;
         free(instruction->operand);
-        instruction->operand = zsharp_copy_text(parts[1], strlen(parts[1]));
+        instruction->operand = browser_event(parts[1], parts[2]);
         for (index = 0; index < part_count; index++) free(parts[index]);
         return instruction->operand != NULL;
     }
-    if (is_ui_setter && part_count >= 3 && strcmp(parts[0], "Browser") == 0) {
+    if ((is_ui_setter || (part_count==3 && !strncmp(parts[2],"setattr[",8))) && part_count >= 3 && strcmp(parts[0], "Browser") == 0) {
         if (!consume_type(parser, ZTOKEN_COLON, "':' before the Browser value")) goto failed;
         if (parser->current.type == ZTOKEN_COLOR) {
             instruction = emit(parser, function, ZOP_PUSH_TEXT);
@@ -2271,7 +2376,102 @@ invalid:
         : "CSS blocks require [ClassName, ( followed by CSS declarations and )]:"); return 0;
 }
 
+static int net_push(Parser *parser,ZSharpFunction *function,const char *text) {
+    ZSharpInstruction *in=emit(parser,function,ZOP_PUSH_TEXT);
+    if(!in)return 0;in->operand=zsharp_copy_text(text,strlen(text));return in->operand!=NULL;
+}
+static int net_callback(Parser *parser,ZSharpFunction *function) {
+    char target[1024]="";size_t used=0;int count=0;
+    if(!consume_type(parser,ZTOKEN_LEFT_BRACKET,"'[' before callback target"))return 0;
+    do {
+        char *part=consume_name(parser,"callback File:Room:Function");
+        size_t n=part?strlen(part):0;
+        if(!part || used+n+2>=sizeof(target)){free(part);return 0;}
+        if(count)target[used++]=':';memcpy(target+used,part,n+1);used+=n;free(part);count++;
+    }while(match_type(parser,ZTOKEN_COLON));
+    if(count<3 || count>4 || !consume_type(parser,ZTOKEN_RIGHT_BRACKET,"']' after callback target")) {
+        fail_at(parser,&parser->current,"callback must be File:Room:Function or PID:File:Room:Function");return 0;
+    }
+    return net_push(parser,function,target);
+}
+static int parse_network(Parser *parser,ZSharpFunction *function,int produces_value) {
+    ZSharpToken token=parser->current;int http=zsharp_token_equals(&token,"HTTP"),imported=0;
+    char *method;char operation[80];uint32_t count=0;ZSharpInstruction *in;size_t i;
+    if(parser->member_room)for(i=0;i<parser->member_room->import_count;i++)
+        if(!strcmp(parser->member_room->imports[i].path,http?"ZSharp.HTTP":"ZSharp.Websocket"))imported=1;
+    if(!imported){fail_at(parser,&token,http?"HTTP requires import ZSharp.HTTP()":"Websocket requires import ZSharp.Websocket()");return 0;}
+    advance_token(parser);if(!consume_type(parser,ZTOKEN_DOT,"'.' after network API"))return 0;
+    method=consume_name(parser,"a network method");if(!method)return 0;
+    snprintf(operation,sizeof(operation),"%s.%s",http?"HTTP":"Websocket",method);
+    if(http && !strcmp(method,"requestionCancel"))strcpy(operation,"HTTP.requestCancel");
+    if(!consume_type(parser,ZTOKEN_LEFT_PAREN,"'(' after network method")){free(method);return 0;}
+    if(http && !strcmp(method,"request")) {
+        unsigned fields=0;
+        if(produces_value){free(method);fail_at(parser,&token,"HTTP.request is a statement");return 0;}
+        while(parser->current.type!=ZTOKEN_RIGHT_PAREN && !parser->failed) {
+            char *field=consume_name(parser,"an HTTP request field");
+            const char *known[]={"name","method","url","body","timeout","headers","onResponse","onError"};
+            int k=-1;
+            if(!field){free(method);return 0;}
+            for(i=0;i<8;i++)if(!strcmp(field,known[i]))k=(int)i;
+            if(k<0 || (fields&(1u<<k))){free(field);free(method);fail_at(parser,&token,"unknown or duplicate HTTP field");return 0;}
+            fields|=1u<<k;
+            if(!net_push(parser,function,field)){free(field);free(method);return 0;}
+            if(k==5 && match_type(parser,ZTOKEN_LEFT_BRACKET)) {
+                const char *start,*end;int depth=1;
+                if(!consume_word(parser,"JSON") || !consume_type(parser,ZTOKEN_RIGHT_BRACKET,"']'") ||
+                   !consume_type(parser,ZTOKEN_LEFT_PAREN,"'(' before header JSON")){free(field);free(method);return 0;}
+                start=parser->current.start;end=start;
+                while(parser->current.type!=ZTOKEN_EOF) {
+                    if(parser->current.type==ZTOKEN_LEFT_PAREN)depth++;
+                    if(parser->current.type==ZTOKEN_RIGHT_PAREN && --depth==0){end=parser->current.start;break;}
+                    advance_token(parser);
+                }
+                if(depth || end<start){free(field);free(method);return 0;}
+                {char *raw=zsharp_copy_text(start,(size_t)(end-start));int ok=raw&&net_push(parser,function,raw);free(raw);if(!ok){free(field);free(method);return 0;}}
+                advance_token(parser);match_type(parser,ZTOKEN_COLON);
+            } else {
+                if(!consume_type(parser,ZTOKEN_COLON,"':' after HTTP field")){free(field);free(method);return 0;}
+                if(k==6 || k==7) {if(!net_callback(parser,function)){free(field);free(method);return 0;}}
+                else if(k==4) {
+                    char *duration=NULL,*ms=NULL,error[128];
+                    if(!consume_number_text(parser,&duration)){free(field);free(method);return 0;}
+                    if(match_word(parser,"s")){ms=zsharp_decimal_multiply(duration,"1000",error,sizeof(error));free(duration);}
+                    else if(match_word(parser,"ms"))ms=duration;
+                    else {free(duration);free(field);free(method);fail_at(parser,&token,"timeout requires s or ms");return 0;}
+                    in=emit(parser,function,ZOP_PUSH_NUMBER);if(!in||!ms){free(ms);free(field);free(method);return 0;}in->operand=ms;
+                } else if(!parse_expression(parser,function)){free(field);free(method);return 0;}
+                if(!consume_type(parser,ZTOKEN_COLON,"':' after HTTP field value")){free(field);free(method);return 0;}
+            }
+            count+=2;free(field);
+        }
+        if(!(fields&(1u<<2)) || !(fields&(1u<<6)) || !(fields&(1u<<7))) {
+            free(method);fail_at(parser,&token,"HTTP.request requires url, onResponse and onError");return 0;
+        }
+    } else {
+        int callback=!http && (!strcmp(method,"callback") || !strcmp(method,"connected") || !strcmp(method,"error") || !strcmp(method,"closed"));
+        int arity=callback || (!http && (!strcmp(method,"connect") || !strcmp(method,"send"))) ? 2:1;
+        int valid=http ? (!strcmp(method,"requestCancel") || !strcmp(method,"requestionCancel") || !strcmp(method,"responseHeaders")) :
+            (callback || !strcmp(method,"connect") || !strcmp(method,"send") || !strcmp(method,"close") || !strcmp(method,"state"));
+        int returns=http?!strcmp(method,"responseHeaders"):!strcmp(method,"state");
+        if(!valid || (produces_value && !returns)){free(method);fail_at(parser,&token,"unknown network method or method does not return a value");return 0;}
+        for(count=0;count<(uint32_t)arity;count++){
+            if(count && !consume_type(parser,ZTOKEN_COMMA,"',' between arguments")){free(method);return 0;}
+            if(callback && count==1){if(!net_callback(parser,function)){free(method);return 0;}}
+            else if(!parse_expression(parser,function)){free(method);return 0;}
+        }
+    }
+    free(method);
+    if(!consume_type(parser,ZTOKEN_RIGHT_PAREN,"')' after network arguments"))return 0;
+    if(!produces_value && !consume_type(parser,ZTOKEN_COLON,"':' after network statement"))return 0;
+    in=emit(parser,function,ZOP_NETWORK);if(!in)return 0;
+    in->operand=zsharp_copy_text(operation,strlen(operation));in->argument_count=count;in->number_operand=produces_value;
+    return in->operand!=NULL;
+}
+
 static int parse_statement(Parser *parser, ZSharpFunction *function) {
+    if(zsharp_token_equals(&parser->current,"Websocket") || zsharp_token_equals(&parser->current,"HTTP"))
+        return parse_network(parser,function,0);
     if (parser->current.type == ZTOKEN_IDENTIFIER &&
         (zsharp_token_equals(&parser->current, "JavaScript") || zsharp_token_equals(&parser->current, "CSS")))
         return parse_browser_block(parser, function);

@@ -21,6 +21,11 @@ for (const item of WebAssembly.Module.imports(module)) {
 }
 instance = new WebAssembly.Instance(module, {bzvm: {
   now: () => performance.now(),
+  input_session: () => {},
+  network: () => 0,
+  wall_time: () => Date.now(),
+  local_time: (ms, field) => {const d=new Date(ms);return [d.getFullYear(),d.getMonth()+1,d.getDate(),d.getHours(),d.getMinutes(),d.getSeconds(),d.getDay()][field];},
+  convert_local_time: () => NaN,
   read: (path, output) => {
     assert.equal(decode(path), 'Browser.input.value');
     const bytes = Buffer.from('test\0');
@@ -52,7 +57,7 @@ assert.equal(decode(instance.exports.bzvm_project_name()), 'Browser Test');
 for (const [source, expected] of [
   [settingsText.replace('PID: "browser_test":', ''), 'must define'],
   [settingsText.replace('Dependencies ():', 'Dependencies ( playfab:1.0.0.0: ):'), 'Store dependencies'],
-  [settingsText.replace('[1.2.2.0]', '[1.2.3.0]'), 'newer bZVM']
+  [settingsText.replace('[1.2.2.0]', '[1.4.0.0]'), 'newer bZVM']
 ]) {
   const pointer=put(source);
   try {assert.equal(instance.exports.bzvm_settings(pointer),0);assert.ok(decode(instance.exports.bzvm_error()).includes(expected));}

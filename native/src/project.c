@@ -6,6 +6,8 @@
 #include "window_style.h"
 
 #include "game_model.h"
+#include "xr_input.h"
+#include "gamepad_input.h"
 #include "c_syntax.h"
 #include "zsharp.h"
 
@@ -1432,6 +1434,33 @@ static int validate_instruction(const ZSharpProgram *program,
     char *parts[5] = {0};
     size_t count = 0;
     int ok = 1;
+    if (instruction->operand && !strncmp(instruction->operand,"Gamepad.",8) &&
+        (instruction->op==ZOP_LOAD_PATH || instruction->op==ZOP_STORE_PATH ||
+         instruction->op==ZOP_UI_SET || instruction->op==ZOP_UI_SET_VALUE)) {
+        size_t i;int imported=0,writing=instruction->op!=ZOP_LOAD_PATH;
+        for(i=0;i<room->import_count;i++)
+            if(!strcmp(room->imports[i].path,"ZSharp.Gamepad"))imported=1;
+        if(!imported){snprintf(error,error_size,"Gamepad requires import ZSharp.Gamepad()");return 0;}
+        if(project_version_before(settings,1,3,0,0)){
+            snprintf(error,error_size,"Gamepad requires ZSharp: [1.3.0.0]: or newer");return 0;
+        }
+        if(!settings->game_start_scene){snprintf(error,error_size,"Gamepad is available only in games");return 0;}
+        if(!zsharp_gamepad_property(instruction->operand,writing)){
+            snprintf(error,error_size,"unknown or read-only Gamepad property '%s'",instruction->operand);return 0;
+        }
+        return 1;
+    }
+    if (instruction->operand && !strncmp(instruction->operand,"XR.",3) &&
+        (instruction->op==ZOP_LOAD_PATH || instruction->op==ZOP_STORE_PATH ||
+         instruction->op==ZOP_UI_SET || instruction->op==ZOP_UI_SET_VALUE)) {
+        size_t i;int imported=0,writing=instruction->op!=ZOP_LOAD_PATH;
+        for(i=0;i<room->import_count;i++)if(!strcmp(room->imports[i].path,"ZSharp.XR"))imported=1;
+        if(!imported){snprintf(error,error_size,"XR requires import ZSharp.XR()");return 0;}
+        if(project_version_before(settings,1,3,0,0)){snprintf(error,error_size,"XR requires ZSharp: [1.3.0.0]: or newer");return 0;}
+        if(!settings->game_start_scene){snprintf(error,error_size,"XR is available only in games");return 0;}
+        if(!zsharp_xr_property(instruction->operand,writing)){snprintf(error,error_size,"unknown or read-only XR property '%s'",instruction->operand);return 0;}
+        return 1;
+    }
     if (instruction->op == ZOP_PUSH_FUNCTION) {
         ZSharpInstruction target = {0};
         char target_storage[8192];
@@ -1790,6 +1819,10 @@ static int validate_feature_version(const ZSharpSettings *settings,
                  "File I/O requires ZSharp: [1.1.2.0]: or newer; the project declares %u.%u.%u.%u",
                  settings->zsharp_version[0], settings->zsharp_version[1],
                  settings->zsharp_version[2], settings->zsharp_version[3]);
+        return 0;
+    }
+    if ((instruction->op == ZOP_TIME || instruction->op == ZOP_NETWORK) && project_version_before(settings, 1, 3, 0, 0)) {
+        snprintf(error, error_size, "Time/networking requires ZSharp: [1.3.0.0]: or newer");
         return 0;
     }
     if (instruction->op == ZOP_REGEX && project_version_before(settings, 1, 2, 1, 0)) {

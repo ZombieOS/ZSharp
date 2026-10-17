@@ -1,0 +1,6 @@
+zsharp = type.script:model
+noticed model Prism[] (
+ parent: "Assets/Prism.fbx":
+ collider: none:
+ body: static:
+)

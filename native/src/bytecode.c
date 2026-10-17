@@ -9,7 +9,7 @@
 
 static const unsigned char BYTECODE_MAGIC[4] = {'Z', 'S', 'B', 'C'};
 static const uint16_t BYTECODE_MAJOR = 0;
-static const uint16_t BYTECODE_MINOR = 21;
+static const uint16_t BYTECODE_MINOR = 23;
 
 int zsharp_call_target_decode(const char *text, ZSharpInstruction *target,
                              char *storage, size_t storage_size,
@@ -395,8 +395,11 @@ static int write_instruction(FILE *file,
         case ZOP_RANDOM:
         case ZOP_MATH:
         case ZOP_REGEX:
+        case ZOP_TIME:
             return write_u32(file, (uint32_t)instruction->number_operand) &&
                    write_u32(file, instruction->argument_count);
+        case ZOP_NETWORK:
+            return write_string(file,instruction->operand) && write_u32(file,(uint32_t)instruction->number_operand) && write_u32(file,instruction->argument_count);
         case ZOP_DELAY:
             return write_string(file, instruction->operand);
         case ZOP_ADD:
@@ -869,9 +872,13 @@ static int read_instruction(FILE *file, ZSharpInstruction *instruction) {
         case ZOP_RANDOM:
         case ZOP_MATH:
         case ZOP_REGEX:
+        case ZOP_TIME:
             if (!read_u32(file, &value)) return 0;
             instruction->number_operand = (int32_t)value;
             return read_u32(file, &instruction->argument_count);
+        case ZOP_NETWORK:
+            if(!read_string(file,&instruction->operand) || !read_u32(file,&value))return 0;
+            instruction->number_operand=(int32_t)value;return read_u32(file,&instruction->argument_count);
         case ZOP_DELAY:
             return read_string(file, &instruction->operand);
         case ZOP_ADD:
@@ -1147,7 +1154,7 @@ int zsharp_bytecode_read(const char *path, ZSharpProgram *program,
          memcmp(magic, BYTECODE_MAGIC, sizeof(magic)) == 0 &&
          read_u16(file, &major) && read_u16(file, &minor) &&
          major == BYTECODE_MAJOR &&
-         (minor == 14 || minor == 15 || minor == 16 || minor == 18 || minor == 19 || minor == 20 ||
+         (minor == 14 || minor == 15 || minor == 16 || minor == 18 || minor == 19 || minor == 20 || minor == 21 || minor == 22 ||
           minor == BYTECODE_MINOR) &&
          read_string(file, &program->project_id) &&
          read_bytes(file, program->project_identity,

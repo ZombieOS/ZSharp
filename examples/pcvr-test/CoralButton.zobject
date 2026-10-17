@@ -1,0 +1,15 @@
+zsharp = type.object
+noticed object CoralButton[] (
+ shape: button:
+ text: "Coral feedback":
+ width: 160:
+ height: 32:
+ fontSize: 16:
+ scaleX: 0.005:
+ scaleY: 0.005:
+ color: #873F35:
+ hoverColor: #B75C4C:
+ event(
+  left: "Main:Main:UICoral":
+ )
+)

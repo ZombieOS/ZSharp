@@ -1,0 +1,138 @@
+zsharp = type.script
+noticed room Main[] (
+ import ZSharp.XR():
+ noticed status Green = alive:
+ noticed number UIActivations = 0:
+ noticed text LastTrackingStatus = "":
+ noticed text LastCapabilityStatus = "":
+ noticed text LastHandStatus = "":
+ noticed status StatusKeyDown = dead:
+ noticed brain Start[] (
+  Print("PCVR Lab: look around and move your controllers. Right trigger changes the target color."):
+  Print("A/B/X/Y: gentle 25% vibration for 120ms. Either grip: 50% for 120ms. Stick clicks: 25%. Escape exits."):
+  Print("Stick direction: 0 forward, 90 right, 180 back, 270 left. Magnitude: decimal 0..1."):
+  Print("Rendering checks: checker cube on the left, imported spinning prism on the right, blue translucent panel and floor shadows."):
+  Print("World-space UI: point either controller's laser at Blue feedback or Coral feedback, then squeeze that controller's trigger."):
+  Print("The small white feedback cube changes separately from the normal trigger target. Release the trigger before your first UI click."):
+  Print("Bare hands: if the PCVR runtime exposes hand joints, put controllers down and open your hands before pinching. Tiny translucent cubes mark each index/thumb tip; pinches change the lower feedback cube, not UI buttons."):
+  Print("Console: status prints only when it changes. Press P for details; [Input] is a physical press, [UI CLICK] confirms a button callback."):
+  loop (
+   number.set:Lab.ImportedPrism.rotationY = Lab.ImportedPrism.rotationY + (Game.delta * 25):
+   if[XR.active == alive] (
+    Lab.LeftHand.visible.set: (XR.left.tracked):
+    Lab.RightHand.visible.set: (XR.right.tracked):
+    number.set:Lab.LeftHand.positionX = XR.left.positionX:
+    number.set:Lab.LeftHand.positionY = XR.left.positionY:
+    number.set:Lab.LeftHand.positionZ = XR.left.positionZ:
+    number.set:Lab.LeftHand.rotationX = XR.left.rotationX:
+    number.set:Lab.LeftHand.rotationY = XR.left.rotationY:
+    number.set:Lab.LeftHand.rotationZ = XR.left.rotationZ:
+    number.set:Lab.RightHand.positionX = XR.right.positionX:
+    number.set:Lab.RightHand.positionY = XR.right.positionY:
+    number.set:Lab.RightHand.positionZ = XR.right.positionZ:
+    number.set:Lab.RightHand.rotationX = XR.right.rotationX:
+    number.set:Lab.RightHand.rotationY = XR.right.rotationY:
+    number.set:Lab.RightHand.rotationZ = XR.right.rotationZ:
+    if[XR.left.hand.tracked and XR.left.hand.indexTip.tracked] (
+     Lab.LeftIndexTip.visible.set: alive:
+     number.set:Lab.LeftIndexTip.positionX = XR.left.hand.indexTip.positionX:
+     number.set:Lab.LeftIndexTip.positionY = XR.left.hand.indexTip.positionY:
+     number.set:Lab.LeftIndexTip.positionZ = XR.left.hand.indexTip.positionZ:
+    ) else ( Lab.LeftIndexTip.visible.set: dead: )
+    if[XR.left.hand.tracked and XR.left.hand.thumbTip.tracked] (
+     Lab.LeftThumbTip.visible.set: alive:
+     number.set:Lab.LeftThumbTip.positionX = XR.left.hand.thumbTip.positionX:
+     number.set:Lab.LeftThumbTip.positionY = XR.left.hand.thumbTip.positionY:
+     number.set:Lab.LeftThumbTip.positionZ = XR.left.hand.thumbTip.positionZ:
+    ) else ( Lab.LeftThumbTip.visible.set: dead: )
+    if[XR.right.hand.tracked and XR.right.hand.indexTip.tracked] (
+     Lab.RightIndexTip.visible.set: alive:
+     number.set:Lab.RightIndexTip.positionX = XR.right.hand.indexTip.positionX:
+     number.set:Lab.RightIndexTip.positionY = XR.right.hand.indexTip.positionY:
+     number.set:Lab.RightIndexTip.positionZ = XR.right.hand.indexTip.positionZ:
+    ) else ( Lab.RightIndexTip.visible.set: dead: )
+    if[XR.right.hand.tracked and XR.right.hand.thumbTip.tracked] (
+     Lab.RightThumbTip.visible.set: alive:
+     number.set:Lab.RightThumbTip.positionX = XR.right.hand.thumbTip.positionX:
+     number.set:Lab.RightThumbTip.positionY = XR.right.hand.thumbTip.positionY:
+     number.set:Lab.RightThumbTip.positionZ = XR.right.hand.thumbTip.positionZ:
+    ) else ( Lab.RightThumbTip.visible.set: dead: )
+    if[XR.left.hand.pinch.held and XR.right.hand.pinch.held] (
+     Lab.HandFeedback.color.set: #6AE49C:
+    ) else if[XR.left.hand.pinch.held] (
+     Lab.HandFeedback.color.set: #68ADFF:
+    ) else if[XR.right.hand.pinch.held] (
+     Lab.HandFeedback.color.set: #FF795E:
+    ) else ( Lab.HandFeedback.color.set: #FFFFFF: )
+    if[XR.left.hand.pinch.pressed] ( Print("Left bare-hand pinch pressed"): ) else ()
+    if[XR.right.hand.pinch.pressed] ( Print("Right bare-hand pinch pressed"): ) else ()
+    if[XR.left.hand.pinch.released] ( Print("Left bare-hand pinch released"): ) else ()
+    if[XR.right.hand.pinch.released] ( Print("Right bare-hand pinch released"): ) else ()
+    if[XR.right.trigger.pressed] (
+     Print("[Input] Right trigger pressed"):
+     if[Green] ( Lab.Target.color.set: #FF795E: Green = dead: ) else ( Lab.Target.color.set: #6AE49C: Green = alive: )
+     XR.right.vibrate(25, 120ms):
+    ) else ()
+    if[XR.right.a.pressed] ( Print("[Input] Right A pressed"): XR.right.vibrate(25, 120ms): ) else ()
+    if[XR.right.b.pressed] ( Print("[Input] Right B pressed"): XR.right.vibrate(25, 120ms): ) else ()
+    if[XR.left.x.pressed] ( Print("[Input] Left X pressed"): XR.left.vibrate(25, 120ms): ) else ()
+    if[XR.left.y.pressed] ( Print("[Input] Left Y pressed"): XR.left.vibrate(25, 120ms): ) else ()
+    if[XR.left.grip.pressed] ( Print("[Input] Left grip pressed"): XR.left.vibrate(50, 120ms): ) else ()
+    if[XR.right.grip.pressed] ( Print("[Input] Right grip pressed"): XR.right.vibrate(50, 120ms): ) else ()
+    if[XR.left.stick.pressed] ( Print("[Input] Left stick pressed"): XR.left.vibrate(25, 120ms): ) else ()
+    if[XR.right.stick.pressed] ( Print("[Input] Right stick pressed"): XR.right.vibrate(25, 120ms): ) else ()
+    if[XR.left.trigger.pressed] ( Print("[Input] Left trigger pressed"): Lab.Target.color.set: #68ADFF: ) else ()
+    if[XR.left.trigger.released] ( Lab.Target.color.set: #6AE49C: Green = alive: ) else ()
+    text TrackingStatus = "head=" + XR.head.tracked + " focus=" + XR.focused + " controllers=" + XR.left.tracked + "/" + XR.right.tracked:
+    if[TrackingStatus != LastTrackingStatus] (
+     Print("[Status] " + TrackingStatus):
+     text.set.LastTrackingStatus = TrackingStatus:
+    ) else ()
+    text CapabilityStatus = "hands available=" + XR.hands.available:
+    if[CapabilityStatus != LastCapabilityStatus] (
+     Print("[Status] " + CapabilityStatus):
+     text.set.LastCapabilityStatus = CapabilityStatus:
+    ) else ()
+    text HandStatus = "hands tracked=" + XR.left.hand.tracked + "/" + XR.right.hand.tracked:
+    if[HandStatus != LastHandStatus] (
+     Print("[Status] " + HandStatus):
+     text.set.LastHandStatus = HandStatus:
+    ) else ()
+   ) else (
+    Lab.LeftHand.visible.set: dead:
+    Lab.RightHand.visible.set: dead:
+    Lab.LeftIndexTip.visible.set: dead:
+    Lab.LeftThumbTip.visible.set: dead:
+    Lab.RightIndexTip.visible.set: dead:
+    Lab.RightThumbTip.visible.set: dead:
+    Lab.Floor.visible.set: alive:
+    if[input.key.space] ( Lab.Target.color.set: #FF795E: ) else ( Lab.Target.color.set: #6AE49C: )
+   )
+   if[input.key.p and StatusKeyDown == dead] (
+    Print("[Status] head=" + XR.head.tracked + " focus=" + XR.focused):
+    Print("[Status] controllers L/R=" + XR.left.tracked + "/" + XR.right.tracked):
+    Print("[Status] hands available=" + XR.hands.available + " tracked=" + XR.left.hand.tracked + "/" + XR.right.hand.tracked):
+    Print("[Status] R stick angle=" + XR.right.stick.angle + " magnitude=" + XR.right.stick.magnitude):
+    Print("[Status] pinch L/R=" + XR.left.hand.pinch.value + "/" + XR.right.hand.pinch.value):
+   ) else ()
+   StatusKeyDown = input.key.p:
+   if[input.key.escape] ( Application.Quit: ) else ()
+   wait(8ms):
+  )
+ )
+ noticed brain UIBlue[] (
+  Print("[UI CLICK] Blue feedback"):
+  Lab.UIFeedback.color.set: #68ADFF:
+  number.set:UIActivations = UIActivations + 1:
+  Print("[UI] Total button clicks: " + UIActivations):
+ )
+ noticed brain UICoral[] (
+  Print("[UI CLICK] Coral feedback"):
+  Lab.UIFeedback.color.set: #FF795E:
+  number.set:UIActivations = UIActivations + 1:
+  Print("[UI] Total button clicks: " + UIActivations):
+ )
+ noticed brain Shutdown[] (
+  Print("PCVR Lab shutdown completed."):
+ )
+)

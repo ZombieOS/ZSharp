@@ -1,0 +1,43 @@
+; Authored Z# PCVR test mesh. ASCII FBX 7.4, no external assets.
+FBXHeaderExtension: {
+    FBXHeaderVersion: 1003
+    FBXVersion: 7400
+}
+Objects: {
+    Geometry: 1, "Geometry::Prism", "Mesh" {
+        Vertices: *15 {
+            a: -0.5,0,-0.5, 0.5,0,-0.5, 0.5,0,0.5, -0.5,0,0.5, 0,1,0
+        }
+        PolygonVertexIndex: *18 {
+            a: 0,2,-2, 0,3,-3, 0,1,-5, 1,2,-5, 2,3,-5, 3,0,-5
+        }
+        LayerElementUV: 0 {
+            Version: 101
+            Name: "UVMap"
+            MappingInformationType: "ByPolygonVertex"
+            ReferenceInformationType: "Direct"
+            UV: *36 {
+                a: 0,0,1,1,1,0, 0,0,0,1,1,1, 0,0,1,0,0.5,1, 0,0,1,0,0.5,1, 0,0,1,0,0.5,1, 0,0,1,0,0.5,1
+            }
+        }
+        Layer: 0 {
+            Version: 100
+            LayerElement: {
+                Type: "LayerElementUV"
+                TypedIndex: 0
+            }
+        }
+    }
+    Model: 2, "Model::Prism", "Mesh" {
+        Version: 232
+        Properties70: {
+            P: "Lcl Translation", "Lcl Translation", "", "A", 0,0,0
+            P: "Lcl Rotation", "Lcl Rotation", "", "A", 0,0,0
+            P: "Lcl Scaling", "Lcl Scaling", "", "A", 1,1,1
+        }
+    }
+}
+Connections: {
+    C: "OO",1,2
+    C: "OO",2,0
+}

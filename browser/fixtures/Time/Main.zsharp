@@ -1,0 +1,31 @@
+zsharp = type.script
+noticed room Main[] (
+ noticed brain Start[] (
+  number Epoch = Time.convert("1970-01-01", "00:00", UTC):
+  Print(Epoch):
+  Print(Time.convert("1/1/26", "00:00", UTC)):
+  Print(Time.convert("2026-01-01", "00:00:00", "UTC+05:30")):
+  Print(Time.convert("1969-12-31", "23:59:59", UTC)):
+  number Year = Time.getYear():
+  if[Year >= 2026 and Year <= 9999] ( Print("year OK"): ) else ( Print("BAD year"): )
+  number Month = Time.getMonth():
+  if[Month >= 1 and Month <= 12] ( Print("month OK"): ) else ( Print("BAD month"): )
+  number Hour = Time.getHour():
+  if[Hour >= 0 and Hour <= 23] ( Print("hour OK"): ) else ( Print("BAD hour"): )
+  text Week = Time.getWeek():
+  if[Regex.test(Week, "^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$")] (
+   Print("weekday OK"):
+  ) else ( Print("BAD weekday"): )
+  text Formatted = Time.getHour().formatted:
+  if[Regex.test(Formatted, "^(1[0-2]|[1-9]) (AM|PM)$")] (
+   Print("formatted OK"):
+  ) else ( Print("BAD formatted"): )
+  number MS = Time.getMS(3):
+  if[MS >= 0 and MS <= 999] ( Print("ms OK"): ) else ( Print("BAD ms"): )
+  text Since = Time.since(Time.convert("1/1/26", "00:00", UTC)):
+  text Until = Time.until("253402300799"):
+  if[Regex.test(Since, "ago$") and Regex.test(Until, "^in ")] (
+   Print("relative OK"):
+  ) else ( Print("BAD relative"): )
+ )
+)
