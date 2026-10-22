@@ -19,6 +19,11 @@ typedef enum ZSharpWindowReadType {
     ZWINDOW_READ_STATUS = 3
 } ZSharpWindowReadType;
 
+typedef enum ZSharpApplicationQuitMode {
+    ZAPPLICATION_QUIT_REGULAR = 0,
+    ZAPPLICATION_QUIT_TRAY = 1
+} ZSharpApplicationQuitMode;
+
 typedef struct ZSharpWindowRuntime {
     void *state;
     int (*set_property)(void *state, const char *path,
@@ -35,6 +40,8 @@ typedef struct ZSharpWindowRuntime {
     void (*request_close)(void *state);
     /* Called on the script thread before loading/executing its task. */
     void (*begin_task)(void *state);
+    int (*request_quit)(void *state, ZSharpApplicationQuitMode mode,
+                        char *error, size_t error_size);
 } ZSharpWindowRuntime;
 
 typedef int (*ZSharpWindowCallback)(void *user_data, const char *target,

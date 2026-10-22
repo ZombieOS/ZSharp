@@ -4,7 +4,7 @@ PID: "scene_instance_tests":
 Version: [1.0.0.0]:
 Authors: ["Z# Tests"]:
 Description: "Runtime placement transforms":
-ZSharp: [1.2.1.0]:
+ZSharp: [1.4.0.0]:
 Dependencies (
  zsharpgame:1.0.0.1
 ):

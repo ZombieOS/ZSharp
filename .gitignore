@@ -2,6 +2,12 @@
 /build/
 /out/
 /_CPack_Packages/
+/build-interop-managed/
+/build-tools/
+/native/interop/csharp/bin/
+/native/interop/csharp/obj/
+/tests/interop-managed/bin/
+/tests/interop-managed/obj/
 *.obj
 *.o
 *.exe
@@ -15,6 +21,14 @@
 **/target/
 **/build/
 *.class
+
+# Desktop interop helper build products
+native/interop/**/bin/
+native/interop/**/obj/
+
+# Python speech helper caches
+__pycache__/
+*.py[cod]
 
 # Editors and operating systems
 .idea/

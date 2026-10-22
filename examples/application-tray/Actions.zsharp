@@ -1,0 +1,22 @@
+zsharp = type.script
+
+noticed room Actions[] (
+ import ZSharp.Application():
+
+ noticed brain Start[] (
+  Print("Tray example started. The window X exits normally."):
+ )
+
+ noticed brain Tray[] (
+  Application.Quit("tray"):
+  Print("Tray request returned; this process is still running."):
+ )
+
+ noticed brain Quit[] (
+  Application.Quit("regular"):
+ )
+
+ noticed brain Shutdown[] (
+  Print("Tray example cleanup ran."):
+ )
+)

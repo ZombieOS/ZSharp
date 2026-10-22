@@ -1,5 +1,399 @@
 # Z# syntax guide
 
+## Desktop speech, microphone, speaker and application control (1.4.0.0)
+
+These APIs are for the native desktop ZVM, not bZVM. Declare
+`ZSharp: [1.4.0.0]:` or newer in project settings and import each API in every
+room that uses it; importing another script does not grant that script's
+feature imports to the caller:
+
+```zsharp
+noticed room Assistant[] (
+ import ZSharp.Speech():
+ import ZSharp.Microphone():
+ import ZSharp.Speaker():
+ import ZSharp.Desktop():
+
+ noticed brain Greet[] (
+  Speech.speak("Hello from Z#!"):
+ )
+ noticed brain Listen[] (
+  text Heard = Microphone.getInput:
+  Print(Heard):
+ )
+)
+```
+
+The canonical names are `Speech`, `Microphone`, `Speaker` and `Desktop`;
+`Mic` is not an alias. `Speech`/`Desktop` actions are statements, not returned
+values. Microphone/device/level reads below are properties without `()`.
+
+### Speech and `.zvoice`
+
+```zsharp
+Speech.speak("Use the system's default voice"):
+Speech.speak("Use a saved voice", "Voices/Assistant.zvoice"):
+Speech.createVoice("Voices/Reference.mp3", "Voices/Assistant.zvoice"):
+Speech.prepare("Voices/Assistant.zvoice"):
+```
+
+`Speech.speak` accepts one or two text expressions. With one argument it uses
+the native system voice; the second argument selects a project-relative
+`.zvoice` file. Speech is queued without blocking the UI/script thread,
+with at most 32 queued utterances per speech service and 16,384 UTF-8 bytes
+per utterance. Playback uses this process's selected `Speaker` device.
+Failures are reported by the runtime; ending the app cancels queued speech.
+
+`Speech.prepare(voice)` validates a project-relative `.zvoice` and warms a cloned
+voice's local model before returning, without playing audio. Put it at startup,
+before displaying a listening/ready indicator, to move the first-use model load
+out of the conversation. It requires `ZSharp.Speech` like other speech actions;
+preparing a system preset only validates it. Preparation blocks its calling
+task, not the UI, and is cancellable. Cloned models stay in a dedicated worker
+between utterances, independently of Python language imports and recognition.
+
+At the default clone pitch/speed (100), playback begins as PCM chunks arrive
+instead of waiting for the entire reply or writing a full temporary WAV. Output
+queues are bounded and use the selected speaker and volume. Non-default cloned
+pitch/speed uses the complete signal for its existing audio adjustments, so it
+cannot provide the same streaming latency. First loading and text generation
+still take time; neither preparation nor streaming promises instant speech.
+
+A manually authored preset `.zvoice` is UTF-8 JSON:
+
+```json
+{
+  "format": "ZVOICE",
+  "version": 1,
+  "type": "preset",
+  "backend": "system",
+  "voice": "",
+  "pitch": 100,
+  "speed": 100,
+  "volume": 100
+}
+```
+
+These are the default values when fields are omitted. An empty `voice`
+chooses the system default; a nonempty value must identify an installed
+native voice. `pitch` is 50..200%, `speed` is 25..400%, and `volume` is
+0..100%; 100 keeps normal pitch/speed/full volume. Engines approximate rate
+and pitch differently. Windows uses SAPI; Linux requires a supported local
+`espeak-ng`/`espeak` executable. macOS uses `say`, which explicitly rejects
+nondefault preset pitch instead of silently ignoring it.
+
+`Speech.createVoice` is genuine, optional **local voice conditioning**, not
+a system-voice preset or a pitch estimate. It accepts MP3/WAV references
+up to 50 MiB, uses up to the first 30 seconds, and writes a new `.zvoice`.
+Reference/output paths must stay within the project; an existing output is
+not overwritten. Call this explicitly when creating a voice, not on every
+startup. Use reference recordings only with the speaker's permission.
+
+Cloning requires optional `pocket-tts` and `soundfile` packages and a genuine
+local model, installed through the managed setup below or configured explicitly
+with `ZSHARP_VOICE_MODEL_CONFIG` pointing to an absolute local model YAML with
+local safetensors weights and a local tokenizer. Speech calls do not download
+models or silently fall back to a different voice. The output embeds
+speaker conditioning, checksums and model/backend fingerprints, not the full
+model. Matching model data and library versions are still needed to speak
+with it. Clone pitch/speed changes additionally need optional `librosa`.
+Model preparation/creation helpers are cancellable and time out after 120
+seconds. Streamed synthesis additionally allows its bounded five-minute audio
+playback interval; cancellation also stops queued output. Models and
+optional packages are not bundled automatically. Real-model conditioning,
+synthesis and native source/bytecode execution have been checked on Windows
+using synthetic WAV/MP3 references and dummy audio. Output quality has not been
+listening-tested; Linux/macOS backends still need live testing.
+
+### Optional local speech setup
+
+From the source checkout, use a full Python 3.10..3.14 interpreter:
+
+```text
+python tools/install-speech-components.py
+```
+
+This explicit setup downloads pinned Python dependencies into a private virtual
+environment and provisions the Vosk recognition model and genuine Pocket TTS
+model where publisher access permits. It never installs packages globally,
+records the microphone or plays audio. Pocket model access may require accepting
+the publisher's model terms and supplying your own authorized `HF_TOKEN`; setup
+does not log into an account, bypass model gates or substitute a non-cloning
+model. A model failure is reported even if the other component installed.
+Use `--models-only` to retry model setup in an existing managed environment,
+or `--home ABSOLUTE_DIRECTORY` for a dedicated alternate directory.
+
+If you already downloaded the genuine model through an authorized browser
+session, you can install that file without copying an account token:
+
+```text
+python tools/install-speech-components.py --models-only --voice-weights "C:/Downloads/model.safetensors"
+```
+
+The file must match the exact revision required by the installed Pocket TTS
+package. Setup checks its size and SHA-256 against the publisher's metadata
+before importing it. This does not read browser cookies or create access tokens.
+
+The default managed speech directory is:
+
+- Windows: `%LOCALAPPDATA%/ZombieOS/ZSharp/speech`.
+- Linux: `$XDG_DATA_HOME/zsharp/speech`, or `~/.local/share/zsharp/speech`.
+- macOS: `~/Library/Application Support/ZSharp/speech`.
+
+The runtime discovers its `venv`, `models/pocket-tts/model.yaml` and
+`models/vosk` automatically. Set `ZSHARP_SPEECH_HOME` to an absolute alternate
+root when using `--home`; it is not a project setting. Explicit
+`ZSHARP_SPEECH_PYTHON`, `ZSHARP_VOICE_MODEL_CONFIG` and `ZSHARP_SPEECH_MODEL`
+override their corresponding managed interpreter/model paths. Empty explicit
+values are errors. Native system/preset speech does not require these optional
+models. Setup success does not verify real-device permissions, voice quality
+or microphone behavior.
+
+### Microphone capture, recognition and device selection
+
+```zsharp
+Print(Microphone.getInputDevice):
+Microphone.setInputDevice("Exact microphone device name"):
+Microphone.setInputDevice(): // Reset this process to the system default.
+
+Print(Speaker.getOutputDevice):
+Speaker.setOutputDevice("Exact speaker device name"):
+Speaker.setOutputDevice():
+
+number Level = Microphone.level:
+Microphone.record("sample.wav", 5s):
+Microphone.record("short.wav", 250ms):
+text Recognized = Microphone.getInput:
+```
+
+`Microphone.getInputDevice` and `Speaker.getOutputDevice` return the selected
+device's name, or `null` if no corresponding device exists. Selection accepts
+a unique exact name (or `id:NUMBER` for a known SDL physical device ID);
+ambiguous/missing devices produce an error. Zero-argument setters reset the
+selection. This changes only the ZVM process, never the OS default. Future
+streams use the selection; already-open streams are not rerouted.
+
+Use `if[Microphone.getInputDevice != null] (...)` to check device availability.
+For equality/inequality, `null` equals only `null`; every non-null value compares
+unequal to it, in either operand order. This does not make text and numbers
+interchangeable, or allow ordering comparisons with `null`.
+
+`Microphone.level` is current recording RMS amplitude in 0..1, and is zero
+when not recording. Merely reading a level/device or importing the API does
+not open the microphone. Capture requires OS microphone permission and an
+available device; denied permission, mute/no audio and disconnection report
+errors rather than pretending recording succeeded.
+
+`Microphone.record(path, duration)` writes mono 16 kHz PCM16 WAV to a
+project-relative path. Use literal `s`/`ms` durations, like `wait`: minimum
+50ms, maximum 30s. Explicit recording captures the requested duration unless
+cancelled or an error occurs. Capture blocks its calling task, not the native
+UI loop, and cancellation does not write a new recording.
+
+`Microphone.getInput` returns recognized **text**, not raw samples or a file
+name. It checks the offline recognizer before opening the microphone, waits
+up to five seconds for speech, then captures one utterance of up to 30 seconds
+including a short pre-roll. It ends after approximately 400 ms of silence,
+transcribes the temporary WAV and removes temporary files. End-of-speech uses
+20 ms sample windows and an adaptive energy/noise threshold, not the timing of
+device reads; changing background noise can still resemble speech. Short pauses
+below the silence threshold stay within the utterance. Explicit
+`Microphone.record` keeps its exact-duration behavior. Recognition
+requires optional `vosk` and the managed recognition model, or
+`ZSHARP_SPEECH_MODEL` naming an extracted local Vosk model directory containing
+`am/final.mdl` (small models up to 512 MiB). There are separate 30-second
+preflight and transcription limits, plus the capture interval; these steps
+are cancellable. No model/audio is automatically downloaded or sent to a
+network recognition service. Missing recognition support fails before capture.
+The ZVM keeps one dedicated local recognition worker and a cached Vosk model
+for the current run; preflight and subsequent utterances reuse it instead of
+reloading the model on every read. Each utterance uses a fresh recognizer, so
+previous words are not retained. The worker is separate from Python language
+imports and is stopped when the run ends. Recognition failures remain errors
+(not empty input) and include bounded underlying recognizer diagnostics.
+
+### Desktop application/window actions
+
+```zsharp
+Desktop.openApp("notepad.exe"):
+Desktop.minimizeApp("notepad.exe"):
+Desktop.maximizeApp("notepad.exe"):
+Desktop.scaleApp("notepad.exe", 1000, 700):
+Desktop.moveApp("notepad.exe", 0):
+Desktop.focusWindow("notepad.exe"):
+Desktop.typeText("Hello from Z#!", "center"):
+Desktop.sendKeys("CTRL+S"):
+Desktop.closeApp("notepad.exe"):
+```
+
+Import `ZSharp.Desktop` in the using room. These are all statements. App/window
+selectors are an exact process/application name or numeric PID (text or number);
+`openApp` instead takes an executable/application name or path. Ambiguous
+targets are errors, not an arbitrary first match. Window operations other than
+`closeApp` require one matching window.
+
+On Windows, `closeApp` groups matching helper processes into one application
+family using verified process ancestry, rather than treating each helper as a
+separate app. It requests closure of all visible, unowned top-level windows in
+that family, including windows belonging to descendant processes with different
+executable names. A PID selects that process and its descendants. Two unrelated
+instances with the same executable name remain ambiguous; use a PID to select
+one. A family with no eligible window produces an error.
+
+`closeApp` requests normal graceful closure and does not force-kill processes or
+bypass unsaved-document prompts. Returning successfully means the close requests
+were sent, not that every process has exited. Save/cancel dialogs, applications
+that ignore closure and background workers may keep the application running.
+Resolve any save prompts normally; this API does not forcibly clear them.
+
+`focusWindow(selector):` restores a minimized target when needed and asks the
+OS to bring its one selected window to the foreground. On Windows it waits for
+the selected window to process the activation request before checking focus.
+If a responsive window is still blocked by foreground policy, one OK/Cancel
+confirmation offers an explicit user-approved switch and one retry. Cancel
+stops the call without typing or sending a shortcut. An unresponsive window or
+a denied retry produces an error. Focus is verified, not guaranteed: this does
+not bypass Windows restrictions or request elevation.
+
+`typeText(text, region):` clicks a region of the currently focused window, then
+types the provided text. Both arguments must be text; expressions and variables
+are allowed. Regions are case-insensitive and select the centers of a 3-by-3
+grid inside the window:
+
+```text
+topleft       topmiddle       topright
+middleleft    center          middleright
+bottomleft    bottommiddle    bottomright
+```
+
+This is coordinate-based input, not text-box detection. The selected point must
+actually contain the intended editable field. Windows uses the client area so
+the title bar and frame are excluded. The pointer moves to that point. Text is
+strict UTF-8, limited to 65536 bytes; newline and tab are allowed, and an empty
+string does nothing. Text goes through native input, not the clipboard.
+On Windows, recognized Unicode `Edit`/`RichEdit` text controls in another
+process receive an acknowledged native click followed by one acknowledged
+text insertion (`EM_REPLACESEL`, with undo enabled). Text is inserted at the
+caret or replaces the selection left by that click; the whole document is not
+replaced unless it is the selected text. The click itself may reposition the
+caret or change the selection. CRLF, LF and standalone CR are normalized to
+Windows paragraph endings, preserving Unicode text and multiline input.
+Custom/unrecognized controls and controls in the ZVM's own process retain
+paced Unicode keyboard input. The same-process fallback avoids retaining a
+borrowed text pointer after a cross-thread timeout. Neither route uses the
+clipboard.
+
+Windows rechecks the selected app and control around the native click and
+insertion, and throughout paced keyboard entry. Changed focus, held modifiers
+or failed input stop the call without replaying text already sent. Native
+insertion waits up to 1000 ms for acknowledgment. A timeout may leave partial
+or complete text, so it never retries the insertion or falls back to keyboard
+input. Longer keyboard-entry strings take time; other Z# tasks can continue
+while this call waits. Real Windows Notepad was validated with the reported
+black-hole and Minecraft paragraphs, Unicode and 80 numbered lines; the saved
+text matched after newline normalization. Linux/macOS desktop input still
+requires live platform validation.
+
+`sendKeys("CTRL+SHIFT+S"):` sends one shortcut to the currently focused window.
+Modifiers precede exactly one key and are joined by `+`. Names are
+case-insensitive; spaces around tokens are optional. Supported modifiers are
+`CTRL`/`CONTROL`, `ALT`/`OPTION`, `SHIFT`, and
+`WIN`/`SUPER`/`META`/`CMD`/`COMMAND` (the platform's Windows/Super/Command key).
+Keys are `A`..`Z`, `0`..`9`, `F1`..`F24`, `ENTER`/`RETURN`, `TAB`, `SPACE`,
+`ESC`/`ESCAPE`, `BACKSPACE`, `DELETE`/`DEL`, `INSERT`/`INS`, `HOME`, `END`,
+`PAGEUP`/`PGUP`, `PAGEDOWN`/`PGDN`, and the four arrow names `LEFT`, `RIGHT`,
+`UP`, `DOWN`. Some platform/key combinations may be unavailable and produce an
+error. For a sequence, use separate calls. Typing a literal `+` belongs in
+`typeText`, not in shortcut syntax.
+
+Three standalone media keys are also supported:
+
+```zsharp
+Desktop.sendKeys("MEDIA_PLAY_PAUSE"):
+Desktop.sendKeys("MEDIA_NEXT"):
+Desktop.sendKeys("MEDIA_PREVIOUS"):
+```
+
+These names are case-insensitive and cannot be combined with modifiers such as
+`CTRL+MEDIA_NEXT`. They send system media controls, not literal text or ordinary
+application shortcuts. The OS and active media player decide which media
+session responds; a successful send does not guarantee playback or a track
+change. Media-key tests use mocks and do not start or change real playback.
+
+Regions, text and entire shortcuts are validated before any input is sent.
+Avoid pressing keys or changing focus while automation runs: it controls the
+real desktop, and shortcuts can save, close or otherwise change the active app.
+Windows refuses conflicting held modifiers and preserves already-held requested
+modifiers. Input may be denied for elevated apps, secure desktops or missing
+OS permissions. If partial delivery fails, it is reported rather than silently
+replaying the text or shortcut. These APIs are desktop-only, not bZVM APIs.
+
+Linux typing/shortcuts also require the optional `libX11.so.6` runtime for
+read-only input-state checks. Release all physically held keys/buttons and turn
+Caps Lock off first; this backend does not clear or release your held inputs.
+macOS requires Accessibility access (and System Events Automation permission),
+uses the focused AX window's full frame for regions, and currently does not
+support Insert or F21..F24. Its shortcut letter/digit key codes use standard
+ANSI positions; keyboard layouts and application-specific bindings may differ.
+Linux/macOS input has compile/mock coverage but still requires live desktop
+validation. Automated input is best-effort: a successful send, or a native
+control's message acknowledgment, does not prove that application validation
+accepted the requested text or that a shortcut performed its intended action.
+
+`scaleApp` sets window width/height in whole pixels (1..32768); window-manager
+decorations and display scaling follow the host platform.
+`moveApp` centers it on a zero-based display index or exact display name;
+Windows index 0 is primary, with subsequent displays ordered by device name.
+Windows display names use OS device IDs such as `\\.\DISPLAY1`; Linux uses
+XRandR output names; macOS uses localized screen names. Native permissions,
+application constraints and window-manager policies still apply.
+
+Windows uses native process/window APIs. Linux window control requires X11
+and optional `wmctrl`; focusing, typing, shortcuts and minimizing also need
+`xdotool`, and display selection
+needs `xrandr`. Native Wayland windows are not controllable by this backend.
+macOS uses fixed `osascript`/System Events automation and may require the
+user's Automation/Accessibility permission. Native macOS builds include
+microphone and Apple Events purpose descriptions; OS permission must still
+be granted, and custom embedding applications need equivalent declarations.
+Its implementation still needs
+live Mac validation. No action interpolates an app name into a shell command
+or requests elevation. Opening an executable does not accept a shell command
+line or additional launch arguments.
+
+### Launching a project at login
+
+Add this optional root setting to `project.zsettings`:
+
+```zsharp
+LaunchAtStart: alive:
+```
+
+Use `dead` to remove that project's registration on its next actual launch;
+omitting the setting makes no registration changes. This is per-user login
+startup, not boot-time execution before login. Registration occurs only when
+running a validated source entry, bytecode entry or app/game package, never
+while checking, compiling or packaging. The exact canonical executable and
+entry are saved with `run`, `run-bytecode` or `open` as appropriate under a
+stable project-PID key; a later launch after a move
+or reinstall updates that same entry instead of adding duplicates. Package
+uninstall removes its own entry. Arguments/paths are escaped as data, not shell
+code. Other projects and the ZVM updater's separate startup entry are untouched.
+
+Backends are Windows HKCU `Run`, Linux user XDG autostart `.desktop` files,
+and macOS user `LaunchAgents` plists. macOS registration takes effect at a
+subsequent login; it does not immediately launch another copy. Windows login
+commands exceeding 259 characters report a warning. Startup failures do not
+prevent the current application from running, and OS policy can disable startup.
+
+Development/test launchers may set `ZSHARP_SKIP_DESKTOP_INTEGRATION=1` to
+suppress registration changes. Isolated tests use an existing absolute
+`ZSHARP_STARTUP_DIRECTORY`; this redirects registrations to fixture files
+without touching the real registry/login folders. These are test controls,
+not Z# syntax. `ZSHARP_DESKTOP_DISABLE_ACTIONS=1` also rejects actual Desktop
+actions in an isolated test process. Never test startup persistence against an
+unrelated user's setup.
+
 ## Experimental PCVR and hand tracking (1.3.0.0, desktop only)
 
 ```javascript
@@ -1242,8 +1636,30 @@ noticed text PublicMessage = "Visible":
 silent text Secret = "Hidden":
 ```
 
-A declaration with no visibility word follows its enclosing file or room
-visibility rules.
+From 1.4.0.0, a room member without `noticed` or `silent` inherits its
+containing room's visibility. This applies to variables and functions,
+including `brain`, number-returning and text-returning functions:
+
+```zsharp
+noticed room Settings[] (
+ text Title = "My application": // Public through this noticed room.
+ silent text Secret = "Hidden": // Explicitly private instead.
+
+ brain Start[] (
+  Print(Title):
+ )
+)
+```
+
+Members in a `noticed room` default to public; members in a `silent room`
+default to private. Members in a bare, file-only `room` follow that room's
+same-file accessibility. Explicit `noticed` or `silent` overrides the member
+default, but does not bypass the containing room's visibility or required
+imports. Bare room declarations keep their existing file-only visibility.
+
+Variables declared inside a function are local instead: they do not inherit
+the room's public/private visibility. Automatic `Start[]` execution is
+independent of member visibility; use `[DR]` to disable it.
 
 ## Functions
 
@@ -1462,8 +1878,8 @@ The canonical spelling remains `Function.call`, with lowercase `call`.
 ## Local values and assignment
 
 Local values omit visibility and exist only during that brain call. Room
-fields include a visibility word such as `noticed` and keep their value for
-later calls:
+fields are declared outside functions, may include `noticed` or `silent`
+(or inherit their room's visibility), and keep their value for later calls:
 
 ```zsharp
 noticed brain Start[] (
@@ -1480,7 +1896,16 @@ Direct assignment works for a local value:
 ```zsharp
 Score = 15:
 Name = "Updated":
+Alive = dead:
 ```
+
+Local `status` declarations accept `alive`, `dead`, or an expression returning
+a status, such as `status Ready = Score >= 10:`. Later direct assignments must
+also supply a status; text and numbers are not implicitly converted to
+`alive`/`dead`. Like other locals, a local status is private to that call and
+retains its value across `wait(...)` in the same task.
+Projects using local status declarations must set `ZSharp: [1.4.0.0]:` or
+newer, because their typed local stores use the newer bytecode instruction.
 
 Typed assignment works for both locals and room fields. If a local shadows a
 room field with the same name, the local is changed:
@@ -3340,18 +3765,47 @@ scales that bitmap, rather than selecting a smooth/vector font. Button text
 remains centered and clipped to the button area. Font-size state overrides
 and font-size transitions are not implemented.
 
-A quit button's callback can close the app/game with:
+A quit button's callback can close the app/game with this 1.4.0.0 syntax:
 
 ```zsharp
-noticed brain Quit[] (
- Application.Quit:
+noticed room Menu[] (
+ import ZSharp.Application():
+ noticed brain Quit[] (
+  Application.Quit("regular"):
+ )
+ noticed brain Hide[] (
+  Application.Quit("tray"):
+  // Background tasks and this callback keep running.
+ )
 )
 ```
 
-No import is needed. This requires project ZSharp 1.2.1.0 or newer and a
-running native app/game. It requests normal window closure, returns from the
-current callback, cancels other tasks, and uses the usual `Shutdown[]` cleanup
-path. It is not a force-kill operation.
+The using room must import `ZSharp.Application`, and the project must declare
+`ZSharp: [1.4.0.0]:` or newer. The argument is a text expression whose value
+must be exactly `"regular"` or `"tray"`; the slash in `"regular/tray"` is not
+part of a valid mode. Missing imports, missing/extra arguments and invalid
+mode values produce diagnostics.
+
+`"regular"` requests graceful native app/game closure, returns from the current
+callback, cancels other tasks, and uses the usual `Shutdown[]` cleanup path.
+It is not a force-kill operation.
+
+`"tray"` hides a native app window without ending the process, cancelling
+tasks, returning early from the callback, or running `Shutdown[]`. The app's
+tray/menu-bar item provides Show and Exit; Exit performs regular shutdown.
+The window's normal X button remains regular close. Tray support depends on
+the desktop environment. If it is unavailable or icon creation fails, a
+runtime warning is reported and the window stays reachable; nothing is
+silently hidden. The current game runtime does not provide a tray item and
+reports the same recoverable warning for tray mode. bZVM does not support
+`ZSharp.Application` or either quit mode.
+
+Migration: bare `Application.Quit:` no longer compiles as source. Replace it
+with `Application.Quit("regular"):` and add the room import. Existing bytecode
+using the older quit instruction retains its regular-close behavior.
+Packages also contain source that startup/callback discovery can reparse;
+older packages containing bare quit statements therefore currently require
+migration and rebuilding, even if their embedded bytecode remains readable.
 
 Game buttons support `:hover` (pointer over the button) and `:focus`
 (selected for keyboard activation):
@@ -3614,6 +4068,249 @@ registration itself must remain side-effect-free. Existing C modules remain
 compatible; modules using the appended `add_expression` API require a
 1.2.1.0-or-newer compiler and should declare that project version requirement.
 
+## Desktop language bridges and live objects (1.4.0.0 development)
+
+This unreleased version includes the previous unreleased 1.3.1.0 desktop work.
+C++ was already supported; the new import prefixes are `cs:`, `java:`, `go:` and
+`rb:`. All language imports remain project-qualified, and calls within that
+project may omit its PID, just like existing Python/C/C++ imports:
+
+```zsharp
+import cs:my_project.Models.Person():
+import java:my_project.Models.Person():
+import go:my_project.Go.Utilities():
+import rb:my_project.Ruby.Utilities():
+
+text Greeting = Function.call(java:Models.Person:greeting ["Ada"]):
+```
+
+Import only the languages/modules actually used by a room. These features are
+desktop-only, not bZVM language connections. Importing a module does not install
+a compiler/runtime or compile that module's source automatically.
+Only load trusted foreign code: export annotations and import rules control
+bridge visibility, not OS sandboxing. A foreign module still runs with the
+application user's native filesystem/network/process permissions.
+
+### Live foreign instances
+
+Use the existing `object` value type and ordinary object-member syntax:
+
+```zsharp
+object Person = Foreign.new(java:Models.Person ["Ada"]):
+text Name = Person.name:
+text.set:Person.name = "Grace":
+Person.greet[]:
+Foreign.release(Person):
+```
+
+`Foreign.new` names the imported module and its exported class/factory. The
+module's last path component supplies the constructor name (`Person` above).
+Constructor arguments use the same square-bracket list as `Function.call`.
+Factories may also return instances:
+
+```zsharp
+object Person = Function.call(java:Models.Person:make ["Ada"]):
+```
+
+The object is a live handle to one retained foreign instance, not a JSON copy.
+Two independently created instances do not share their fields. Returning the
+same instance preserves its identity. Field/property writes use the existing
+typed setter matching the value being assigned. Instance methods currently use
+the statement form (`Person.greet[]:`); assigning an instance-method result as
+an expression is not included in this first implementation. Export a module
+function/factory when a returned value is needed instead.
+Foreign handles are currently owned by their originating language/module: they
+cannot be passed directly to a different foreign module or another language.
+Use ordinary values/records to transfer data, or pass a VM-owned Z# object proxy
+when several integrations need to act on the same Z# state.
+
+Releasing invalidates that handle and its aliases; later reads, writes and calls
+fail clearly rather than accessing another allocation. Other instances remain
+valid. Foreign module globals/instances are application-scoped, including calls
+from separate window tasks; remaining handles are discarded when the ZVM exits.
+Rebuild/restart the
+ZVM application to reload edited foreign modules; source edits are not hot-loaded.
+
+### Calls from another language into Z#
+
+The SDKs support synchronous callbacks into Z# brains, using the calling room's
+imports and normal visibility rules. For example, Java can call:
+
+```java
+Object result = ZSharp.call("Main:Main:Calculate", 20, 22);
+```
+
+The target Z# file/room/brain must be accessible to the room that entered the
+foreign bridge. Callbacks do not bypass `silent` visibility, imports or project
+dependency checks. A Z# object passed as an argument becomes a live SDK proxy,
+not an unrestricted pointer. Its `get`/`set`/`invoke` operations act on the
+original object's visible fields/methods. C# spells these `Get`/`Set`/`Invoke`.
+VM-owned object proxies expire when their owning task/heap ends, even though
+foreign module state may remain alive. A later use reports an expired handle
+instead of dereferencing a freed Z# object; do not retain such a proxy beyond
+its owner's lifetime.
+
+Callbacks must happen synchronously on the thread currently executing the
+foreign entry point. Saving a callback context for a background thread is not
+supported. Callbacks can enter another idle runtime/module through Z#, but cannot
+re-enter the same active worker: that fails instead of deadlocking. This also
+includes another Java/C#/Python/Ruby file sharing that language's active worker.
+
+Strings, booleans/statuses, null and homogeneous text/number arrays continue to
+cross the bridge; the new wire bridge also supports homogeneous object arrays.
+Numbers use tagged decimal text on the wire rather than first
+being narrowed to a C `double`. Native language arithmetic is still limited by
+its chosen numeric type: Java `BigDecimal`, C# `ExactNumber` and SDK exact-number
+wrappers preserve values that do not fit native scalars. Native numeric
+parameters are range checked; non-finite results are rejected. Explicit
+string-keyed records travel by value where supported. Other exported objects
+travel as live handles. Protocol frames are limited to 1 MiB, wire values to
+32 nested levels in the VM, and normalized foreign numbers to 8,190 expanded
+decimal digits. Scientific numeric results expand only within that bound;
+an enormous exponent fails before allocating an enormous decimal string.
+If a worker dies, times out or loses protocol synchronization, its session is
+poisoned and later requests fail. The VM does not silently restart it or replay
+a call that might already have changed application state. Restart the
+application after correcting the underlying failure.
+
+Python uses `from zsharp import export, call`; Java uses `ZSharp.call`; C# uses
+`ZSharp.Runtime.Call`; JavaScript/Lua/Ruby use `ZSharp.call`; Go uses
+`zsharp.Call`. Z# object proxies expose field reads/writes and method invocation.
+Native C/C++/Rust/Kotlin modules opt into `zsharp_c_call_v2`,
+`zsharp_cpp_call_v2`, `zsharp_rust_call_v2` or `zsharp_kotlin_call_v2` and the
+request/host/result definitions in `zsharp_interop.h`. Existing scalar v1
+entry points remain unchanged and continue to work, but do not acquire object
+operations/callbacks automatically. The host pointer/context is borrowed only
+for the current entry call; never retain it for later use.
+
+### Java exports
+
+```java
+import ZSharp.ZSharp;
+import ZSharp.ZSharp_Export;
+
+@ZSharp_Export
+public class Person {
+    public String name;
+
+    public Person(String name) {
+        this.name = name;
+    }
+
+    public void greet() {
+        System.out.println("Hello, " + name);
+    }
+
+    public static Person make(String name) {
+        return new Person(name);
+    }
+
+    public static String greeting(String name) {
+        return "Hello, " + name;
+    }
+
+    public static Object calculateInZSharp(int value) {
+        return ZSharp.call("Main:Main:Calculate", value);
+    }
+}
+```
+
+Compile against `zsharp-java-worker.jar` and package the classes as
+`Models/Person.zjava.jar`, beside `Models/Person.java`. Java 17+ is required;
+users running a precompiled module do not need `javac`. `@ZSharp_Export` on a
+public class opts its public constructors/methods/fields into the bridge.
+Individual public members may be annotated instead. Private members and
+inherited `Object` methods are not implicitly exported; `final` fields are
+read-only. Ambiguous overloads fail explicitly. Varargs methods are not currently
+bridge-callable; use a typed array parameter instead. Module classes and static
+state persist in the worker until process exit. This Java-to-Z# callback SDK is
+separate from the existing Java/Gradle library that launches a ZVM process.
+
+### C# exports
+
+```csharp
+using ZSharp;
+
+[ZSharpExport]
+public class Person
+{
+    public string name { get; set; }
+
+    public Person(string name)
+    {
+        this.name = name;
+    }
+
+    public void greet()
+    {
+        Console.WriteLine("Hello, " + name);
+    }
+
+    public static Person make(string name)
+    {
+        return new Person(name);
+    }
+
+    public static object? calculateInZSharp(int value)
+    {
+        return Runtime.Call("Main:Main:Calculate", value);
+    }
+}
+```
+
+Reference `ZSharp.Interop.dll` when building the user class library, then place
+`Models/Person.zcs.dll` beside `Models/Person.cs`, with its managed dependencies.
+The worker targets .NET 8; the matching .NET runtime must be installed.
+`[ZSharpExport]` supports public classes/structs, constructors, methods,
+properties and fields. A type attribute grants its declared public members;
+private members/accessors remain inaccessible, and readonly fields/init-only
+properties remain read-only after construction. Generic, `ref`/`out`, `params` and automatically awaited `Task`
+methods are not included; export ordinary synchronous wrappers instead.
+Overloads are resolved by compatible argument types, with clear errors for
+ambiguous calls. Worker/module state persists across calls.
+
+### Go and Ruby exports
+
+Go modules register functions with `zsharp.Export("name", function)` and
+constructors with `zsharp.ExportType("Person", constructor)`, then call
+`zsharp.Serve()` from `main`. Only exported Go fields/methods are accessible.
+The local SDK is `native/interop/go` (module name `zsharp`). Build the module as
+`Utilities.zgo.exe` on Windows or `Utilities.zgo` on Linux/macOS, beside the
+imported `Utilities.go`. Distribute the executable for each supported platform;
+the end user's system does not need the Go compiler. Callbacks use
+`zsharp.Call("File:Room:Brain", arguments...)` and return `(value, error)`.
+
+Ruby modules use `require "zsharp"` and explicitly register functions or classes
+with `ZSharp.export`, for example:
+
+```ruby
+require "zsharp"
+
+ZSharp.export("greeting") { |name| "Hello, #{name}" }
+
+class Person
+  attr_accessor :name
+
+  def initialize(name)
+    @name = name
+  end
+
+  def greet
+    puts "Hello, #{@name}"
+  end
+end
+
+ZSharp.export(Person)
+```
+
+The `.rb` file is loaded by a persistent worker using the installed Ruby runtime.
+Explicitly exported classes expose their public accessors and methods, not
+private methods or inherited built-in reflection APIs. `ZSharp.call` invokes a
+Z# brain; VM-owned objects expose proxy `get`, `set` and `invoke` operations.
+Normal user output from Java/C#/Ruby/Go/Python workers is forwarded separately
+from the result protocol. These workers are retained between calls rather than
+starting and terminating once per function call.
+
 ## Python
 
 Python imports always name the language and project ID. Import one module or
@@ -3647,8 +4344,10 @@ def add(left: int, right: int) -> int:
     return left + right
 ```
 
-Initial Python interoperability supports Z# text, number, status, and null
-values, mapped to Python `str`, `int`/`float`, `bool`, and `None`. A Python
+Python interoperability supports Z# text, number, status, and null values,
+mapped to Python `str`, numeric values, `bool`, and `None`. The 1.4.0.0 bridge
+also supports explicitly exported classes/live objects, arrays/records and
+synchronous callbacks through `from zsharp import call`. A Python
 exception fails the Z# call and includes its Python traceback in the runtime
 error. The official ZVM bundles Python; developers may set
 `ZSHARP_PYTHON_RUNTIME` while testing a custom interpreter.
@@ -3684,15 +4383,21 @@ export function greeting(name) {
 Arguments and return values support text, number, status/boolean, and null.
 Homogeneous `text[]` and `number[]` values cross the bridge as JavaScript
 arrays, and JavaScript may return arrays containing only strings or only
-numbers. Empty JavaScript arrays become empty `text[]` values. Mixed arrays,
-objects, and arrays of booleans are rejected because Z# does not have matching
-general-purpose value types.
+numbers. Empty JavaScript arrays become empty `text[]` values. Mixed arrays
+and arrays of booleans are rejected because Z# does not have matching
+general-purpose array value types. In 1.4.0.0, objects/classes can cross as live
+handles; use `ZSharp.record({...})` for an explicit by-value record.
 Named default exports and immediately-resolving `async` functions are also
 supported. JavaScript exceptions retain their message and stack in Z# runtime
 reports. Each call has a 64 MiB heap limit, a 1 MiB stack limit, and a five
 second execution guard; promises that require an external browser/Node event
 loop fail with a clear diagnostic because ZVM intentionally embeds no DOM or
-Node APIs.
+Node APIs. In 1.4.0.0 these limits apply to each retained module's runtime;
+globals and live instances survive later calls. `ZSharp.call` and Z# object
+proxy `get`/`set`/`invoke` are available during synchronous foreign calls.
+Very large/excess-precision numeric arguments are exact-number wrappers; use
+`value.toString()` to retain their decimal text or explicitly convert with
+`Number(...)` when losing precision is acceptable.
 
 ## Lua
 
@@ -3722,10 +4427,16 @@ Global Lua functions are also supported when a file does not return a module
 table. Arguments and results may be text, number, status/boolean, null/nil,
 or homogeneous text and number arrays. Z# arrays use zero-based indexes while
 Lua tables use their usual one-based indexes. Empty Lua arrays become empty
-`text[]` values. Mixed tables and general Lua objects cannot cross the bridge.
+`text[]` values. In 1.4.0.0, non-array object tables cross as live handles and
+`ZSharp.record(table)` explicitly copies a string-keyed record. Modules retain
+their globals and instance state between calls. Constructor exports are ordinary
+functions returning a new table/object; live instance methods use Lua's usual
+self argument. `ZSharp.call` and Z# object proxy `get`/`set`/`invoke` support
+synchronous calls back into the VM.
 
-Lua errors retain a Lua traceback in the Z# runtime failure report. Each call
-has a 64 MiB memory limit and a five-second execution guard. Lua support
+Lua errors retain a Lua traceback in the Z# runtime failure report. Each retained
+module has a combined 64 MiB runtime/codec memory limit and calls have a
+five-second execution guard. Lua support
 requires `ZSharp: [1.1.2.0]:` or newer.
 
 ## C++
@@ -3914,9 +4625,11 @@ normal Z# code still uses `alive` and `dead`.
 
 ## Browser prototype (1.2.2.0, development)
 
-The local bZVM prototype executes Z# bytecode in WebAssembly. HTML selects one
-entry `.zsharp` script, whose explicitly imported project files are loaded before
-startup. The loader automatically finds `project.zsettings` in the HTML document's
+The bZVM prototype executes Z# bytecode in WebAssembly. From 1.4.0.0, HTML may
+select multiple entry `.zsharp` scripts in one shared VM. All entry files and
+their explicitly imported project files are loaded and checked before startup;
+a load or parse error prevents any entry's startup from running. The loader
+automatically finds `project.zsettings` in the HTML document's
 directory or nearest parent directory, up to the server root (32 levels maximum).
 That settings file's directory is the project root; `data-project` is not needed.
 Its old explicit URL override remains supported for compatibility. If automatic
@@ -3930,7 +4643,8 @@ window/game configuration and unsupported newer runtime versions. Malformed or
 missing explicitly linked settings stop startup with a clear error. The
 `bzvm:ready` event's `detail.project` contains the project name, ID and root URL
 when settings are enabled.
-Load `bzvm.js` with `defer` and include a `type="text/zsharp"` script tag.
+Load `bzvm.js` once with `defer` and include one or more
+`type="text/zsharp"` script tags.
 Place `bzvm.wasm` beside the loader and serve the page over HTTP, not `file:`.
 
 ```html
@@ -3991,6 +4705,70 @@ file writes/directory searches and additional browser events still need browser
 runtime implementations. Native apps/games and foreign-language integrations
 are outside the browser target. Unsupported instructions report an error rather
 than silently executing with different semantics.
+
+### Multiple HTML entry scripts (1.4.0.0)
+
+Several `type="text/zsharp"` tags may share one loader and VM. For example,
+with PID `my_site` in `project.zsettings`:
+
+```html
+<nav id="navbar"></nav>
+<div id="greeting"></div>
+<script src="bzvm/bzvm.js" defer></script>
+<script type="text/zsharp" src="Global.zsharp"></script>
+<script type="text/zsharp" src="Main.zsharp"></script>
+```
+
+```zsharp
+// Global.zsharp
+zsharp = type.script
+noticed room Global[] (
+ import ZSharp.Browser():
+ noticed brain Start[] (
+  Browser.navbar.html.set: '''<a href="/">Home</a>''':
+ )
+ noticed brain ShowHome[] (
+  Browser.greeting.content.set: "Welcome!":
+ )
+)
+```
+
+```zsharp
+// Main.zsharp
+zsharp = type.script
+noticed room Main[] (
+ import my_site.Global():
+ noticed brain Start[] (
+  Function.call(Global:Global:ShowHome):
+ )
+)
+```
+
+All entries and imports load before any automatic startup. Each distinct
+explicit entry's zero-parameter automatic `Start[]` brains begin once in HTML
+tag order. A `wait(...)` suspends only that task: later entries start without
+waiting for it to finish. The VM, room fields, callbacks and project settings
+are shared; the entries are not isolated applications.
+
+Listing a file in HTML does not import it into other rooms. Cross-file reads
+and calls still require the normal PID-qualified import and visibility rules.
+Files reached only through imports do not automatically run `Start[]`. If
+`Global.zsharp` is imported but not explicitly listed in HTML, call
+`Function.call(Global:Global:Start):` when initialization is needed. Do not also
+make that call when Global is an explicit entry unless intentionally running
+its initialization again.
+
+Repeating the same external source URL loads and starts that file only once.
+Cache-busting query strings and fragments do not create a second instance;
+the first explicit tag's URL is used. Distinct files must still have unique
+filenames across the loaded project; ambiguous duplicates produce an error.
+
+Inline `text/zsharp` entries are supported too. A sole inline entry keeps the
+default filename `Main`. On a page with several Z# entry tags, unnamed inline
+entries use `Inline1`, `Inline2`, and so on, according to their one-based Z# tag
+position, including external tags. Set `data-name="Utilities"` on an inline tag
+to give it a stable filename for imports/call targets; that name must also be
+unique. External entries always use their actual source filename.
 
 ### Browser JSON and project asset reads (1.3.0.0)
 
@@ -4060,8 +4838,9 @@ The call target uses `File:Room:Brain`; a same-project PID prefix is also accept
 by normal `Function.call`. The calling room must import a foreign file, and the
 target room/brain must be `noticed`. Script filenames must be unique across the
 loaded project. Each file is loaded once; circular imports are supported.
-Only the HTML entry script's automatic `Start[]` brains run, not imported files'
-startup brains. Calls and click targets can cross files and preserve waits.
+Only explicitly listed HTML entry scripts' automatic `Start[]` brains run, not
+imported-only files' startup brains. Multiple HTML entries require bZVM 1.4.0.0
+or newer. Calls and click targets can cross files and preserve waits.
 The first subset supports zero-argument, void brains only (no arguments or return
 values yet), at most 64 files and 8 MiB total source. Missing/duplicate files,
 missing imports, hidden targets and external project dependencies produce errors.

@@ -21,6 +21,7 @@
 #define COBJMACROS
 #include <windows.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <objbase.h>
 #include <wincodec.h>
 
@@ -64,6 +65,10 @@ typedef struct WindowState {
     int background_width;
     int background_height;
     HICON window_icon;
+    NOTIFYICONDATAW tray_icon;
+    UINT taskbar_created;
+    int tray_registered;
+    int tray_hidden;
     WindowControl *controls;
     size_t control_count;
     double scale;
@@ -101,9 +106,19 @@ typedef struct WindowReadRequest {
     char error[512];
 } WindowReadRequest;
 
+typedef struct WindowQuitRequest {
+    ZSharpApplicationQuitMode mode;
+    int result;
+    char error[512];
+} WindowQuitRequest;
+
 static const char *WINDOW_CLASS_NAME = "ZombieOS.ZSharp.Window.1";
 #define ZSHARP_WM_SET_PROPERTY (WM_APP + 37)
 #define ZSHARP_WM_GET_PROPERTY (WM_APP + 38)
+#define ZSHARP_WM_REQUEST_QUIT (WM_APP + 39)
+#define ZSHARP_WM_TRAY_CALLBACK (WM_APP + 40)
+#define ZSHARP_TRAY_SHOW_COMMAND 1
+#define ZSHARP_TRAY_EXIT_COMMAND 2
 
 static void layout_controls(WindowState *state);
 static LRESULT CALLBACK container_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
@@ -124,6 +139,10 @@ static int runtime_get_window_property(void *data, const char *path,
                                        char **text_value, char *error,
                                        size_t error_size);
 static int window_is_cancelled(void *data);
+static void window_request_close(void *data);
+static int window_request_quit_ui(WindowState *state,
+                                   ZSharpApplicationQuitMode mode,
+                                   char *error, size_t error_size);
 
 static int hex_value(char character) {
     if (character >= '0' && character <= '9') return character - '0';
@@ -735,6 +754,126 @@ static void set_vertical_scroll(WindowState *state, int position) {
     layout_controls(state);
 }
 
+static void remove_window_tray(WindowState *state) {
+    if (state->tray_registered)
+        Shell_NotifyIconW(NIM_DELETE, &state->tray_icon);
+    state->tray_registered = 0;
+    state->tray_hidden = 0;
+}
+
+static void restore_window_from_tray(WindowState *state) {
+    if (window_is_cancelled(state) || !IsWindow(state->window)) return;
+    state->tray_hidden = 0;
+    ShowWindow(state->window, IsIconic(state->window) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(state->window);
+    UpdateWindow(state->window);
+}
+
+/* Only the window's UI thread owns the icon and its menu. Shell_NotifyIcon
+ * copies the icon, so later replacement of the app's HICON is safe. */
+static int update_window_tray(WindowState *state,
+                               char *error, size_t error_size) {
+    NOTIFYICONDATAW icon;
+    int added = !state->tray_registered;
+    DWORD failure;
+    memset(&icon, 0, sizeof(icon));
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = state->window;
+    icon.uID = 1;
+    icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    icon.uCallbackMessage = ZSHARP_WM_TRAY_CALLBACK;
+    icon.hIcon = state->window_icon;
+    if (icon.hIcon == NULL)
+        icon.hIcon = LoadIconW(NULL, MAKEINTRESOURCEW(32512));
+    GetWindowTextW(state->window, icon.szTip,
+                   (int)(sizeof(icon.szTip) / sizeof(icon.szTip[0])));
+    if (icon.szTip[0] == L'\0')
+        lstrcpynW(icon.szTip, L"Z# application",
+                  (int)(sizeof(icon.szTip) / sizeof(icon.szTip[0])));
+    SetLastError(ERROR_SUCCESS);
+    if (!Shell_NotifyIconW(added ? NIM_ADD : NIM_MODIFY, &icon)) {
+        /* An icon can disappear independently when Explorer restarts. */
+        if (added || !Shell_NotifyIconW(NIM_ADD, &icon)) {
+            failure = GetLastError();
+            if (state->tray_hidden) restore_window_from_tray(state);
+            remove_window_tray(state);
+            if (error != NULL && error_size != 0)
+                snprintf(error, error_size,
+                         "could not create the application's tray icon "
+                         "(Windows error %lu)", (unsigned long)failure);
+            return 0;
+        }
+        added = 1;
+    }
+    state->tray_icon = icon;
+    state->tray_registered = 1;
+    if (added) {
+        state->tray_icon.uVersion = NOTIFYICON_VERSION_4;
+        /* Older shells may reject version 4; callbacks below also accept the
+         * legacy event codes, so the successfully created icon still works. */
+        Shell_NotifyIconW(NIM_SETVERSION, &state->tray_icon);
+    }
+    return 1;
+}
+
+static void show_window_tray_menu(WindowState *state) {
+    HMENU menu;
+    POINT position;
+    UINT command;
+    if (window_is_cancelled(state)) return;
+    menu = CreatePopupMenu();
+    if (menu == NULL ||
+        !AppendMenuW(menu, MF_STRING, ZSHARP_TRAY_SHOW_COMMAND, L"Show") ||
+        !AppendMenuW(menu, MF_SEPARATOR, 0, NULL) ||
+        !AppendMenuW(menu, MF_STRING, ZSHARP_TRAY_EXIT_COMMAND, L"Exit") ||
+        !GetCursorPos(&position)) {
+        if (menu != NULL) DestroyMenu(menu);
+        restore_window_from_tray(state);
+        return;
+    }
+    SetForegroundWindow(state->window);
+    command = (UINT)TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON |
+              TPM_BOTTOMALIGN | TPM_LEFTALIGN,
+        position.x, position.y, 0, state->window, NULL);
+    DestroyMenu(menu);
+    /* A benign posted message lets the shell dismiss a cancelled menu. */
+    PostMessageA(state->window, WM_NULL, 0, 0);
+    if (command == ZSHARP_TRAY_SHOW_COMMAND)
+        restore_window_from_tray(state);
+    else if (command == ZSHARP_TRAY_EXIT_COMMAND)
+        window_request_close(state);
+    else if (state->tray_registered)
+        Shell_NotifyIconW(NIM_SETFOCUS, &state->tray_icon);
+}
+
+static int window_request_quit_ui(WindowState *state,
+                                   ZSharpApplicationQuitMode mode,
+                                   char *error, size_t error_size) {
+    if (window_is_cancelled(state) || !IsWindow(state->window)) {
+        snprintf(error, error_size, "the window is closing");
+        return 0;
+    }
+    if (mode == ZAPPLICATION_QUIT_REGULAR) {
+        window_request_close(state);
+        return 1;
+    }
+    if (mode != ZAPPLICATION_QUIT_TRAY) {
+        snprintf(error, error_size, "unknown application quit mode");
+        return 0;
+    }
+    if (state->taskbar_created == 0) {
+        snprintf(error, error_size,
+                 "could not register Windows tray recovery messages");
+        return 0;
+    }
+    /* Never hide the only reachable window until the shell accepts its icon. */
+    if (!update_window_tray(state, error, error_size)) return 0;
+    state->tray_hidden = 1;
+    ShowWindow(state->window, SW_HIDE);
+    return 1;
+}
+
 static LRESULT CALLBACK window_proc(HWND window, UINT message,
                                     WPARAM wparam, LPARAM lparam) {
     WindowState *state =
@@ -746,7 +885,32 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
         state->window = window;
     }
     if (state == NULL) return DefWindowProcA(window, message, wparam, lparam);
+    if (state->taskbar_created != 0 && message == state->taskbar_created) {
+        if (state->tray_registered && !window_is_cancelled(state)) {
+            char ignored[256];
+            state->tray_registered = 0;
+            update_window_tray(state, ignored, sizeof(ignored));
+        }
+        return 0;
+    }
     switch (message) {
+        case ZSHARP_WM_REQUEST_QUIT: {
+            WindowQuitRequest *request = (WindowQuitRequest *)lparam;
+            if (request == NULL) return 0;
+            request->result = window_request_quit_ui(
+                state, request->mode, request->error, sizeof(request->error));
+            return request->result;
+        }
+        case ZSHARP_WM_TRAY_CALLBACK: {
+            UINT event = LOWORD(lparam);
+            if (!state->tray_registered || window_is_cancelled(state)) return 0;
+            if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU)
+                show_window_tray_menu(state);
+            else if (event == WM_LBUTTONDBLCLK || event == NIN_SELECT ||
+                     event == NIN_KEYSELECT)
+                restore_window_from_tray(state);
+            return 0;
+        }
         case ZSHARP_WM_SET_PROPERTY: {
             WindowPropertyRequest *request =
                 (WindowPropertyRequest *)lparam;
@@ -1271,6 +1435,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message,
             break;
         case WM_DESTROY:
             InterlockedExchange(&state->closing, 1);
+            remove_window_tray(state);
             PostQuitMessage(0);
             return 0;
         default:
@@ -2002,6 +2167,7 @@ static int create_controls(WindowState *state, int client_width,
 
 static void cleanup_window_state(WindowState *state) {
     size_t index;
+    remove_window_tray(state);
     for (index = 0; index < state->control_count; index++) {
         WindowControl *control = &state->controls[index];
         if (control->font != NULL && control->owns_font) {
@@ -2102,6 +2268,8 @@ static int set_window_property(void *data, const char *path,
     if (element->type == ZUI_DESIGN) {
         if (strcmp(property->name, "title") == 0) {
             set_window_text_utf8(state->window, property->text_value);
+            if (state->tray_registered &&
+                !update_window_tray(state, error, error_size)) return 0;
         } else if (strcmp(property->name, "background") == 0) {
             ZSharpPaint replacement;
             memset(&replacement, 0, sizeof(replacement));
@@ -2145,6 +2313,8 @@ static int set_window_property(void *data, const char *path,
                          (LPARAM)replacement);
             if (state->window_icon != NULL) DestroyIcon(state->window_icon);
             state->window_icon = replacement;
+            if (state->tray_registered &&
+                !update_window_tray(state, error, error_size)) return 0;
         }
     } else {
         control = control_for_element(state, element);
@@ -2271,6 +2441,30 @@ static void window_request_close(void *data) {
     if (state == NULL) return;
     InterlockedExchange(&state->closing, 1);
     if (state->window != NULL) PostMessageA(state->window, WM_CLOSE, 0, 0);
+}
+
+static int runtime_request_window_quit(void *data,
+                                        ZSharpApplicationQuitMode mode,
+                                        char *error, size_t error_size) {
+    WindowState *state = (WindowState *)data;
+    WindowQuitRequest request;
+    if (state == NULL) {
+        snprintf(error, error_size, "there is no active application window");
+        return 0;
+    }
+    if (GetCurrentThreadId() == state->ui_thread_id)
+        return window_request_quit_ui(state, mode, error, error_size);
+    if (window_is_cancelled(state)) {
+        snprintf(error, error_size, "the window is closing");
+        return 0;
+    }
+    memset(&request, 0, sizeof(request));
+    request.mode = mode;
+    SendMessageA(state->window, ZSHARP_WM_REQUEST_QUIT, 0, (LPARAM)&request);
+    if (!request.result)
+        snprintf(error, error_size, "%s", request.error[0] == '\0'
+                 ? "the window is closing" : request.error);
+    return request.result;
 }
 
 static int runtime_set_window_property(void *data, const char *path,
@@ -2520,12 +2714,14 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.layout_height = client_height;
     state.rendered_scale = 1.0;
     state.ui_thread_id = GetCurrentThreadId();
+    state.taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     state.runtime.state = &state;
     state.runtime.set_property = runtime_set_window_property;
     state.runtime.get_property = runtime_get_window_property;
     state.runtime.wait = wait_with_window_events;
     state.runtime.is_cancelled = window_is_cancelled;
     state.runtime.request_close = window_request_close;
+    state.runtime.request_quit = runtime_request_window_quit;
     if (!zsharp_paint_parse(
             background == NULL ? "#FFFFFF" : background->text_value,
             &state.background_paint, error, error_size)) {

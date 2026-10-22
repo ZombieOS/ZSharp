@@ -1,6 +1,7 @@
 zsharp = type.script
 noticed room Floor1[] (
  import scene_instance_tests.game.scene():
+ import ZSharp.Application():
  noticed brain Start[] (
   Print("Scene instance test started"):
   if[Floor1.LeftDoor.positionX != 100 or Floor1.RightDoor.positionX != 110] (
@@ -79,6 +80,6 @@ noticed room Floor1[] (
    Print("FAIL scene isolation"):
   ) else ()
   Print("Scene instance runtime passed"):
-  Application.Quit:
+  Application.Quit("regular"):
  )
 )

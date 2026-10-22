@@ -1,0 +1,59 @@
+zsharp = type.script:window
+
+noticed Window Startup[] (
+ import ZSharp.Window.*():
+ import zsharp_tray_example.Actions():
+
+ noticed design Design[] (
+  title: "Z# Tray Example":
+  width: 460px:
+  height: 240px:
+  background: #17221D:
+ )
+
+ noticed text[header] Heading[] (
+  content: "Z# background app":
+  color: #FFFFFF:
+  width: 400px:
+  height: 40px:
+  locationX: 0px:
+  locationY: 65px:
+ )
+
+ noticed text Body[] (
+  content: "Send to tray, then use its Show or Exit menu.":
+  color: #D0DED5:
+  width: 420px:
+  height: 35px:
+  locationX: 0px:
+  locationY: 15px:
+ )
+
+ noticed button Tray[] (
+  text: "Send to tray":
+  width: 170px:
+  height: 38px:
+  locationX: -95px:
+  locationY: -50px:
+  buttonColor: #27764C:
+  textColor: #FFFFFF:
+  Click[
+   left: [Actions:Actions:Tray]:
+   right: []:
+  ]:
+ )
+
+ noticed button Quit[] (
+  text: "Exit completely":
+  width: 170px:
+  height: 38px:
+  locationX: 95px:
+  locationY: -50px:
+  buttonColor: #783B3B:
+  textColor: #FFFFFF:
+  Click[
+   left: [Actions:Actions:Quit]:
+   right: []:
+  ]:
+ )
+)

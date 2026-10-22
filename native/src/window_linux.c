@@ -44,6 +44,7 @@ typedef struct GtkApi {
     void (*window_move)(void *, int, int);
     void (*window_set_resizable)(void *, int);
     void (*window_set_position)(void *, int);
+    void (*window_present)(void *);
     int (*window_set_icon_from_file)(void *, const char *, void **);
     GtkWidget *(*fixed_new)(void);
     GtkWidget *(*event_box_new)(void);
@@ -115,10 +116,26 @@ typedef struct GtkApi {
     GdkPixbuf *(*pixbuf_new_from_file_at_scale)(const char *, int, int, int,
                                                 void **);
     void (*object_unref)(void *);
+    void *(*object_ref_sink)(void *);
     void (*g_free)(void *);
     void *(*screen_get_default)(void);
     int (*screen_get_width)(void *);
     int (*screen_get_height)(void *);
+    /* Optional GTK 3/XEmbed tray support; absence must not hide the window. */
+    void *(*status_icon_new)(void);
+    void (*status_icon_set_from_icon_name)(void *, const char *);
+    void (*status_icon_set_from_pixbuf)(void *, void *);
+    void (*status_icon_set_title)(void *, const char *);
+    void (*status_icon_set_tooltip_text)(void *, const char *);
+    void (*status_icon_set_visible)(void *, int);
+    int (*status_icon_is_embedded)(void *);
+    void (*status_icon_position_menu)(void *, int *, int *, int *, void *);
+    GtkWidget *(*menu_new)(void);
+    GtkWidget *(*menu_item_new_with_label)(const char *);
+    void (*menu_shell_append)(void *, void *);
+    void (*menu_popup)(void *, void *, void *,
+                       void (*)(void *, int *, int *, int *, void *),
+                       void *, unsigned int, unsigned int);
 } GtkApi;
 
 struct LinuxWindowState;
@@ -160,6 +177,10 @@ typedef struct LinuxWindowState {
     ZSharpWindowRuntime runtime;
     volatile int closing;
     volatile int pending_requests;
+    void *tray_icon;
+    GtkWidget *tray_menu;
+    int in_tray;
+    int tray_pending;
 } LinuxWindowState;
 
 typedef struct LinuxPropertyRequest {
@@ -182,6 +203,18 @@ typedef struct LinuxReadRequest {
     int result;
     char error[512];
 } LinuxReadRequest;
+
+typedef struct LinuxQuitRequest {
+    LinuxWindowState *state;
+    unsigned int attempts;
+    int owns_pending;
+    volatile int done;
+    int result;
+    char error[512];
+} LinuxQuitRequest;
+
+static void linux_window_request_close(void *data);
+static void linux_tray_dispose(LinuxWindowState *state);
 
 static void *load_symbol(void *library, const char *name) {
     return library == NULL ? NULL : dlsym(library, name);
@@ -331,6 +364,32 @@ static int gtk_api_load(GtkApi *api, char *error, size_t error_size) {
         load_symbol(api->gtk, "gdk_screen_get_width");
     *(void **)(&api->screen_get_height) =
         load_symbol(api->gtk, "gdk_screen_get_height");
+    *(void **)(&api->window_present) =
+        load_symbol(api->gtk, "gtk_window_present");
+    *(void **)(&api->object_ref_sink) =
+        load_symbol(api->gobject, "g_object_ref_sink");
+    *(void **)(&api->status_icon_new) =
+        load_symbol(api->gtk, "gtk_status_icon_new");
+    *(void **)(&api->status_icon_set_from_icon_name) =
+        load_symbol(api->gtk, "gtk_status_icon_set_from_icon_name");
+    *(void **)(&api->status_icon_set_from_pixbuf) =
+        load_symbol(api->gtk, "gtk_status_icon_set_from_pixbuf");
+    *(void **)(&api->status_icon_set_title) =
+        load_symbol(api->gtk, "gtk_status_icon_set_title");
+    *(void **)(&api->status_icon_set_tooltip_text) =
+        load_symbol(api->gtk, "gtk_status_icon_set_tooltip_text");
+    *(void **)(&api->status_icon_set_visible) =
+        load_symbol(api->gtk, "gtk_status_icon_set_visible");
+    *(void **)(&api->status_icon_is_embedded) =
+        load_symbol(api->gtk, "gtk_status_icon_is_embedded");
+    *(void **)(&api->status_icon_position_menu) =
+        load_symbol(api->gtk, "gtk_status_icon_position_menu");
+    *(void **)(&api->menu_new) = load_symbol(api->gtk, "gtk_menu_new");
+    *(void **)(&api->menu_item_new_with_label) =
+        load_symbol(api->gtk, "gtk_menu_item_new_with_label");
+    *(void **)(&api->menu_shell_append) =
+        load_symbol(api->gtk, "gtk_menu_shell_append");
+    *(void **)(&api->menu_popup) = load_symbol(api->gtk, "gtk_menu_popup");
     return 1;
 }
 
@@ -743,6 +802,7 @@ static int finish_close(void *data) {
     LinuxWindowState *state = (LinuxWindowState *)data;
     if (__atomic_load_n(&state->pending_requests, __ATOMIC_ACQUIRE) != 0)
         return 1;
+    linux_tray_dispose(state);
     state->api.main_quit();
     return 0;
 }
@@ -765,7 +825,7 @@ static void run_target(LinuxWindowState *state, LinuxControl *control,
 static void window_destroyed(GtkWidget *widget, void *data) {
     LinuxWindowState *state = (LinuxWindowState *)data;
     (void)widget;
-    __atomic_store_n(&state->closing, 1, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&state->closing, 1, __ATOMIC_ACQ_REL)) return;
     state->api.idle_add(finish_close, state);
 }
 
@@ -1441,8 +1501,244 @@ static int linux_window_cancelled(void *data) {
 static void linux_window_request_close(void *data) {
     LinuxWindowState *state = (LinuxWindowState *)data;
     if (state == NULL) return;
-    __atomic_store_n(&state->closing, 1, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&state->closing, 1, __ATOMIC_ACQ_REL)) return;
     state->api.idle_add(finish_close, state);
+}
+
+static void linux_tray_dispose(LinuxWindowState *state) {
+    void *icon = state->tray_icon;
+    GtkWidget *menu = state->tray_menu;
+    /* Clear before GObject notifications can reenter the tray callbacks. */
+    state->tray_icon = NULL;
+    state->tray_menu = NULL;
+    state->in_tray = 0;
+    if (icon != NULL) {
+        state->api.status_icon_set_visible(icon, 0);
+        state->api.object_unref(icon);
+    }
+    if (menu != NULL) {
+        state->api.widget_destroy(menu);
+        state->api.object_unref(menu);
+    }
+}
+
+static void linux_tray_show(void *icon, void *data) {
+    LinuxWindowState *state = (LinuxWindowState *)data;
+    (void)icon;
+    if (linux_window_cancelled(state)) return;
+    state->in_tray = 0;
+    state->api.widget_set_visible(state->window, 1);
+    if (state->api.window_present != NULL)
+        state->api.window_present(state->window);
+}
+
+static void linux_tray_exit(void *item, void *data) {
+    (void)item;
+    linux_window_request_close(data);
+}
+
+static void linux_tray_popup(void *icon, unsigned int button,
+                              unsigned int time, void *data) {
+    LinuxWindowState *state = (LinuxWindowState *)data;
+    if (linux_window_cancelled(state) || state->tray_menu == NULL) return;
+    state->api.menu_popup(state->tray_menu, NULL, NULL,
+                          state->api.status_icon_position_menu, icon,
+                          button, time);
+}
+
+static void linux_tray_embedded_changed(void *icon, void *parameter,
+                                         void *data) {
+    LinuxWindowState *state = (LinuxWindowState *)data;
+    (void)parameter;
+    /* Losing the panel/tray must never strand an otherwise running app. */
+    if (state->tray_icon == icon && state->in_tray &&
+        !linux_window_cancelled(state) &&
+        !state->api.status_icon_is_embedded(icon)) linux_tray_show(icon, state);
+}
+
+static int linux_tray_create(LinuxWindowState *state, char *error,
+                              size_t error_size) {
+    GtkApi *api = &state->api;
+    GtkWidget *show, *exit;
+    ZSharpUIElement *design;
+    ZSharpUIProperty *value;
+    const char *title;
+    if (api->status_icon_new == NULL ||
+        api->status_icon_set_from_icon_name == NULL ||
+        api->status_icon_set_visible == NULL ||
+        api->status_icon_is_embedded == NULL ||
+        api->status_icon_position_menu == NULL || api->menu_new == NULL ||
+        api->menu_item_new_with_label == NULL ||
+        api->menu_shell_append == NULL || api->menu_popup == NULL ||
+        api->window_present == NULL || api->object_unref == NULL ||
+        api->object_ref_sink == NULL) {
+        snprintf(error, error_size,
+                 "tray mode requires GTK 3 StatusIcon and menu support; "
+                 "the application window remains open");
+        return 0;
+    }
+    state->tray_icon = api->status_icon_new();
+    state->tray_menu = api->menu_new();
+    if (state->tray_menu != NULL) api->object_ref_sink(state->tray_menu);
+    if (state->tray_icon == NULL || state->tray_menu == NULL) goto failed;
+    show = api->menu_item_new_with_label("Show");
+    if (show == NULL) goto failed;
+    api->menu_shell_append(state->tray_menu, show);
+    exit = api->menu_item_new_with_label("Exit");
+    if (exit == NULL) goto failed;
+    api->menu_shell_append(state->tray_menu, exit);
+    api->signal_connect_data(show, "activate", (void *)linux_tray_show,
+                              state, NULL, 0);
+    api->signal_connect_data(exit, "activate", (void *)linux_tray_exit,
+                              state, NULL, 0);
+    api->signal_connect_data(state->tray_icon, "activate",
+                              (void *)linux_tray_show, state, NULL, 0);
+    api->signal_connect_data(state->tray_icon, "popup-menu",
+                              (void *)linux_tray_popup, state, NULL, 0);
+    api->signal_connect_data(state->tray_icon, "notify::embedded",
+                              (void *)linux_tray_embedded_changed,
+                              state, NULL, 0);
+    design = design_element(&state->program->window);
+    value = design == NULL ? NULL : property(design, "title");
+    title = value == NULL ? state->program->window.name : value->text_value;
+    if (api->status_icon_set_title != NULL)
+        api->status_icon_set_title(state->tray_icon, title);
+    if (api->status_icon_set_tooltip_text != NULL)
+        api->status_icon_set_tooltip_text(state->tray_icon, title);
+    api->status_icon_set_from_icon_name(state->tray_icon,
+                                       "application-x-executable");
+    value = design == NULL ? NULL : property(design, "icon");
+    if (value != NULL && api->status_icon_set_from_pixbuf != NULL &&
+        api->pixbuf_new_from_file_at_scale != NULL) {
+        char *path = path_join(state->project_root, value->text_value);
+        GdkPixbuf *image = path == NULL ? NULL :
+            api->pixbuf_new_from_file_at_scale(path, 24, 24, 1, NULL);
+        if (image != NULL) {
+            api->status_icon_set_from_pixbuf(state->tray_icon, image);
+            api->object_unref(image);
+        }
+        free(path);
+    }
+    api->widget_show_all(state->tray_menu);
+    api->status_icon_set_visible(state->tray_icon, 1);
+    return 1;
+failed:
+    linux_tray_dispose(state);
+    snprintf(error, error_size,
+             "could not create the application tray icon and menu; "
+             "the application window remains open");
+    return 0;
+}
+
+static void linux_finish_tray_request(LinuxQuitRequest *request, int result,
+                                       const char *message) {
+    LinuxWindowState *state = request->state;
+    request->result = result;
+    if (message != NULL)
+        snprintf(request->error, sizeof(request->error), "%s", message);
+    if (request->owns_pending) state->tray_pending = 0;
+    __atomic_store_n(&request->done, 1, __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+}
+
+static int linux_poll_tray_request(void *data) {
+    LinuxQuitRequest *request = (LinuxQuitRequest *)data;
+    LinuxWindowState *state = request->state;
+    if (linux_window_cancelled(state)) {
+        linux_tray_dispose(state);
+        linux_finish_tray_request(request, 0, "the window is closing");
+        return 0;
+    }
+    if (state->tray_icon != NULL &&
+        state->api.status_icon_is_embedded(state->tray_icon)) {
+        /* Visibility alone is not proof of a usable Linux notification area. */
+        state->in_tray = 1;
+        state->api.widget_set_visible(state->window, 0);
+        linux_finish_tray_request(request, 1, NULL);
+        return 0;
+    }
+    if (request->attempts-- == 0) {
+        linux_tray_show(NULL, state);
+        linux_tray_dispose(state);
+        linux_finish_tray_request(request, 0,
+            "no compatible Linux system-tray host is available "
+            "(GTK StatusIcon requires an X11 notification area; "
+            "GNOME/Wayland may not provide one); the window remains open");
+        return 0;
+    }
+    return 1;
+}
+
+static int linux_apply_tray_request(void *data) {
+    LinuxQuitRequest *request = (LinuxQuitRequest *)data;
+    LinuxWindowState *state = request->state;
+    if (linux_window_cancelled(state)) {
+        linux_finish_tray_request(request, 0, "the window is closing");
+        return 0;
+    }
+    if (state->tray_pending) {
+        linux_finish_tray_request(request, 0,
+                                   "an application tray request is already pending");
+        return 0;
+    }
+    state->tray_pending = 1;
+    request->owns_pending = 1;
+    request->attempts = 40;
+    if (state->tray_icon == NULL &&
+        !linux_tray_create(state, request->error, sizeof(request->error))) {
+        linux_tray_show(NULL, state);
+        linux_finish_tray_request(request, 0, NULL);
+        return 0;
+    }
+    if (linux_poll_tray_request(request) &&
+        state->api.timeout_add(25, linux_poll_tray_request, request) == 0) {
+        linux_tray_show(NULL, state);
+        linux_tray_dispose(state);
+        linux_finish_tray_request(request, 0,
+                                   "could not schedule tray-host detection; "
+                                   "the application window remains open");
+    }
+    return 0;
+}
+
+static int linux_window_request_quit(void *data, ZSharpApplicationQuitMode mode,
+                                      char *error, size_t error_size) {
+    LinuxWindowState *state = (LinuxWindowState *)data;
+    LinuxQuitRequest *request;
+    struct timespec pause = {0, 1000000L};
+    int result;
+    if (state == NULL || linux_window_cancelled(state)) {
+        snprintf(error, error_size, "the application window is closing");
+        return 0;
+    }
+    if (mode == ZAPPLICATION_QUIT_REGULAR) {
+        linux_window_request_close(state);
+        return 1;
+    }
+    if (mode != ZAPPLICATION_QUIT_TRAY) {
+        snprintf(error, error_size, "unknown application quit mode");
+        return 0;
+    }
+    request = (LinuxQuitRequest *)calloc(1, sizeof(*request));
+    if (request == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    request->state = state;
+    __atomic_add_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+    if (linux_window_cancelled(state) ||
+        state->api.idle_add(linux_apply_tray_request, request) == 0) {
+        __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+        free(request);
+        snprintf(error, error_size, "could not schedule an application tray request");
+        return 0;
+    }
+    while (!__atomic_load_n(&request->done, __ATOMIC_ACQUIRE))
+        nanosleep(&pause, NULL);
+    result = request->result;
+    if (!result) snprintf(error, error_size, "%s", request->error);
+    free(request);
+    return result;
 }
 
 static int apply_property_request(void *data) {
@@ -1938,6 +2234,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.runtime.wait = wait_with_window_events;
     state.runtime.is_cancelled = linux_window_cancelled;
     state.runtime.request_close = linux_window_request_close;
+    state.runtime.request_quit = linux_window_request_quit;
     state.screen_width = width * 4;
     state.screen_height = height * 4;
     design = design_element(&program->window);
@@ -2031,6 +2328,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
         __atomic_store_n(&state.closing, 1, __ATOMIC_RELEASE);
         while (__atomic_load_n(&state.pending_requests, __ATOMIC_ACQUIRE) != 0)
             state.api.main_iteration_do(0);
+        linux_tray_dispose(&state);
         callback(user_data, ZSHARP_WINDOW_TASKS_STOP, &state.runtime,
                  state.callback_error, sizeof(state.callback_error));
         state.api.widget_destroy(state.window);
@@ -2048,6 +2346,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     }
     state.api.main_loop();
     __atomic_store_n(&state.closing, 1, __ATOMIC_RELEASE);
+    linux_tray_dispose(&state);
     if (!callback(user_data, ZSHARP_WINDOW_TASKS_STOP, &state.runtime,
                   error, error_size)) result = 0;
     if (state.background_css != NULL && state.api.object_unref != NULL)

@@ -7,6 +7,64 @@ is intentionally left uninterpreted until its behavior is defined.
 
 Z# source files use `.zsharp`.
 
+## Desktop APIs (1.4.0.0)
+
+- `import ZSharp.Speech():`, `ZSharp.Microphone`, `ZSharp.Speaker`, and
+  `ZSharp.Desktop` enable their corresponding APIs in the using room. Each
+  import uses the normal `import ...():` form. These native desktop features
+  require project `ZSharp: [1.4.0.0]:` or newer and are not bZVM APIs.
+- `Speech.speak(text):` uses the default system voice;
+  `Speech.speak(text, "voice.zvoice"):` selects a saved voice. `Speech.createVoice`
+  takes a project-relative MP3/WAV reference and new `.zvoice` output. Creating a
+  clone requires an explicitly configured optional local model; it never
+  silently substitutes a native preset voice.
+  `Speech.prepare("voice.zvoice"):` warms a cloned voice at startup without
+  playback. Cloned speech reuses a dedicated model worker and streams default
+  pitch/speed audio as it is generated; adjusted clones retain full-signal
+  processing. End-of-utterance detection targets about 400 ms of silence.
+- `Microphone.getInput` is recognized text; `Microphone.level` is a number in
+  0..1. `Microphone.record("capture.wav", 5s):` uses wait-style literal durations.
+  Device getters are `Microphone.getInputDevice` and `Speaker.getOutputDevice`;
+  their setters take a device name, or no arguments to reset this process's
+  selection. These reads are properties, not parenthesized calls.
+  Offline input uses a dedicated per-run worker with a cached model and a fresh
+  recognizer per utterance; it does not occupy the Python language bridge.
+- `Desktop.openApp`, `closeApp`, `minimizeApp`, `maximizeApp`, `scaleApp`,
+  `moveApp`, and `focusWindow` are statements using parenthesized arguments. Target
+  selection is an explicit process/application name or PID; ambiguity and
+  unsupported OS capabilities are errors. Closing is graceful, not forceful.
+  On Windows, `closeApp` selects one verified process family and requests closure
+  of its main windows, including descendant processes. Same-name helper processes
+  do not make one family ambiguous; unrelated app instances still do. Success
+  reports a close request, not guaranteed process termination or discarded work.
+  Windows `focusWindow` synchronizes activation before verifying focus. Genuine
+  foreground denial offers one OK/Cancel confirmation and one approved retry;
+  this does not bypass native restrictions or guarantee focus.
+- `Desktop.typeText(text, region):` clicks a named 3-by-3 region of the focused
+  window and enters text. `Desktop.sendKeys("CTRL+S"):` sends one validated
+  shortcut to that window. These are real desktop input, not browser DOM APIs
+  or automatic text-box detection; host focus/security/accessibility policy
+  applies. Both require `ZSharp.Desktop` and text arguments.
+  External Windows Unicode Edit/RichEdit controls use an acknowledged native
+  click followed by one undoable `EM_REPLACESEL` insertion at the resulting
+  caret/selection, not whole-document replacement. CRLF, LF and CR normalize to
+  Windows paragraph endings. Same-process controls retain paced keyboard input
+  to avoid borrowed-pointer lifetime hazards after a cross-thread timeout;
+  custom/unrecognized controls also retain that keyboard route. Neither uses
+  the clipboard. Focus changes or delivery failures stop without replay; an
+  insertion-acknowledgment timeout may leave partial or complete text and never
+  retries or falls back. Actual Windows Notepad passed saved-text validation
+  with both reported paragraphs, Unicode and 80 numbered lines; Linux/macOS
+  desktop input still needs live validation.
+  Standalone case-insensitive `MEDIA_PLAY_PAUSE`, `MEDIA_NEXT` and
+  `MEDIA_PREVIOUS` send OS media-session controls. Modifier combinations are
+  rejected, and playback/track changes depend on the active media player.
+- Optional root `LaunchAtStart: alive:`/`dead:` controls the project's per-user
+  login registration when it is actually run. Omission makes no change;
+  checking/compiling/packaging does not install startup entries.
+- Limits, permissions, optional local model requirements, platform-specific
+  support and complete examples are in [SYNTAX.md](SYNTAX.md).
+
 ## Project settings
 
 Every project has one `project.zsettings` file in its root. It is a settings
@@ -165,6 +223,18 @@ noticed room Test[] (
 - `feed(number.Left + number.Right):` supplies the returned number.
 - A local number can be declared without visibility inside a function, as in
   `number Result = ...:`.
+- Room-level variables and functions may also omit `noticed`/`silent`.
+  Their visibility defaults to the containing room: public in a `noticed room`,
+  private in a `silent room`, and constrained to the same file through a bare
+  room. Explicit visibility overrides the member default, not the room's own
+  accessibility or import requirements. This includes `brain`, number-returning
+  and text-returning functions. An automatic `Start[]` does not need to be
+  public; `[DR]` still disables automatic execution.
+- Function-local variables do not inherit room visibility. A local status uses
+  `status Ready = alive:` or a status-valued expression, and can be reassigned
+  with `Ready = dead:`. A non-status initializer is an error; a later assignment
+  with the wrong type warns and keeps the previous value, like other variable
+  assignments. Numbers/text do not implicitly convert to `alive`/`dead`.
 - Conditions use `if[condition] (...) else (...)`.
 - `>=` compares two numbers.
 - `Print` accepts direct text values as well as named values.

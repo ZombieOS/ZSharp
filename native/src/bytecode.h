@@ -221,7 +221,10 @@ typedef enum ZSharpOpCode {
     ZOP_BROWSER_JS = 67,
     ZOP_BROWSER_CSS = 68,
     ZOP_TIME = 69,
-    ZOP_NETWORK = 70
+    ZOP_NETWORK = 70,
+    ZOP_APPLICATION_QUIT_MODE = 71,
+    ZOP_STORE_LOCAL_STATUS = 72,
+    ZOP_SYSTEM = 73
 } ZSharpOpCode;
 
 typedef struct ZSharpInstruction {

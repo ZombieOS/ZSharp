@@ -1,5 +1,30 @@
 # Z# bytecode identity and integrity
 
+Format `0.26` adds `ZOP_SYSTEM` (73), carrying an operation-name string and
+a u32 argument count. Arguments are evaluated and pushed in source order;
+the opcode consumes them and, for property reads, pushes the result type
+defined by that operation. Operations cover native Speech, Microphone, Speaker
+and Desktop APIs, require the corresponding explicit room import and project
+Z# 1.4.0.0, and are not supported by bZVM. Readers retain support for `0.25`
+and previously supported formats.
+
+Format `0.25` adds `ZOP_STORE_LOCAL_STATUS` (72), carrying the local variable's
+name string. It consumes a status stack value and stores a typed local status;
+later assignments must preserve that type. This supports initialized local
+`status` declarations using the existing source syntax. Readers retain support
+for `0.24` and previously supported formats.
+Projects using this typed local instruction require Z# 1.4.0.0 or newer.
+
+Format `0.24` adds `ZOP_APPLICATION_QUIT_MODE` (71), with no instruction
+payload. It consumes one text stack value, exactly `regular` or `tray`.
+New source requires `ZSharp.Application` in the using room and Z# 1.4.0.0.
+The older operandless `ZOP_APPLICATION_QUIT` (60) keeps its regular-close
+semantics when older bytecode is loaded directly. Readers retain support for
+`0.23` and previously supported formats. This does not by itself preserve an
+older package containing bare `Application.Quit:` source: packaged startup,
+callback and shutdown discovery can also parse the bundled source. Such
+packages currently need source migration and rebuilding for this change.
+
 Format `0.23` adds `ZOP_NETWORK` (70), carrying an operation string, a u32
 expression-result flag and a u32 argument count. Arguments are stack values;
 HTTP request fields are alternating names/values, and callbacks are target text.

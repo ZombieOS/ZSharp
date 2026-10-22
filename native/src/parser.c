@@ -3,6 +3,7 @@
 #include "decimal.h"
 #include "lexer.h"
 #include "time_api.h"
+#include "system_ops.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -31,6 +32,24 @@ typedef struct Parser {
     ZSharpRoom *member_room;
     const char *source_name;
 } Parser;
+
+/* These IDs are parser-local: only canonical prefixes/tags enter bytecode. */
+static const char *const foreign_prefixes[] = {
+    NULL, "py", "js", "lua", "cpp", "rust", "c", "kt",
+    "cs", "java", "go", "rb"
+};
+
+static const char *const foreign_tags[] = {
+    NULL, "@py", "@js", "@lua", "@cpp", "@rust", "@c", "@kt",
+    "@cs", "@java", "@go", "@rb"
+};
+
+static int parser_foreign_language(const char *prefix) {
+    size_t index;
+    for (index = 1; index < sizeof(foreign_prefixes) / sizeof(foreign_prefixes[0]); index++)
+        if (strcmp(prefix, foreign_prefixes[index]) == 0) return (int)index;
+    return 0;
+}
 
 static void fail_at(Parser *parser, const ZSharpToken *token,
                     const char *format, ...) {
@@ -286,7 +305,10 @@ static int parse_custom_statement(Parser *parser, ZSharpFunction *function,
                                   const ZSharpCustomSyntaxRule *rule);
 static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
                                 int produces_value);
+static int parse_foreign_constructor(Parser *parser, ZSharpFunction *function);
 static int parse_network(Parser *parser,ZSharpFunction *function,int value);
+static int parse_system(Parser *parser, ZSharpFunction *function,
+                        const char *family, int expression);
 
 /* Browser selectors count ID matches, not numeric indexing into a value. */
 static int browser_part(Parser *parser, char **part, int selector) {
@@ -370,6 +392,15 @@ static int parse_primary(Parser *parser, ZSharpFunction *function) {
         int qualified = zsharp_token_equals(&token, "number") ||
                         zsharp_token_equals(&token, "var");
         advance_token(parser);
+        if (zsharp_token_equals(&token, "Speech") ||
+            zsharp_token_equals(&token, "Microphone") ||
+            zsharp_token_equals(&token, "Speaker") ||
+            zsharp_token_equals(&token, "Desktop")) {
+            const char *family = zsharp_token_equals(&token, "Speech") ? "Speech" :
+                zsharp_token_equals(&token, "Microphone") ? "Microphone" :
+                zsharp_token_equals(&token, "Speaker") ? "Speaker" : "Desktop";
+            return parse_system(parser, function, family, 1);
+        }
         if (zsharp_token_equals(&token, "JSON") &&
             match_type(parser, ZTOKEN_DOT)) {
             char *schema_name;
@@ -559,6 +590,9 @@ static int parse_primary(Parser *parser, ZSharpFunction *function) {
         }
         if (zsharp_token_equals(&token, "Function")) {
             return parse_qualified_call(parser, function, 1);
+        }
+        if (zsharp_token_equals(&token, "Foreign")) {
+            return parse_foreign_constructor(parser, function);
         }
         if (qualified && match_type(parser, ZTOKEN_DOT)) {
             name = consume_name(parser, "a name after the qualifier");
@@ -795,6 +829,7 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
     size_t part_count = 0;
     size_t index;
     uint32_t argument_count = 0;
+    int foreign_language = 0;
     char *call_outcome = NULL;
     ZSharpInstruction *instruction;
     if (!consume_type(parser, ZTOKEN_DOT, "'.' after 'Function'") ||
@@ -815,24 +850,14 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
         parts[part_count++] =
             consume_name(parser, "the next Function.call target name");
     }
-    if (!parser->failed && strcmp(parts[0], "py") != 0 &&
-        strcmp(parts[0], "js") != 0 &&
-        strcmp(parts[0], "lua") != 0 &&
-        strcmp(parts[0], "c") != 0 &&
-        strcmp(parts[0], "cpp") != 0 &&
-        strcmp(parts[0], "kt") != 0 &&
-        strcmp(parts[0], "rust") != 0 &&
+    if (!parser->failed) foreign_language = parser_foreign_language(parts[0]);
+    if (!parser->failed && !foreign_language &&
         part_count != 1 && part_count != 3 && part_count != 4) {
         fail_at(parser, &parser->current,
                 "Function.call requires File.Room.Function or "
                 "Project.File.Room.Function");
     }
-    if (!parser->failed &&
-        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "c") == 0 ||
-         strcmp(parts[0], "cpp") == 0 ||
-         strcmp(parts[0], "kt") == 0 ||
-         strcmp(parts[0], "rust") == 0) &&
+    if (!parser->failed && foreign_language &&
         part_count < 3) {
         fail_at(parser, &parser->current,
                 "foreign calls require LANGUAGE:Path.To.File:function");
@@ -895,28 +920,15 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
             fail_at(parser, &parser->current, "out of memory");
             return 0;
         }
-    } else if (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-        strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "c") == 0 ||
-        strcmp(parts[0], "cpp") == 0 ||
-        strcmp(parts[0], "kt") == 0 ||
-        strcmp(parts[0], "rust") == 0) {
+    } else if (foreign_language) {
         size_t module_length = 0;
         char *module;
         char *cursor;
         for (index = 1; index + 1 < part_count; index++)
             module_length += strlen(parts[index]) + (index > 1 ? 1u : 0u);
         module = (char *)malloc(module_length + 1);
-        instruction->operand = zsharp_copy_text(
-            strcmp(parts[0], "py") == 0 ? "@py" :
-            strcmp(parts[0], "js") == 0 ? "@js" :
-            strcmp(parts[0], "lua") == 0 ? "@lua" :
-            strcmp(parts[0], "c") == 0 ? "@c" :
-            strcmp(parts[0], "cpp") == 0 ? "@cpp" :
-            strcmp(parts[0], "kt") == 0 ? "@kt" : "@rust",
-            (strcmp(parts[0], "lua") == 0 ||
-             strcmp(parts[0], "cpp") == 0) ? 4 :
-             strcmp(parts[0], "rust") == 0 ? 5 :
-             strcmp(parts[0], "c") == 0 ? 2 : 3);
+        instruction->operand = zsharp_copy_text(foreign_tags[foreign_language],
+                                                strlen(foreign_tags[foreign_language]));
         instruction->call_room = zsharp_copy_text("", 0);
         if (module == NULL || instruction->operand == NULL ||
             instruction->call_room == NULL) {
@@ -951,6 +963,67 @@ static int parse_qualified_call(Parser *parser, ZSharpFunction *function,
     instruction->argument_count = argument_count;
     instruction->call_outcome = call_outcome;
     return 1;
+}
+
+/* Constructor values use the existing qualified-value instruction. Keeping
+ * the operation in call_room preserves the complete bytecode layout. */
+static int parse_foreign_constructor(Parser *parser, ZSharpFunction *function) {
+    char *language = NULL;
+    char *parts[65] = {0};
+    size_t count = 0, index;
+    int language_id;
+    uint32_t argument_count = 0;
+    ZSharpInstruction *instruction;
+    if (!consume_type(parser, ZTOKEN_DOT, "'.' after Foreign") ||
+        !consume_word(parser, "new") ||
+        !consume_type(parser, ZTOKEN_LEFT_PAREN, "'(' after Foreign.new")) return 0;
+    language = consume_name(parser, "a foreign language prefix");
+    if (!language) return 0;
+    language_id = parser_foreign_language(language);
+    free(language);
+    if (!language_id) {
+        fail_at(parser, &parser->current, "Foreign.new requires a supported foreign language prefix");
+        return 0;
+    }
+    if (!consume_type(parser, ZTOKEN_COLON, "':' after the foreign language")) return 0;
+    parts[count++] = consume_name(parser, "an exported foreign class module");
+    while (!parser->failed && match_type(parser, ZTOKEN_DOT)) {
+        if (count == 65) {
+            fail_at(parser, &parser->current, "Foreign.new module path is too long");
+            goto failed;
+        }
+        parts[count++] = consume_name(parser, "a foreign module path name");
+    }
+    if (parser->failed || !consume_type(parser, ZTOKEN_LEFT_BRACKET,
+            "'[' before the foreign constructor arguments")) goto failed;
+    if (parser->current.type != ZTOKEN_RIGHT_BRACKET) {
+        do {
+            if (!parse_expression(parser, function)) goto failed;
+            if (argument_count == UINT32_MAX) {
+                fail_at(parser, &parser->current, "Foreign.new has too many arguments");
+                goto failed;
+            }
+            ++argument_count;
+        } while (match_type(parser, ZTOKEN_COMMA));
+    }
+    if (!consume_type(parser, ZTOKEN_RIGHT_BRACKET, "']' after the foreign constructor arguments") ||
+        !consume_type(parser, ZTOKEN_RIGHT_PAREN, "')' after Foreign.new")) goto failed;
+    instruction = emit(parser, function, ZOP_CALL_QUALIFIED_VALUE);
+    if (!instruction) goto failed;
+    instruction->operand = zsharp_copy_text(foreign_tags[language_id], strlen(foreign_tags[language_id]));
+    instruction->call_file = join_path_parts(parser, parts, count);
+    instruction->call_room = zsharp_copy_text("$new", 4);
+    instruction->call_function = zsharp_copy_text(parts[count - 1], strlen(parts[count - 1]));
+    instruction->argument_count = argument_count;
+    if (!instruction->operand || !instruction->call_file || !instruction->call_room || !instruction->call_function) {
+        fail_at(parser, &parser->current, "out of memory");
+        goto failed;
+    }
+    for (index = 0; index < count; ++index) free(parts[index]);
+    return 1;
+failed:
+    for (index = 0; index < count; ++index) free(parts[index]);
+    return 0;
 }
 
 static int parse_number_statement(Parser *parser, ZSharpFunction *function) {
@@ -1046,6 +1119,27 @@ static int parse_text_statement(Parser *parser, ZSharpFunction *function) {
     }
     instruction->operand = name;
     if (path_count > 1) instruction->argument_count = (uint32_t)path_count;
+    return 1;
+}
+
+static int parse_status_statement(Parser *parser, ZSharpFunction *function) {
+    ZSharpInstruction *instruction;
+    char *name = consume_name(parser, "a local status name");
+    if (name == NULL ||
+        !consume_type(parser, ZTOKEN_EQUAL,
+                      "'=' after the local status name") ||
+        !parse_expression(parser, function) ||
+        !consume_type(parser, ZTOKEN_COLON,
+                      "':' after the local status value")) {
+        free(name);
+        return 0;
+    }
+    instruction = emit(parser, function, ZOP_STORE_LOCAL_STATUS);
+    if (instruction == NULL) {
+        free(name);
+        return 0;
+    }
+    instruction->operand = name;
     return 1;
 }
 
@@ -1255,6 +1349,20 @@ static int parse_delay_statement(Parser *parser, ZSharpFunction *function) {
 }
 
 static int parse_statement_block(Parser *parser, ZSharpFunction *function);
+static int parser_dynamic_receiver(const ZSharpFunction *function, const char *name) {
+    size_t index;
+    for (index = 0; index < function->parameter_count; ++index) {
+        const ZSharpParameter *parameter = &function->parameters[index];
+        if (parameter->type == ZVALUE_OBJECT && parameter->object_type &&
+            !strcmp(parameter->object_type, "object") && !strcmp(parameter->name, name)) return 1;
+    }
+    for (index = 0; index < function->instruction_count; ++index) {
+        const ZSharpInstruction *instruction = &function->instructions[index];
+        if (instruction->op == ZOP_STORE_LOCAL_VALUE && !strcmp(instruction->operand, name)) return 1;
+    }
+    return 0;
+}
+
 static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
     ZSharpToken first_token = parser->current;
     char *parts[5] = {0};
@@ -1267,6 +1375,7 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
     int is_setter = 0;
     int is_array_setter = 0;
     int is_ui_setter = 0;
+    int dynamic_receiver = 0;
 
     parts[part_count++] = copy_token(parser, &first_token);
     advance_token(parser);
@@ -1742,7 +1851,8 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
                       "'[' after the method name")) {
         goto failed;
     }
-    if (part_count == 2) {
+    dynamic_receiver = part_count == 2 && parser_dynamic_receiver(function, parts[0]);
+    if (part_count == 2 && !dynamic_receiver) {
         instruction = emit(parser, function, ZOP_LOAD_NAME);
         if (instruction == NULL) goto failed;
         instruction->operand = parts[0];
@@ -1764,10 +1874,10 @@ static int parse_named_statement(Parser *parser, ZSharpFunction *function) {
         goto failed;
     }
     instruction = emit(parser, function,
-                       part_count == 2 ? ZOP_CALL_METHOD
+                       part_count == 2 && !dynamic_receiver ? ZOP_CALL_METHOD
                                        : ZOP_CALL_METHOD_PATH);
     if (instruction == NULL) goto failed;
-    if (part_count == 2) {
+    if (part_count == 2 && !dynamic_receiver) {
         instruction->operand = parts[1];
         parts[1] = NULL;
     } else {
@@ -2232,10 +2342,7 @@ static char *parse_function_target(Parser *parser, const ZSharpFunction *scope,
     *is_alias = 0;
     parts[count++] = consume_name(parser, "a function target");
     if (parts[0] == NULL) return NULL;
-    foreign = strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-        strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "cpp") == 0 ||
-        strcmp(parts[0], "rust") == 0 || strcmp(parts[0], "c") == 0 ||
-        strcmp(parts[0], "kt") == 0;
+    foreign = parser_foreign_language(parts[0]);
     if (foreign) {
         if (!consume_type(parser, ZTOKEN_COLON, "':' after the language")) goto done;
         parts[count++] = consume_name(parser, "a foreign module");
@@ -2253,7 +2360,8 @@ static char *parse_function_target(Parser *parser, const ZSharpFunction *scope,
             for (i = 0; i < scope->instruction_count; i++) {
                 const ZSharpInstruction *prior = &scope->instructions[i];
                 if ((prior->op == ZOP_STORE_LOCAL || prior->op == ZOP_STORE_LOCAL_TEXT ||
-                     prior->op == ZOP_STORE_LOCAL_FUNCTION || prior->op == ZOP_STORE_LOCAL_VALUE || prior->op == ZOP_STORE_LOCAL_TEXT_ARRAY) &&
+                     prior->op == ZOP_STORE_LOCAL_FUNCTION || prior->op == ZOP_STORE_LOCAL_VALUE || prior->op == ZOP_STORE_LOCAL_TEXT_ARRAY ||
+                     prior->op == ZOP_STORE_LOCAL_STATUS) &&
                     strcmp(prior->operand, parts[0]) == 0) known_alias = 1;
             }
             if (parser->member_room != NULL)
@@ -2469,7 +2577,97 @@ static int parse_network(Parser *parser,ZSharpFunction *function,int produces_va
     return in->operand!=NULL;
 }
 
+static int parse_system(Parser *parser, ZSharpFunction *function,
+                        const char *family, int expression) {
+    ZSharpToken token = parser->current;
+    const ZSharpSystemOperation *operation;
+    ZSharpInstruction *instruction;
+    char name[128], import_path[64];
+    char *method;
+    size_t i;
+    uint32_t count = 0;
+    int imported = 0;
+    snprintf(import_path, sizeof(import_path), "ZSharp.%s", family);
+    if (parser->member_room != NULL)
+        for (i = 0; i < parser->member_room->import_count; i++)
+            if (strcmp(parser->member_room->imports[i].path, import_path) == 0)
+                imported = 1;
+    if (!imported) {
+        fail_at(parser, &token, "%s requires import %s()", family, import_path);
+        return 0;
+    }
+    if (!consume_type(parser, ZTOKEN_DOT, "'.' after the desktop API")) return 0;
+    method = consume_name(parser, "a desktop API operation");
+    if (method == NULL) return 0;
+    snprintf(name, sizeof(name), "%s.%s", family, method);
+    free(method);
+    operation = zsharp_system_operation(name);
+    if (operation == NULL) {
+        fail_at(parser, &token, "unknown desktop API operation '%s'", name);
+        return 0;
+    }
+    if ((expression && !operation->result) || (!expression && operation->result)) {
+        fail_at(parser, &token, "%s is %s", name,
+                operation->result ? "a value; use it in an expression" :
+                                    "a statement, not a value");
+        return 0;
+    }
+    if (!operation->property) {
+        if (!consume_type(parser, ZTOKEN_LEFT_PAREN,
+                          "'(' after the desktop API operation")) return 0;
+        if (parser->current.type != ZTOKEN_RIGHT_PAREN) {
+            do {
+                if (count == operation->maximum_arguments) {
+                    fail_at(parser, &token, "too many arguments for %s", name);
+                    return 0;
+                }
+                if (!strcmp(name, "Microphone.record") && count == 1) {
+                    char *duration = NULL, *seconds = NULL, error[128] = {0};
+                    if (!consume_number_text(parser, &duration)) return 0;
+                    if (match_word(parser, "s")) seconds = duration;
+                    else if (match_word(parser, "ms")) {
+                        seconds = zsharp_decimal_divide(duration, "1000", error, sizeof(error));
+                        free(duration);
+                    } else {
+                        free(duration);
+                        fail_at(parser, &token, "Microphone.record duration requires s or ms, like wait");
+                        return 0;
+                    }
+                    instruction = emit(parser, function, ZOP_PUSH_NUMBER);
+                    if (instruction == NULL || seconds == NULL) { free(seconds); return 0; }
+                    instruction->operand = seconds;
+                } else if (!parse_expression(parser, function)) return 0;
+                count++;
+            } while (match_type(parser, ZTOKEN_COMMA));
+        }
+        if (count < operation->minimum_arguments) {
+            fail_at(parser, &token, "too few arguments for %s", name);
+            return 0;
+        }
+        if (!consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                          "')' after the desktop API arguments")) return 0;
+    }
+    if (!expression && !consume_type(parser, ZTOKEN_COLON,
+                                     "':' after the desktop API statement")) return 0;
+    instruction = emit(parser, function, ZOP_SYSTEM);
+    if (instruction == NULL) return 0;
+    instruction->operand = zsharp_copy_text(name, strlen(name));
+    instruction->argument_count = count;
+    return instruction->operand != NULL;
+}
+
 static int parse_statement(Parser *parser, ZSharpFunction *function) {
+    if (zsharp_token_equals(&parser->current, "Speech") ||
+        zsharp_token_equals(&parser->current, "Microphone") ||
+        zsharp_token_equals(&parser->current, "Speaker") ||
+        zsharp_token_equals(&parser->current, "Desktop")) {
+        ZSharpToken token = parser->current;
+        const char *family = zsharp_token_equals(&token, "Speech") ? "Speech" :
+            zsharp_token_equals(&token, "Microphone") ? "Microphone" :
+            zsharp_token_equals(&token, "Speaker") ? "Speaker" : "Desktop";
+        advance_token(parser);
+        return parse_system(parser, function, family, 0);
+    }
     if(zsharp_token_equals(&parser->current,"Websocket") || zsharp_token_equals(&parser->current,"HTTP"))
         return parse_network(parser,function,0);
     if (parser->current.type == ZTOKEN_IDENTIFIER &&
@@ -2494,12 +2692,51 @@ static int parse_statement(Parser *parser, ZSharpFunction *function) {
     if (match_word(parser, "Print")) return parse_print(parser, function);
     if (match_word(parser, "Application")) {
         if (!consume_type(parser, ZTOKEN_DOT, "'.' after Application") ||
-            !consume_word(parser, "Quit") ||
-            !consume_type(parser, ZTOKEN_COLON, "':' after Application.Quit")) return 0;
-        return emit(parser, function, ZOP_APPLICATION_QUIT) != NULL;
+            !consume_word(parser, "Quit")) return 0;
+        if (parser->current.type == ZTOKEN_COLON) {
+            fail_at(parser, &parser->current,
+                    "Application.Quit now requires an explicit mode; import ZSharp.Application() and use Application.Quit(\"regular\") or Application.Quit(\"tray\")");
+            return 0;
+        }
+        {
+            size_t import_index;
+            int imported = 0;
+            if (parser->member_room != NULL)
+                for (import_index = 0;
+                     import_index < parser->member_room->import_count;
+                     import_index++)
+                    if (strcmp(parser->member_room->imports[import_index].path,
+                               "ZSharp.Application") == 0) imported = 1;
+            if (!imported) {
+                fail_at(parser, &parser->current,
+                        "Application.Quit(mode) requires import ZSharp.Application()");
+                return 0;
+            }
+        }
+        if (!consume_type(parser, ZTOKEN_LEFT_PAREN,
+                          "'(' before Application.Quit mode") ||
+            !parse_expression(parser, function) ||
+            !consume_type(parser, ZTOKEN_RIGHT_PAREN,
+                          "')' after the single Application.Quit mode") ||
+            !consume_type(parser, ZTOKEN_COLON,
+                          "':' after Application.Quit(mode)")) return 0;
+        return emit(parser, function, ZOP_APPLICATION_QUIT_MODE) != NULL;
     }
     if (match_word(parser, "Function")) {
         return parse_qualified_call(parser, function, 0);
+    }
+    if (match_word(parser, "Foreign")) {
+        ZSharpInstruction *instruction;
+        if (!consume_type(parser, ZTOKEN_DOT, "'.' after Foreign") ||
+            !consume_word(parser, "release") ||
+            !consume_type(parser, ZTOKEN_LEFT_PAREN, "'(' after Foreign.release") ||
+            !parse_expression(parser, function) ||
+            !consume_type(parser, ZTOKEN_RIGHT_PAREN, "')' after the foreign object") ||
+            !consume_type(parser, ZTOKEN_COLON, "':' after Foreign.release")) return 0;
+        instruction = emit(parser, function, ZOP_CALL_METHOD);
+        if (!instruction) return 0;
+        instruction->operand = zsharp_copy_text("$foreign.release", 16);
+        return instruction->operand != NULL;
     }
     if (match_word(parser, "File")) {
         char *method;
@@ -2534,9 +2771,15 @@ static int parse_statement(Parser *parser, ZSharpFunction *function) {
     if (match_word(parser, "text")) {
         return parse_text_statement(parser, function);
     }
+    if (match_word(parser, "status")) {
+        return parse_status_statement(parser, function);
+    }
     if (match_word(parser, "function")) return parse_function_local(parser, function);
-    if (match_word(parser, "JSON")) {
+    if (zsharp_token_equals(&parser->current, "JSON") ||
+        zsharp_token_equals(&parser->current, "object")) {
         ZSharpInstruction *instruction;
+        int generic_object = match_word(parser, "object");
+        if (!generic_object) advance_token(parser);
         char *name = consume_name(parser, "a local JSON variable name");
         if (name == NULL ||
             !consume_type(parser, ZTOKEN_EQUAL,
@@ -2553,6 +2796,10 @@ static int parse_statement(Parser *parser, ZSharpFunction *function) {
             return 0;
         }
         instruction->operand = name;
+        if (generic_object) {
+            instruction->call_room = zsharp_copy_text("$object", 7);
+            if (!instruction->call_room) return 0;
+        }
         return 1;
     }
     if (match_word(parser, "feed")) return parse_feed(parser, function);
@@ -3392,7 +3639,9 @@ static int parse_declaration(Parser *parser, ZSharpRoom *room, int is_public,
 }
 
 static int parse_member(Parser *parser, ZSharpRoom *room) {
-    int is_public;
+    /* File-only access is enforced on the containing room. Members in that
+     * room may be shared with other rooms in the same file by default. */
+    int is_public = room->visibility != ZVISIBILITY_SILENT;
     int is_horde;
     int parsed = 0;
     size_t variable_count;
@@ -3403,11 +3652,14 @@ static int parse_member(Parser *parser, ZSharpRoom *room) {
             const ZSharpCustomSyntaxRule *rule = &parser->syntax_rules[i];
             if (rule->declaration_kind == 2 && zsharp_token_equals(&parser->current, rule->pattern)) {
                 parser->member_room = room;
-                return parse_declaration(parser, room, 1, rule);
+                return parse_declaration(parser, room, is_public, rule);
             }
         }
     }
-    if (!parse_visibility(parser, &is_public)) return 0;
+    if (zsharp_token_equals(&parser->current, "noticed") ||
+        zsharp_token_equals(&parser->current, "silent")) {
+        if (!parse_visibility(parser, &is_public)) return 0;
+    }
     parser->member_room = room;
     is_horde = match_word(parser, "horde");
     if (room->is_horde && !is_horde) {
@@ -3474,19 +3726,9 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     ZSharpImport *import;
     int foreign_language = 0;
     parts[part_count++] = consume_name(parser, "an imported project name");
-    if (!parser->failed &&
-        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "c") == 0 ||
-         strcmp(parts[0], "cpp") == 0 ||
-         strcmp(parts[0], "kt") == 0 ||
-         strcmp(parts[0], "rust") == 0) &&
+    if (!parser->failed && parser_foreign_language(parts[0]) &&
         match_type(parser, ZTOKEN_COLON)) {
-        foreign_language = strcmp(parts[0], "py") == 0 ? 1 :
-                           strcmp(parts[0], "js") == 0 ? 2 :
-                           strcmp(parts[0], "lua") == 0 ? 3 :
-                           strcmp(parts[0], "cpp") == 0 ? 4 :
-                           strcmp(parts[0], "rust") == 0 ? 5 :
-                           strcmp(parts[0], "c") == 0 ? 6 : 7;
+        foreign_language = parser_foreign_language(parts[0]);
         parts[part_count++] = consume_name(parser,
                                            "the foreign project name");
     }
@@ -3532,12 +3774,7 @@ static int parse_import(Parser *parser, ZSharpRoom *room) {
     for (index = 0; index < part_count; index++) free(parts[index]);
     if (path == NULL) return 0;
     if (foreign_language) {
-        const char *prefix = foreign_language == 1 ? "py" :
-                             foreign_language == 2 ? "js" :
-                             foreign_language == 3 ? "lua" :
-                             foreign_language == 4 ? "cpp" :
-                             foreign_language == 5 ? "rust" :
-                             foreign_language == 6 ? "c" : "kt";
+        const char *prefix = foreign_prefixes[foreign_language];
         size_t prefix_length = strlen(prefix);
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {
@@ -3575,19 +3812,9 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     ZSharpImport *import;
     int foreign_language = 0;
     parts[part_count++] = consume_name(parser, "an imported project name");
-    if (!parser->failed &&
-        (strcmp(parts[0], "py") == 0 || strcmp(parts[0], "js") == 0 ||
-         strcmp(parts[0], "lua") == 0 || strcmp(parts[0], "c") == 0 ||
-         strcmp(parts[0], "cpp") == 0 ||
-         strcmp(parts[0], "kt") == 0 ||
-         strcmp(parts[0], "rust") == 0) &&
+    if (!parser->failed && parser_foreign_language(parts[0]) &&
         match_type(parser, ZTOKEN_COLON)) {
-        foreign_language = strcmp(parts[0], "py") == 0 ? 1 :
-                           strcmp(parts[0], "js") == 0 ? 2 :
-                           strcmp(parts[0], "lua") == 0 ? 3 :
-                           strcmp(parts[0], "cpp") == 0 ? 4 :
-                           strcmp(parts[0], "rust") == 0 ? 5 :
-                           strcmp(parts[0], "c") == 0 ? 6 : 7;
+        foreign_language = parser_foreign_language(parts[0]);
         parts[part_count++] = consume_name(parser,
                                            "the foreign project name");
     }
@@ -3633,12 +3860,7 @@ static int parse_window_import(Parser *parser, ZSharpWindow *window) {
     for (index = 0; index < part_count; index++) free(parts[index]);
     if (path == NULL) return 0;
     if (foreign_language) {
-        const char *prefix = foreign_language == 1 ? "py" :
-                             foreign_language == 2 ? "js" :
-                             foreign_language == 3 ? "lua" :
-                             foreign_language == 4 ? "cpp" :
-                             foreign_language == 5 ? "rust" :
-                             foreign_language == 6 ? "c" : "kt";
+        const char *prefix = foreign_prefixes[foreign_language];
         size_t prefix_length = strlen(prefix);
         char *qualified = (char *)malloc(strlen(path) + 2);
         if (qualified == NULL) {

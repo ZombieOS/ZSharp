@@ -682,6 +682,18 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
             settings_version(&parser, settings->zsharp_version, 1);
             settings_consume_type(&parser, ZTOKEN_COLON,
                                   "':' after the Z# version");
+        } else if (settings_match_word(&parser, "LaunchAtStart")) {
+            if (seen & 16384u) {
+                settings_fail(&parser, &parser.current, "duplicate LaunchAtStart setting");
+                break;
+            }
+            seen |= 16384u;
+            settings->has_launch_at_start = 1;
+            settings_consume_type(&parser, ZTOKEN_COLON, "':' after LaunchAtStart");
+            if (settings_match_word(&parser, "alive")) settings->launch_at_start = 1;
+            else if (settings_match_word(&parser, "dead")) settings->launch_at_start = 0;
+            else settings_fail(&parser, &parser.current, "LaunchAtStart expects alive or dead");
+            settings_consume_type(&parser, ZTOKEN_COLON, "':' after LaunchAtStart value");
         } else if (settings_match_word(&parser, "Dependencies")) {
             if ((seen & 64u) != 0) {
                 settings_fail(&parser, &parser.current,
@@ -961,6 +973,11 @@ int zsharp_settings_parse_source(const char *source, ZSharpSettings *settings,
     }
     if (!parser.failed && settings->xr_required && !settings->xr_allowed)
         settings_fail(&parser, &parser.current, "XR required: true requires AllowedDevices XR: true");
+    if (!parser.failed && settings->has_launch_at_start &&
+        (settings->zsharp_version[0] < 1 ||
+         (settings->zsharp_version[0] == 1 &&
+          settings->zsharp_version[1] < 4)))
+        settings_fail(&parser, &parser.current, "LaunchAtStart requires ZSharp: [1.4.0.0]: or newer");
     if (!parser.failed && (seen & (4096u | 8192u)) &&
         settings->zsharp_version[0] == 1 && settings->zsharp_version[1] < 3)
         settings_fail(&parser, &parser.current, "AllowedDevices/XR require ZSharp: [1.3.0.0]: or newer");

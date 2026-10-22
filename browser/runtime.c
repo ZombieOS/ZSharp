@@ -74,6 +74,8 @@ static Task *tasks, *active;
 static unsigned next_task_id;
 static ZSharpProgram modules[64];
 static size_t module_count;
+static unsigned entry_modules[64];
+static size_t entry_count;
 static ZSharpProgram *current_program = &modules[0];
 #define program (*current_program)
 static int initialized;
@@ -551,7 +553,7 @@ static int execute_frame(ZSharpRoom *room, ZSharpFunction *function, Frame *save
             ok=regex_execute(in,arguments,&v);for(i=0;i<n;i++)drop(&arguments[i]);
             if(ok)stack[sp++]=v;break;
         }
-        case ZOP_STORE_LOCAL: case ZOP_STORE_LOCAL_TEXT: case ZOP_STORE_LOCAL_VALUE: case ZOP_STORE_LOCAL_FUNCTION: case ZOP_STORE_LOCAL_TEXT_ARRAY:
+        case ZOP_STORE_LOCAL: case ZOP_STORE_LOCAL_TEXT: case ZOP_STORE_LOCAL_VALUE: case ZOP_STORE_LOCAL_FUNCTION: case ZOP_STORE_LOCAL_TEXT_ARRAY: case ZOP_STORE_LOCAL_STATUS:
         case ZOP_STORE_NAME: case ZOP_STORE_GLOBAL: case ZOP_STORE_FIELD:
             if(!sp){ok=fail("stack underflow");break;}
             v=stack[--sp]; memset(&stack[sp],0,sizeof(Value));
@@ -560,7 +562,9 @@ static int execute_frame(ZSharpRoom *room, ZSharpFunction *function, Frame *save
             if(in->op==ZOP_STORE_LOCAL_TEXT && v.type!=ZVALUE_TEXT){drop(&v);v=text("");host_print("runtime warning: local text received non-text; assignment skipped");}
             if(in->op==ZOP_STORE_LOCAL_FUNCTION && v.type!=ZVALUE_FUNCTION){drop(&v);ok=fail("function reference requires a function value");break;}
             if(in->op==ZOP_STORE_LOCAL_TEXT_ARRAY && v.type!=ZVALUE_TEXT_ARRAY){drop(&v);ok=fail("text() requires a text array");break;}
+            if(in->op==ZOP_STORE_LOCAL_STATUS && v.type!=ZVALUE_STATUS){drop(&v);ok=fail("local status requires alive, dead, or a status-valued expression");break;}
             if(i){
+                if(in->op==ZOP_STORE_NAME && locals[i-1].value.type==ZVALUE_STATUS && v.type!=ZVALUE_STATUS){drop(&v);host_print("runtime warning: status assignment has the wrong type; assignment skipped");break;}
                 if((in->op==ZOP_STORE_GLOBAL && (v.type!=ZVALUE_NUMBER || locals[i-1].value.type!=ZVALUE_NUMBER)) ||
                    (in->op==ZOP_STORE_FIELD && (v.type!=ZVALUE_TEXT || locals[i-1].value.type!=ZVALUE_TEXT))){drop(&v);ok=fail("typed assignment requires matching variable types");break;}
                 drop(&locals[i-1].value);locals[i-1].value=v;
@@ -761,7 +765,7 @@ __attribute__((visibility("default"))) int bzvm_settings(const char *source){
 __attribute__((visibility("default"))) void bzvm_reset(void){size_t i;
     bzvm_cancel();for(i=0;i<module_count;i++)zsharp_program_free(&modules[i]);
     while(globals){Global *next=globals->next;drop(&globals->value);free(globals);globals=next;}
-    module_count=0;current_program=&modules[0];initialized=0;failure[0]=0;depth=0;
+    module_count=0;entry_count=0;current_program=&modules[0];initialized=0;failure[0]=0;depth=0;
 }
 __attribute__((visibility("default"))) int bzvm_load(const char *source,const char *name){
     ZSharpDiagnostic diagnostic;
@@ -773,6 +777,28 @@ __attribute__((visibility("default"))) int bzvm_load(const char *source,const ch
         snprintf(failure,sizeof(failure),"%s:%u:%u: %s",name,diagnostic.line,diagnostic.column,diagnostic.message);return 0;
     }
     if(modules[module_count].has_window){zsharp_program_free(&modules[module_count]);return fail("native windows are not supported in bZVM");}
+    {
+        size_t r,f,i;
+        for(r=0;r<modules[module_count].room_count;r++)
+            for(f=0;f<modules[module_count].rooms[r].function_count;f++)
+                for(i=0;i<modules[module_count].rooms[r].functions[f].instruction_count;i++) {
+                    ZSharpOpCode op=modules[module_count].rooms[r].functions[f].instructions[i].op;
+                    if(op==ZOP_SYSTEM) {
+                        zsharp_program_free(&modules[module_count]);
+                        return fail("Speech, Microphone, Speaker and Desktop are desktop-only APIs, not available in bZVM");
+                    }
+                    if(op==ZOP_APPLICATION_QUIT || op==ZOP_APPLICATION_QUIT_MODE) {
+                        zsharp_program_free(&modules[module_count]);
+                        return fail("Application.Quit requires a desktop app/game and is not supported in bZVM");
+                    }
+                    if(op==ZOP_STORE_LOCAL_STATUS && has_settings &&
+                       (settings.zsharp_version[0]<1 ||
+                        (settings.zsharp_version[0]==1 && settings.zsharp_version[1]<4))) {
+                        zsharp_program_free(&modules[module_count]);
+                        return fail("local status declarations require ZSharp: [1.4.0.0]: or newer in project.zsettings");
+                    }
+                }
+    }
     if(has_settings && (settings.zsharp_version[0]<1 ||
        (settings.zsharp_version[0]==1 && settings.zsharp_version[1]<3))) {
         size_t r,f,i;
@@ -786,6 +812,12 @@ __attribute__((visibility("default"))) int bzvm_load(const char *source,const ch
                     }
     }
     return (int)++module_count;
+}
+__attribute__((visibility("default"))) int bzvm_entry(unsigned module){size_t i;
+    if(initialized)return fail("browser entry scripts must be selected before bzvm_run");
+    if(module>=module_count)return fail("browser entry script index is not loaded");
+    for(i=0;i<entry_count;i++)if(entry_modules[i]==module){failure[0]=0;return 1;}
+    entry_modules[entry_count++]=module;failure[0]=0;return 1;
 }
 __attribute__((visibility("default"))) unsigned bzvm_import_count(unsigned module){size_t r;unsigned count=0;
     if(module>=module_count)return 0;
@@ -808,20 +840,30 @@ __attribute__((visibility("default"))) const char *bzvm_json_path(unsigned modul
         }
     }return "";
 }
-__attribute__((visibility("default"))) int bzvm_run(void){size_t r,f;
+__attribute__((visibility("default"))) int bzvm_run(void){size_t e,r,f;
     if(!module_count)return fail("no browser startup script loaded");
     current_program=&modules[0];initialized=1;budget=100000;depth=0;
     {size_t m,v;for(m=0;m<module_count;m++)for(r=0;r<modules[m].room_count;r++)for(v=0;v<modules[m].rooms[r].variable_count;v++) {
         ZSharpVariable *definition=&modules[m].rooms[r].variables[v];
         if(definition->object_type && !strncmp(definition->object_type,"$json:",6) && !global_value(&modules[m].rooms[r],definition->name))return 0;
     }}
-    for(r=0;r<program.room_count;r++)for(f=0;f<program.rooms[r].function_count;f++)
-        if(!strcmp(program.rooms[r].functions[f].name,"Start") && !program.rooms[r].functions[f].parameter_count &&
-            !program.rooms[r].functions[f].disable_auto_run) {
-            Task *task=new_task();int result;if(!task)return 0;
-            result=execute(&program.rooms[r],&program.rooms[r].functions[f]);
-            if(!finish_task(task,result))return 0;
+    /* Only HTML entries auto-start. Imported modules remain callable without
+       auto-running Start, and older hosts retain their module-zero entry. */
+    for(e=0;e<(entry_count ? entry_count : 1);e++) {
+        ZSharpProgram *entry=&modules[entry_count ? entry_modules[e] : 0];
+        for(r=0;r<entry->room_count;r++)for(f=0;f<entry->rooms[r].function_count;f++) {
+            ZSharpRoom *room=&entry->rooms[r];
+            ZSharpFunction *function=&room->functions[f];
+            if(!strcmp(function->name,"Start") && !function->parameter_count && !function->disable_auto_run) {
+                Task *task;int result;
+                current_program=entry;budget=100000;depth=0;
+                task=new_task();if(!task)return 0;
+                result=execute(room,function);
+                if(!finish_task(task,result))return 0;
+            }
         }
+    }
+    current_program=&modules[0];
     return 1;
 }
 __attribute__((visibility("default"))) int bzvm_start(const char *source,const char *name){

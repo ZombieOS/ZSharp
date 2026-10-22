@@ -1,4 +1,4 @@
-/* Z# 1.3.0.0 browser prototype. JavaScript is host glue, not a Z# interpreter. */
+/* Z# 1.4.0.0 browser prototype. JavaScript is host glue, not a Z# interpreter. */
 (() => {
   "use strict";
   const loader = document.currentScript;
@@ -8,10 +8,10 @@
     console.error("[bZVM]", error);
     window.dispatchEvent(new CustomEvent("bzvm:error", {detail: String(error.message || error)}));
   };
+  let dispose = () => {};
   async function boot() {
     const scripts = [...document.querySelectorAll('script[type="text/zsharp"]')];
     if (!scripts.length) return;
-    if (scripts.length !== 1) throw new Error("The bZVM prototype supports one Z# script per page.");
     // View-only authored sources: never parse or execute Z# as JavaScript.
     // An empty script anchors a source map containing the exact original text.
     const exposeSource = module => {
@@ -36,6 +36,7 @@
     let instance, hostError;
     let project;
     const jsonFiles = new Map();
+    const requests = new Map(), sockets = new Map();
     const jsonFile = path => {
       if (!path || /[\u0000-\u001f]/.test(path) || path.includes('\\') || path.includes('%') || path.includes('?') || path.includes('#') ||
           path.split('/').some(part => !part || part === '.' || part === '..' || part.includes(':')))
@@ -97,6 +98,26 @@
     const keydown = event => keyboard(event, true), keyup = event => keyboard(event, false);
     const blur = () => { for (const key of keys.values()) if (key.held) {key.held=false;key.released++;} };
     const move = event => {pointer.xpos=event.clientX;pointer.ypos=event.clientY;};
+    dispose = () => {
+      if (stopped) return;
+      stopped = true;
+      for (const entry of jsonFiles.values()) entry.controller.abort();
+      jsonFiles.clear();
+      for (const request of requests.values()) {
+        clearTimeout(request.timer); request.active = false; request.controller.abort();
+      }
+      for (const entry of sockets.values()) try { entry.socket.close(1000); } catch (_) {}
+      requests.clear(); sockets.clear();
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear(); instance?.exports.bzvm_cancel();
+      for (const unbind of bindings.values()) unbind();
+      bindings.clear();
+      window.removeEventListener?.('keydown', keydown); window.removeEventListener?.('keyup', keyup);
+      window.removeEventListener?.('blur', blur); window.removeEventListener?.('pointermove', move);
+      window.removeEventListener?.('pagehide', dispose);
+      inputSessions.clear();
+    };
+    window.addEventListener('pagehide', dispose, {once:true});
     window.addEventListener('keydown', keydown); window.addEventListener('keyup', keyup);
     window.addEventListener('blur', blur); window.addEventListener('pointermove', move);
     let platform = null;
@@ -142,7 +163,6 @@
       if(property === 'value' && nodes.some(node => !('value' in node))) throw new Error('Element has no input value');
       return {nodes,multiple,property};
     };
-    const requests = new Map(), sockets = new Map();
     let requestSerial=0;
     const dispatch = (target,args=[]) => {
       if(!target || stopped)return;
@@ -405,17 +425,40 @@
         project = {id: read(instance.exports.bzvm_project_id()), name: read(instance.exports.bzvm_project_name()), root: new URL(".", settingsURL).href};
       } finally { instance.exports.free(pointer); }
     }
-    const script = scripts[0];
-    let source = script.textContent;
-    let name = script.dataset.name || "Main";
-    if (script.src) {
-      const response = await fetch(script.src);
-      if (!response.ok) throw new Error(`Z# script download failed: HTTP ${response.status}`);
-      source = await response.text(); name = new URL(script.src).pathname.split("/").pop().replace(/\.zsharp$/i, "");
-    }
     instance.exports.bzvm_reset();
-    const pending = [{source, name, url: script.src || location.href}];
-    const requested = new Set([new URL(script.src || location.href).href]);
+    // HTML tags select startup modules; imports select callable dependencies.
+    // Queue every HTML entry first so imports cannot change startup order.
+    const pending = [], entries = [], requested = new Map(), inlineModules = new Map();
+    const sourceKey = value => {
+      const url = new URL(value, document.baseURI || location.href);
+      // Cache-busting tags and ordinary imports refer to the same source file.
+      url.search = ''; url.hash = '';
+      return url.href;
+    };
+    for (let index = 0; index < scripts.length; index++) {
+      const script = scripts[index];
+      const url = script.src ? new URL(script.src, document.baseURI || location.href).href : location.href;
+      const key = script.src ? sourceKey(url) : null;
+      if (key && requested.has(key)) continue;
+      if (pending.length >= 64) throw new Error('Browser project exceeds the 64-file prototype limit');
+      let source = script.textContent;
+      let name = script.dataset?.name || (scripts.length === 1 ? 'Main' : 'Inline' + (index + 1));
+      if (script.src) {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Z# script download failed: HTTP ${response.status} (${url})`);
+        source = await response.text();
+        name = new URL(url).pathname.split('/').pop().replace(/\.zsharp$/i, '');
+      } else {
+        if (!/^[A-Za-z_][A-Za-z_0-9]*$/.test(name)) throw new Error(`Invalid inline Z# filename '${name}'; data-name must be an identifier.`);
+      }
+      const module = {source, name, url};
+      pending.push(module); entries.push(module);
+      if (key) requested.set(key, module);
+      else {
+        if (inlineModules.has(name)) throw new Error(`Duplicate Z# filename '${name}'; use unique script filenames.`);
+        inlineModules.set(name, module);
+      }
+    }
     const filenames = new Set();
     let totalBytes = 0;
     for (let index = 0; index < pending.length; index++) {
@@ -429,22 +472,28 @@
       try {
         moduleIndex = instance.exports.bzvm_load(sourcePointer,namePointer) - 1;
         if (moduleIndex < 0) throw new Error(read(instance.exports.bzvm_error()));
+        module.index = moduleIndex;
       } finally { instance.exports.free(sourcePointer);instance.exports.free(namePointer); }
       exposeSource(module);
       for (let i = 0; i < instance.exports.bzvm_import_count(moduleIndex); i++) {
         const path = read(instance.exports.bzvm_import(moduleIndex,i));
+        if (path === 'ZSharp.Application') throw new Error('ZSharp.Application requires a desktop app/game and is not supported in bZVM.');
+        if (['ZSharp.Speech','ZSharp.Microphone','ZSharp.Speaker','ZSharp.Desktop'].includes(path))
+          throw new Error(`${path} is a desktop-only API and is not supported in bZVM.`);
         if (['ZSharp.Browser','ZSharp.HTTP','ZSharp.Websocket','ZSharp.JSON'].includes(path)) continue;
         if (!project) throw new Error('File imports require project.zsettings in the project root.');
         const parts = path.split('.');
         if (parts.shift() !== project.id) throw new Error(`Import '${path}' is not part of project '${project.id}'; external dependencies are not supported yet.`);
         if (!parts.length || parts.some(part => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) throw new Error(`Import '${path}' requires an explicit project-relative file path; wildcard imports are not supported yet.`);
+        if (parts.length === 1 && inlineModules.has(parts[0])) continue;
         const url = new URL(parts.join('/') + '.zsharp',project.root);
-        if (requested.has(url.href)) continue;
-        requested.add(url.href);
-        if (requested.size > 64) throw new Error('Browser project exceeds the 64-file prototype limit');
+        const key = sourceKey(url.href);
+        if (requested.has(key)) continue;
+        if (pending.length >= 64) throw new Error('Browser project exceeds the 64-file prototype limit');
         const response = await fetch(url);
         if (!response.ok) throw new Error(`Could not load import '${path}': HTTP ${response.status} (${url.pathname})`);
-        pending.push({source: await response.text(),name:parts.at(-1),url:url.href});
+        const imported = {source: await response.text(), name: parts.at(-1), url: url.href};
+        pending.push(imported); requested.set(key, imported);
       }
     }
     for(let module=0;module<pending.length;module++) {
@@ -453,23 +502,16 @@
         const entry=jsonFile(path);await entry.promise;if(entry.error)throw entry.error;
       }
     }
+    if (stopped) return;
+    if (typeof instance.exports.bzvm_entry !== 'function')
+      throw new Error('bZVM loader/binary version mismatch; update bzvm.js and bzvm.wasm together.');
+    for (const entry of entries) {
+      if (!instance.exports.bzvm_entry(entry.index)) throw new Error(read(instance.exports.bzvm_error()));
+    }
     if (!instance.exports.bzvm_run()) throw hostError || new Error(read(instance.exports.bzvm_error()));
-    window.addEventListener("pagehide",()=>{
-      stopped = true;
-      for(const entry of jsonFiles.values())entry.controller.abort();
-      jsonFiles.clear();
-      for(const request of requests.values()){clearTimeout(request.timer);request.active=false;request.controller.abort();}
-      for(const entry of sockets.values())try{entry.socket.close(1000);}catch(_){}
-      requests.clear();sockets.clear();
-      for(const timer of timers.values())clearTimeout(timer);
-      timers.clear(); instance.exports.bzvm_cancel();
-      for(const dispose of bindings.values())dispose(); bindings.clear();
-      window.removeEventListener?.('keydown',keydown);window.removeEventListener?.('keyup',keyup);
-      window.removeEventListener?.('blur',blur);window.removeEventListener?.('pointermove',move);
-      inputSessions.clear();
-    },{once:true});
     window.dispatchEvent(new CustomEvent("bzvm:ready", {detail: {project}}));
   }
-  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",()=>boot().catch(report),{once:true});
-  else boot().catch(report);
+  const start = () => boot().catch(error => { dispose(); report(error); });
+  if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",start,{once:true});
+  else start();
 })();

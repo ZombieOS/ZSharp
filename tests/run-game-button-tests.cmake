@@ -30,9 +30,10 @@ package_button(FALSE "click target must be")
 file(WRITE "${project}/Button.zobject" "${original}")
 file(READ "${project}/Main.zsharp" main_source)
 file(READ "${project}/project.zsettings" settings)
-string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.2.1.0]:" settings "${settings}")
+string(REPLACE "ZSharp: [1.0.2.1]:" "ZSharp: [1.4.0.0]:" settings "${settings}")
 file(WRITE "${project}/project.zsettings" "${settings}")
-string(REPLACE "Print(\"game start ran\"):" "Print(\"game start ran\"):\n  Application.Quit:\n  Print(\"UNREACHABLE AFTER QUIT\"):" quit_source "${main_source}")
+string(REPLACE "noticed room Game[] (" "noticed room Game[] (\n import ZSharp.Application():" main_source "${main_source}")
+string(REPLACE "Print(\"game start ran\"):" "Print(\"game start ran\"):\n  Application.Quit(\"tray\"):\n  Print(\"TRAY FALLBACK RETURNED\"):\n  Application.Quit(\"regular\"):\n  Print(\"UNREACHABLE AFTER QUIT\"):" quit_source "${main_source}")
 file(WRITE "${project}/Main.zsharp" "${quit_source}")
 package_button(TRUE "")
 if(WIN32)
@@ -40,7 +41,9 @@ if(WIN32)
  execute_process(COMMAND "${CMAKE_COMMAND}" -E env ZSHARP_GAME_RASTER_TEST=1 "${BIN}" run "${project}/Packages/ButtonTest.zgame"
   INPUT_FILE "${project}/quit-input.txt"
   TIMEOUT 15 RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
- if(NOT result EQUAL 0 OR NOT output MATCHES "game shutdown ran: started" OR output MATCHES "UNREACHABLE AFTER QUIT")
+ if(NOT result EQUAL 0 OR NOT output MATCHES "game shutdown ran: started" OR
+    NOT output MATCHES "TRAY FALLBACK RETURNED" OR
+    NOT error MATCHES "tray.*unsupported" OR output MATCHES "UNREACHABLE AFTER QUIT")
   message(FATAL_ERROR "Application.Quit lifecycle failed: ${result} ${output} ${error}")
  endif()
 endif()

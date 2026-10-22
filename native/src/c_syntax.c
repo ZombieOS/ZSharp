@@ -43,7 +43,7 @@ void zsharp_c_syntax_free(ZSharpCustomSyntaxRule *rules, size_t count) {
 
 static int reserved_start(const ZSharpToken *token) {
     static const char *reserved[] = {
-        "Print", "Function", "File", "number", "text", "JSON", "feed",
+        "Print", "Function", "Foreign", "File", "number", "text", "JSON", "object", "feed",
         "if", "loop", "continue", "wait", "delay", "status",
         "Math", "Regex", "input", "Game", "Application", "alive", "dead",
         "true", "false", "navPoint"

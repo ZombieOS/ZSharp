@@ -1,6 +1,7 @@
 zsharp = type.script
 noticed room Main[] (
  import ZSharp.XR():
+ import ZSharp.Application():
  noticed status Green = alive:
  noticed number UIActivations = 0:
  noticed text LastTrackingStatus = "":
@@ -116,7 +117,7 @@ noticed room Main[] (
     Print("[Status] pinch L/R=" + XR.left.hand.pinch.value + "/" + XR.right.hand.pinch.value):
    ) else ()
    StatusKeyDown = input.key.p:
-   if[input.key.escape] ( Application.Quit: ) else ()
+   if[input.key.escape] ( Application.Quit("regular"): ) else ()
    wait(8ms):
   )
  )

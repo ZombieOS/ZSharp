@@ -6,6 +6,14 @@
 #include "decimal.h"
 #include "game_runtime.h"
 #include "time_api.h"
+#include "system_ops.h"
+#include "audio_api.h"
+#include "speech_api.h"
+#include "speech_input.h"
+#include "desktop_api.h"
+#include "interop_process.h"
+#include "interop_embedded.h"
+#include "interop_script.h"
 #include "hash.h"
 #include "project.h"
 #include "updater.h"
@@ -18,6 +26,7 @@
 #include "lualib.h"
 
 #include <math.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,6 +106,10 @@ typedef struct RuntimeObject {
     ZSharpRoom *room;
     RuntimeField *fields;
     size_t field_count;
+    const char *foreign_language;
+    const char *foreign_module;
+    const char *foreign_ref;
+    int foreign_released;
 } RuntimeObject;
 
 typedef struct RuntimeHeap {
@@ -122,6 +135,11 @@ typedef struct RuntimeForeignScope {
     char *local_module;
 } RuntimeForeignScope;
 
+typedef struct RuntimeSpeechService {
+    char *root;
+    ZSharpSpeechService *service;
+} RuntimeSpeechService;
+
 typedef struct RuntimeModuleCache {
     RuntimeModule *modules;
     size_t module_count;
@@ -137,6 +155,10 @@ typedef struct RuntimeModuleCache {
     size_t network_count;
     uint64_t network_poll;
     struct WindowTaskYield *window_yield;
+    RuntimeSpeechService *speech;
+    size_t speech_count;
+    struct InteropVMState *interop;
+    struct RuntimeModuleCache *interop_owner;
 } RuntimeModuleCache;
 
 typedef struct RuntimeNetworkService {
@@ -157,6 +179,11 @@ static int pump_native_services(RuntimeHeap *heap, RuntimeModuleCache *cache,
 
 static int cooperative_window_wait(RuntimeModuleCache *cache, RuntimeHeap *heap,
     const char *milliseconds, char *error, size_t error_size);
+static int cooperative_window_suspend(RuntimeModuleCache *cache, int *released,
+    char *error, size_t error_size);
+static int cooperative_window_resume(RuntimeModuleCache *cache, RuntimeHeap *heap,
+    int released, char *error, size_t error_size);
+static int system_operation_blocks(const ZSharpSystemOperation *operation);
 
 static char *heap_add_text(RuntimeHeap *heap, char *text);
 
@@ -1899,6 +1926,7 @@ static void free_runtime_array(ZSharpVariable *array) {
         free(array->number_items[index]);
     free(array->text_items);
     free(array->number_items);
+    free(array->object_items);
     free(array);
 }
 
@@ -2738,6 +2766,8 @@ static int resolve_room_variable(ZSharpProgram *target_program,
     return 1;
 }
 
+#include "interop_vm.inc"
+
 static int resolve_value_path(
     ZSharpProgram *program, ZSharpRoom *room, RuntimeObject *current_object,
     LocalValue *locals, size_t local_count, RuntimeHeap *heap,
@@ -2752,6 +2782,20 @@ static int resolve_value_path(
     if (!split_value_path(instruction->operand, instruction->argument_count,
                           &storage, parts, &part_count, error, error_size)) {
         return 0;
+    }
+    if (part_count >= 2 && lookup_name(room, current_object, locals, local_count,
+            parts[0], value) && value->type == ZVALUE_OBJECT && value->object) {
+        size_t member;
+        for (member = 1; member < part_count; member++) {
+            if (!interop_member_get(value->object, parts[member], value, error, error_size)) {
+                free(storage); return 0;
+            }
+            if (member + 1 < part_count && (value->type != ZVALUE_OBJECT || !value->object)) {
+                snprintf(error, error_size, "'%s' is not an object", parts[member]);
+                free(storage); return 0;
+            }
+        }
+        free(storage); return 1;
     }
     if ((part_count == 2 &&
          !lookup_name(room, current_object, locals, local_count, parts[0],
@@ -3241,6 +3285,397 @@ static int network_instruction(ZSharpProgram *program,ZSharpRoom *room,const ZSh
     return ok;
 }
 
+static int system_cancelled(void *context) {
+    RuntimeModuleCache *cache = (RuntimeModuleCache *)context;
+    return cache->window_runtime != NULL &&
+        cache->window_runtime->is_cancelled != NULL &&
+        cache->window_runtime->is_cancelled(cache->window_runtime->state);
+}
+
+static int system_python_paths(const char *filename, char *python,
+                                size_t python_size, char *helper,
+                                size_t helper_size, char *error,
+                                size_t error_size) {
+    char *slash, *back;
+    const char *override = getenv("ZSHARP_SPEECH_PYTHON");
+    const char *home_override = getenv("ZSHARP_SPEECH_HOME");
+    const char *bridge_override = getenv("ZSHARP_PYTHON_BRIDGE");
+    const char *runtime_override = getenv("ZSHARP_PYTHON_RUNTIME");
+    char home[2300] = {0}, managed[2600];
+    char executable[2300] = {0};
+    python[0] = '\0'; helper[0] = '\0';
+    /* Speech has its own optional environment. Do not bootstrap the unrelated
+     * language-bridge runtime or require zsharp_bridge.py just to locate it. */
+#ifdef _WIN32
+    {
+        WCHAR wide[2300];
+        DWORD length = GetModuleFileNameW(NULL, wide, sizeof(wide) / sizeof(wide[0]));
+        if (length && length < sizeof(wide) / sizeof(wide[0]))
+            WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+                                executable, sizeof(executable), NULL, NULL);
+    }
+#elif defined(__APPLE__)
+    {
+        uint32_t length = (uint32_t)sizeof(executable);
+        if (_NSGetExecutablePath(executable, &length) != 0) executable[0] = '\0';
+    }
+#else
+    {
+        ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+        if (length > 0) executable[length] = '\0';
+    }
+#endif
+    slash = strrchr(executable, '/');
+    back = strrchr(executable, '\\');
+    if (back != NULL && (slash == NULL || back > slash)) slash = back;
+    if (slash != NULL) *slash = '\0';
+    else executable[0] = '\0';
+    if (bridge_override != NULL && *bridge_override) {
+        if (strlen(bridge_override) >= helper_size) {
+            snprintf(error, error_size, "desktop speech helper path is too long");
+            return 0;
+        }
+        snprintf(helper, helper_size, "%s", bridge_override);
+        slash = strrchr(helper, '/');
+        back = strrchr(helper, '\\');
+        if (back != NULL && (slash == NULL || back > slash)) slash = back;
+        if (slash == NULL || (size_t)(slash + 1 - helper) + strlen(filename) >= helper_size) {
+            snprintf(error, error_size, "desktop speech helper path is invalid");
+            return 0;
+        }
+        strcpy(slash + 1, filename);
+    } else if (*executable) {
+        int count = snprintf(helper, helper_size, "%s/python/%s", executable, filename);
+        if (count < 0 || (size_t)count >= helper_size) {
+            snprintf(error, error_size, "desktop speech helper path is too long");
+            return 0;
+        }
+    } else {
+        snprintf(error, error_size, "could not locate the desktop speech helper");
+        return 0;
+    }
+    if (home_override != NULL) {
+        if (!*home_override) {
+            snprintf(error, error_size, "ZSHARP_SPEECH_HOME must be an absolute directory");
+            return 0;
+        }
+        if (strlen(home_override) >= sizeof(home)) {
+            snprintf(error, error_size, "ZSHARP_SPEECH_HOME is too long");
+            return 0;
+        }
+        snprintf(home, sizeof(home), "%s", home_override);
+#ifdef _WIN32
+        if (!((home[0] == '/' && home[1] == '/') ||
+              (home[0] == '\\' && home[1] == '\\') ||
+              (strlen(home) >= 3 && home[1] == ':' && (home[2] == '/' || home[2] == '\\')))) {
+#else
+        if (home[0] != '/') {
+#endif
+            snprintf(error, error_size, "ZSHARP_SPEECH_HOME must be an absolute directory");
+            return 0;
+        }
+    } else {
+#ifdef _WIN32
+        WCHAR local[2048];
+        DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", local,
+                                                sizeof(local) / sizeof(local[0]));
+        if (length && length < sizeof(local) / sizeof(local[0])) {
+            char local_utf8[2000];
+            if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, local, -1,
+                                    local_utf8, sizeof(local_utf8), NULL, NULL))
+                snprintf(home, sizeof(home), "%s/ZombieOS/ZSharp/speech", local_utf8);
+        }
+#else
+        const char *user_home = getenv("HOME");
+#ifdef __APPLE__
+        if (user_home && *user_home == '/')
+            snprintf(home, sizeof(home), "%s/Library/Application Support/ZSharp/speech", user_home);
+#else
+        const char *data_home = getenv("XDG_DATA_HOME");
+        if (data_home && *data_home == '/')
+            snprintf(home, sizeof(home), "%s/zsharp/speech", data_home);
+        else if (user_home && *user_home == '/')
+            snprintf(home, sizeof(home), "%s/.local/share/zsharp/speech", user_home);
+#endif
+#endif
+    }
+    if (override != NULL) {
+        if (!*override || strlen(override) >= python_size) {
+            snprintf(error, error_size, "ZSHARP_SPEECH_PYTHON must identify a Python executable"); return 0;
+        }
+        snprintf(python, python_size, "%s", override);
+    } else if (*home) {
+#ifdef _WIN32
+        WCHAR wide[3000];
+        snprintf(managed, sizeof(managed), "%s/venv/Scripts/python.exe", home);
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, managed, -1, wide,
+                                sizeof(wide) / sizeof(wide[0])) &&
+            GetFileAttributesW(wide) != INVALID_FILE_ATTRIBUTES && strlen(managed) < python_size)
+            snprintf(python, python_size, "%s", managed);
+#else
+        snprintf(managed, sizeof(managed), "%s/venv/bin/python", home);
+        if (access(managed, X_OK) == 0 && strlen(managed) < python_size)
+            snprintf(python, python_size, "%s", managed);
+#endif
+    }
+    if (!*python && runtime_override != NULL && *runtime_override) {
+        if (strlen(runtime_override) >= python_size) {
+            snprintf(error, error_size, "ZSHARP_PYTHON_RUNTIME is too long"); return 0;
+        }
+        snprintf(python, python_size, "%s", runtime_override);
+    }
+    if (!*python && *executable) {
+#ifdef _WIN32
+        WCHAR wide[3000];
+        snprintf(managed, sizeof(managed), "%s/python/python.exe", executable);
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, managed, -1, wide,
+                                sizeof(wide) / sizeof(wide[0])) &&
+            GetFileAttributesW(wide) != INVALID_FILE_ATTRIBUTES && strlen(managed) < python_size)
+            snprintf(python, python_size, "%s", managed);
+#else
+        snprintf(managed, sizeof(managed), "%s/python/bin/python3", executable);
+        if (access(managed, X_OK) == 0 && strlen(managed) < python_size)
+            snprintf(python, python_size, "%s", managed);
+#endif
+    }
+    if (!*python) {
+#ifdef _WIN32
+        snprintf(python, python_size, "python");
+#else
+        snprintf(python, python_size, "python3");
+#endif
+    }
+    return 1;
+}
+
+static ZSharpSpeechService *system_speech(RuntimeModuleCache *cache,
+                                          const char *root, char *error,
+                                          size_t error_size) {
+    char python[2048] = {0}, helper[2300] = {0}, ignored[512] = {0};
+    RuntimeSpeechService entry, *resized;
+    size_t index;
+    for (index = 0; index < cache->speech_count; index++)
+        if (strcmp(cache->speech[index].root, root) == 0)
+            return cache->speech[index].service;
+    /* Native system-voice presets do not depend on a Python installation. */
+    if (!system_python_paths("zsharp_voice.py", python, sizeof(python), helper,
+                              sizeof(helper), ignored, sizeof(ignored))) {
+        python[0] = '\0';
+        helper[0] = '\0';
+    }
+    entry.root = zsharp_copy_text(root, strlen(root));
+    entry.service = entry.root == NULL ? NULL :
+        zsharp_speech_create(root, python, helper, error, error_size);
+    if (entry.service == NULL) {
+        if (entry.root == NULL) snprintf(error, error_size, "out of memory");
+        free(entry.root);
+        return NULL;
+    }
+    resized = (RuntimeSpeechService *)realloc(cache->speech,
+        (cache->speech_count + 1) * sizeof(*resized));
+    if (resized == NULL) {
+        zsharp_speech_destroy(entry.service); free(entry.root);
+        snprintf(error, error_size, "out of memory"); return NULL;
+    }
+    cache->speech = resized;
+    cache->speech[cache->speech_count++] = entry;
+    return entry.service;
+}
+
+static FILE *system_open_file(const char *path) {
+#ifdef _WIN32
+    WCHAR wide[4096];
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
+                             sizeof(wide) / sizeof(wide[0]))) return NULL;
+    return _wfopen(wide, L"rb");
+#else
+    return fopen(path, "rb");
+#endif
+}
+
+static void system_remove_file(const char *path) {
+    if (path == NULL || !*path) return;
+#ifdef _WIN32
+    WCHAR wide[4096];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
+                            sizeof(wide) / sizeof(wide[0]))) DeleteFileW(wide);
+#else
+    remove(path);
+#endif
+}
+
+static int system_temp_file(char *path, size_t capacity, char *error,
+                             size_t error_size) {
+#ifdef _WIN32
+    WCHAR directory[MAX_PATH], filename[MAX_PATH];
+    DWORD length = GetTempPathW(MAX_PATH, directory);
+    if (!length || length >= MAX_PATH ||
+        !GetTempFileNameW(directory, L"zsi", 0, filename)) {
+        snprintf(error, error_size, "could not create a private speech result file");
+        return 0;
+    }
+    if (capacity > INT_MAX ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, filename, -1,
+                             path, (int)capacity, NULL, NULL)) {
+        DeleteFileW(filename);
+        if (capacity) path[0] = '\0';
+        snprintf(error, error_size, "speech result temporary path is too long");
+        return 0;
+    }
+#else
+    const char *directory = getenv("TMPDIR");
+    int descriptor;
+    int length = snprintf(path, capacity, "%s/zsharp-input-XXXXXX",
+                          directory && *directory == '/' ? directory : "/tmp");
+    if (length < 0 || (size_t)length >= capacity || (descriptor = mkstemp(path)) < 0) {
+        snprintf(error, error_size, "could not create a private speech result file");
+        return 0;
+    }
+    close(descriptor);
+#endif
+    return 1;
+}
+
+static int system_microphone_input(RuntimeModuleCache *cache, RuntimeHeap *heap,
+                                    RuntimeValue *result, char *error,
+                                    size_t error_size) {
+    char python[2048], helper[2300], recording[4096] = {0}, output[4096] = {0};
+    const char *preflight[] = {"preflight"};
+    const char *transcribe[3];
+    FILE *file;
+    char *text;
+    size_t length;
+    int ok = 0;
+    if (!system_python_paths("zsharp_speech_input.py", python, sizeof(python),
+                              helper, sizeof(helper), error, error_size) ||
+        !zsharp_speech_input_run(python, helper, preflight, 1, 30000,
+                                  system_cancelled, cache, error, error_size)) return 0;
+    /* Never open the microphone before checking the offline recognizer/model. */
+    if (!zsharp_audio_capture_temp(30.0, system_cancelled, cache, recording,
+                                   sizeof(recording), error, error_size)) return 0;
+    if (!system_temp_file(output, sizeof(output), error, error_size)) goto done;
+    transcribe[0] = "transcribe";
+    transcribe[1] = recording;
+    transcribe[2] = output;
+    if (!zsharp_speech_input_run(python, helper, transcribe, 3, 30000,
+                                  system_cancelled, cache, error, error_size)) goto done;
+    file = system_open_file(output);
+    if (file == NULL) { snprintf(error, error_size, "speech recognition returned no result"); goto done; }
+    text = (char *)malloc(65537);
+    if (text == NULL) { fclose(file); snprintf(error, error_size, "out of memory"); goto done; }
+    length = fread(text, 1, 65536, file);
+    if (ferror(file) || fgetc(file) != EOF || memchr(text, '\0', length) != NULL) {
+        free(text); fclose(file);
+        snprintf(error, error_size, "speech recognition result exceeds 64 KiB or is invalid");
+        goto done;
+    }
+    fclose(file);
+    text[length] = '\0';
+    result->type = ZVALUE_TEXT;
+    result->text = heap_add_text(heap, text);
+    ok = result->text != NULL;
+    if (!ok) snprintf(error, error_size, "out of memory");
+done:
+    system_remove_file(recording);
+    system_remove_file(output);
+    return ok;
+}
+
+
+static int system_instruction(const ZSharpInstruction *instruction,
+                               const RuntimeValue *arguments, RuntimeHeap *heap,
+                               const char *root, RuntimeModuleCache *cache,
+                               RuntimeValue *result, char *error,
+                               size_t error_size) {
+    const ZSharpSystemOperation *operation = zsharp_system_operation(instruction->operand);
+    const char *text[3] = {NULL, NULL, NULL};
+    size_t i;
+    int desktop_numbers = operation && !strcmp(operation->family, "Desktop") &&
+        strcmp(operation->name, "Desktop.typeText") && strcmp(operation->name, "Desktop.sendKeys");
+    char *name;
+    if (operation == NULL || instruction->argument_count < operation->minimum_arguments ||
+        instruction->argument_count > operation->maximum_arguments || instruction->argument_count > 3) {
+        snprintf(error, error_size, "invalid desktop API instruction");
+        return 0;
+    }
+    memset(result, 0, sizeof(*result));
+    for (i = 0; i < instruction->argument_count; i++) {
+        if (!strcmp(operation->name, "Microphone.record") && i == 1 &&
+            arguments[i].type != ZVALUE_NUMBER) {
+            snprintf(error, error_size, "Microphone.record requires a duration in s or ms");
+            return 0;
+        }
+        if (arguments[i].type == ZVALUE_TEXT) text[i] = arguments[i].text;
+        else if ((desktop_numbers ||
+                  (!strcmp(operation->name, "Microphone.record") && i == 1)) &&
+                 arguments[i].type == ZVALUE_NUMBER)
+            text[i] = arguments[i].number_text;
+        else {
+            snprintf(error, error_size, "%s argument %zu requires text%s",
+                     operation->name, i + 1, desktop_numbers ? " or a number" : "");
+            return 0;
+        }
+    }
+    if (!strcmp(operation->family, "Desktop"))
+        return zsharp_desktop_action(operation->name + 8, text,
+                                     instruction->argument_count, error, error_size);
+    if (!strcmp(operation->name, "Speech.createVoice")) {
+        ZSharpSpeechService *service = system_speech(cache, root, error, error_size);
+        return service != NULL && zsharp_speech_create_voice(service, text[0], text[1],
+            system_cancelled, cache, error, error_size);
+    }
+    if (!strcmp(operation->name, "Speech.speak")) {
+        ZSharpSpeechService *service = system_speech(cache, root, error, error_size);
+        return service != NULL && zsharp_speech_speak(service, text[0],
+            instruction->argument_count > 1 ? text[1] : "", error, error_size);
+    }
+    if (!strcmp(operation->name, "Speech.prepare")) {
+        ZSharpSpeechService *service = system_speech(cache, root, error, error_size);
+        return service != NULL && zsharp_speech_prepare(service, text[0],
+            system_cancelled, cache, error, error_size);
+    }
+    if (!strcmp(operation->name, "Microphone.setInputDevice"))
+        return zsharp_audio_select_input(text[0], error, error_size);
+    if (!strcmp(operation->name, "Speaker.setOutputDevice"))
+        return zsharp_audio_select_output(text[0], error, error_size);
+    if (!strcmp(operation->name, "Microphone.getInput"))
+        return system_microphone_input(cache, heap, result, error, error_size);
+    if (!strcmp(operation->name, "Microphone.record")) {
+        char *end = NULL;
+        double seconds = strtod(text[1], &end);
+        if (end == text[1] || *end != '\0') {
+            snprintf(error, error_size, "Microphone.record requires a duration in s or ms");
+            return 0;
+        }
+        return zsharp_audio_record(root, text[0], seconds, system_cancelled,
+                                   cache, error, error_size);
+    }
+    if (!strcmp(operation->name, "Microphone.level")) {
+        char level[64];
+        snprintf(level, sizeof(level), "%.9f", zsharp_audio_level());
+        result->type = ZVALUE_NUMBER;
+        result->number_text = heap_add_text(heap, zsharp_copy_text(level, strlen(level)));
+        if (result->number_text != NULL) return 1;
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    if (!strcmp(operation->name, "Microphone.getInputDevice") ||
+        !strcmp(operation->name, "Speaker.getOutputDevice")) {
+        name = !strcmp(operation->family, "Microphone") ?
+            zsharp_audio_selected_input(error, error_size) :
+            zsharp_audio_selected_output(error, error_size);
+        if (name == NULL && error[0] != '\0') return 0;
+        result->type = name == NULL ? ZVALUE_NULL : ZVALUE_TEXT;
+        if (name != NULL && (result->text = heap_add_text(heap, name)) == NULL) {
+            snprintf(error, error_size, "out of memory");
+            return 0;
+        }
+        return 1;
+    }
+    snprintf(error, error_size, "desktop API operation is not implemented");
+    return 0;
+}
+
 static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                             ZSharpFunction *function,
                             RuntimeObject *current_object,
@@ -3265,6 +3700,8 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
     char *callback_storage = NULL;
     size_t index;
     int ok = 1;
+    InteropVMFrame interop_frame;
+    InteropVMFrame *previous_interop_frame;
 
     /* Calls within an imported project keep its own relative files/imports. */
     for (index = 0; index < module_cache->module_count; index++)
@@ -3293,12 +3730,21 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
         free(locals);
         return 0;
     }
+    memset(&interop_frame, 0, sizeof(interop_frame));
+    interop_frame.program = program; interop_frame.room = room;
+    interop_frame.heap = heap; interop_frame.root = project_root;
+    interop_frame.providers = providers; interop_frame.provider_count = provider_count;
+    interop_frame.cache = module_cache; interop_frame.depth = depth;
+    previous_interop_frame = interop_current_frame;
+    interop_frame.callback_wrapper = previous_interop_frame ? previous_interop_frame->callback_wrapper : NULL;
+    interop_current_frame = &interop_frame;
     for (index = 0; index < function->parameter_count; index++) {
         if (arguments[index].type != function->parameters[index].type ||
             (arguments[index].type == ZVALUE_OBJECT &&
              (arguments[index].object == NULL ||
-              strcmp(arguments[index].object->room->name,
-                     function->parameters[index].object_type) != 0))) {
+              (function->parameters[index].object_type && strcmp(function->parameters[index].object_type, "object") &&
+               (!arguments[index].object->room || strcmp(arguments[index].object->room->name,
+                     function->parameters[index].object_type) != 0))))) {
             snprintf(error, error_size,
                      "argument %zu for '%s' has the wrong type", index + 1,
                      function->name);
@@ -3328,7 +3774,7 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
             goto done;
         }
         if (!module_cache->pumping_services &&
-            ((module_cache->service_count && instruction_index % 64 == 0) ||
+            (((module_cache->service_count || module_cache->speech) && instruction_index % 64 == 0) ||
              (module_cache->network_count && network_tick()-module_cache->network_poll>=10))) {
             int active;
             if (!pump_native_services(heap, module_cache, providers, provider_count,
@@ -3473,8 +3919,16 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 break;
             case ZOP_STORE_PATH:
-                if (!pop(stack, &stack_count, &value, error, error_size) ||
-                    !store_value_path(
+                if (!pop(stack, &stack_count, &value, error, error_size)) {
+                    ok = 0; goto done;
+                }
+                {
+                    int handled = interop_local_set(room, current_object, locals, local_count,
+                        instruction->operand, &value, error, error_size);
+                    if (handled < 0) { ok = 0; goto done; }
+                    if (handled) break;
+                }
+                if (!store_value_path(
                         program, room, heap, project_root, providers,
                         provider_count, module_cache, depth, instruction,
                         &value, error, error_size)) {
@@ -3597,6 +4051,42 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 }
                 break;
             }
+            case ZOP_SYSTEM: {
+                RuntimeValue system_arguments[3];
+                const ZSharpSystemOperation *operation =
+                    zsharp_system_operation(instruction->operand);
+                size_t count = instruction->argument_count, i;
+                int released = 0, call_ok;
+                if (count > 3 || operation == NULL) {
+                    snprintf(error, error_size, "invalid desktop API instruction");
+                    ok = 0; goto done;
+                }
+                for (i = count; i > 0; i--)
+                    if (!pop(stack, &stack_count, &system_arguments[i - 1], error, error_size)) {
+                        ok = 0; goto done;
+                    }
+                /* Like wait, blocking capture/model/text-entry operations publish
+                 * room scalars and let sibling tasks run (including live-level
+                 * UI updates). Arguments/locals remain in this task's private
+                 * program/heap until state is restored after the call. */
+                if (system_operation_blocks(operation) &&
+                    !cooperative_window_suspend(module_cache, &released,
+                                                   error, error_size)) {
+                    ok = 0; goto done;
+                }
+                call_ok = system_instruction(instruction, system_arguments, heap, project_root,
+                                                module_cache, &value, error, error_size);
+                /* Always reacquire, even after cancellation/backend failure,
+                 * before unwinding or saving this task's final shared state. */
+                if (!cooperative_window_resume(module_cache, heap, released,
+                                                  error, error_size)) call_ok = 0;
+                if (!call_ok ||
+                    (operation->result &&
+                     !push(stack, stack_capacity, &stack_count, value, error, error_size))) {
+                    ok = 0; goto done;
+                }
+                break;
+            }
             case ZOP_STORE_LOCAL_TEXT: {
                 size_t local_index;
                 if (!pop(stack, &stack_count, &value, error, error_size) ||
@@ -3669,6 +4159,7 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
             }
             case ZOP_STORE_LOCAL_FUNCTION:
             case ZOP_STORE_LOCAL_TEXT_ARRAY:
+            case ZOP_STORE_LOCAL_STATUS:
             case ZOP_STORE_LOCAL_VALUE: {
                 size_t local_index;
                 if (!pop(stack, &stack_count, &value, error, error_size)) {
@@ -3678,6 +4169,13 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                 if (instruction->op == ZOP_STORE_LOCAL_TEXT_ARRAY && value.type != ZVALUE_TEXT_ARRAY) {
                     snprintf(error,error_size,"local text array '%s' requires a text array value",instruction->operand);
                     ok=0;goto done;
+                }
+                if (instruction->op == ZOP_STORE_LOCAL_STATUS && value.type != ZVALUE_STATUS) {
+                    snprintf(error, error_size,
+                             "local status '%s' requires alive, dead, or a status-valued expression",
+                             instruction->operand);
+                    ok = 0;
+                    goto done;
                 }
                 if (instruction->op == ZOP_STORE_LOCAL_FUNCTION && value.type != ZVALUE_FUNCTION) {
                     snprintf(error, error_size, "function reference '%s' requires a function value", instruction->operand);
@@ -3910,11 +4408,17 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     ok = 0;
                     goto done;
                 }
+                if (left.object->foreign_language) {
+                    if (!interop_member_set(left.object, instruction->operand, &right, error, error_size)) {
+                        ok = 0; goto done;
+                    }
+                    break;
+                }
                 field = find_field(left.object, instruction->operand);
                 if (field == NULL || field->type != right.type) {
                     snprintf(error, error_size,
                              "room '%s' has no compatible field named '%s'",
-                             left.object->room->name, instruction->operand);
+                             left.object->room ? left.object->room->name : "JSON", instruction->operand);
                     ok = 0;
                     goto done;
                 }
@@ -3934,6 +4438,13 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                                       parts, &part_count, error, error_size)) {
                     ok = 0;
                     goto done;
+                }
+                if (part_count == 1 && lookup_name(room, current_object, locals, local_count,
+                        parts[0], &left) && left.type == ZVALUE_OBJECT && left.object) {
+                    ok = interop_member_set(left.object, instruction->call_function, &right, error, error_size);
+                    free(storage);
+                    if (!ok) goto done;
+                    break;
                 }
                 if (part_count == 4) {
                     const ZSharpProviderBinding *binding =
@@ -4342,7 +4853,11 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     goto done;
                 }
                 value.type = ZVALUE_STATUS;
-                if (left.type != right.type) {
+                if (left.type == ZVALUE_NULL || right.type == ZVALUE_NULL) {
+                    /* Nullable reads must be testable without coercing or
+                     * requiring the other operand to also have null's type. */
+                    value.number = left.type == ZVALUE_NULL && right.type == ZVALUE_NULL;
+                } else if (left.type != right.type) {
                     snprintf(error, error_size,
                              "comparison requires values of the same type");
                     ok = 0;
@@ -4357,8 +4872,6 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     value.number = strcmp(left.text, right.text) == 0;
                 } else if (left.type == ZVALUE_OBJECT) {
                     value.number = left.object == right.object;
-                } else if (left.type == ZVALUE_NULL) {
-                    value.number = 1;
                 } else {
                     snprintf(error, error_size,
                              "'==' is not defined for this value type");
@@ -4712,6 +5225,13 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     ok = 0;
                     goto done;
                 }
+                if (value.object->foreign_language) {
+                    if (!interop_member_get(value.object, instruction->operand, &value, error, error_size) ||
+                        !push(stack, stack_capacity, &stack_count, value, error, error_size)) {
+                        ok = 0; goto done;
+                    }
+                    break;
+                }
                 field = find_field(value.object, instruction->operand);
                 if (field == NULL) {
                     snprintf(error, error_size,
@@ -4739,6 +5259,61 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     ok = 0;
                     goto done;
                 }
+                break;
+            }
+            case ZOP_APPLICATION_QUIT_MODE: {
+                const ZSharpWindowRuntime *runtime = module_cache->window_runtime;
+                ZSharpApplicationQuitMode mode;
+                if (!pop(stack, &stack_count, &value, error, error_size)) {
+                    ok = 0;
+                    goto done;
+                }
+                if (value.type != ZVALUE_TEXT) {
+                    snprintf(error, error_size,
+                             "Application.Quit mode must be text: \"regular\" or \"tray\"");
+                    ok = 0;
+                    goto done;
+                }
+                if (value.text != NULL && strcmp(value.text, "regular") == 0)
+                    mode = ZAPPLICATION_QUIT_REGULAR;
+                else if (value.text != NULL && strcmp(value.text, "tray") == 0)
+                    mode = ZAPPLICATION_QUIT_TRAY;
+                else {
+                    snprintf(error, error_size,
+                             "Application.Quit mode must be \"regular\" or \"tray\"");
+                    ok = 0;
+                    goto done;
+                }
+                if (runtime != NULL && runtime->request_quit != NULL) {
+                    if (!runtime->request_quit(runtime->state, mode, error, error_size)) {
+                        if (mode == ZAPPLICATION_QUIT_TRAY) {
+                            fprintf(stderr,
+                                    "runtime warning: Application.Quit(\"tray\") failed: %s; the window remains open\n",
+                                    error[0] != '\0' ? error : "system tray support is unavailable");
+                            error[0] = '\0';
+                            break;
+                        }
+                        if (error[0] == '\0')
+                            snprintf(error, error_size, "Application.Quit request failed");
+                        ok = 0;
+                        goto done;
+                    }
+                } else if (mode == ZAPPLICATION_QUIT_REGULAR &&
+                           runtime != NULL && runtime->request_close != NULL) {
+                    runtime->request_close(runtime->state);
+                } else if (mode == ZAPPLICATION_QUIT_TRAY && runtime != NULL) {
+                    fprintf(stderr,
+                            "runtime warning: Application.Quit(\"tray\") is unsupported by this app or game; the window remains open\n");
+                    break;
+                } else {
+                    snprintf(error, error_size,
+                             mode == ZAPPLICATION_QUIT_TRAY
+                                 ? "Application.Quit(\"tray\") requires a running desktop app with system tray support"
+                                 : "Application.Quit requires a running app or game");
+                    ok = 0;
+                    goto done;
+                }
+                if (mode == ZAPPLICATION_QUIT_REGULAR) goto done;
                 break;
             }
             case ZOP_APPLICATION_QUIT:
@@ -4869,6 +5444,17 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     ok = 0;
                     goto done;
                 }
+                if (object_value.object->foreign_language) {
+                    ok = interop_object_invoke(object_value.object, instruction->operand,
+                        call_arguments, instruction->argument_count, &ignored_return, error, error_size);
+                    free(call_arguments);
+                    if (!ok) goto done;
+                    break;
+                }
+                if (!object_value.object->room) {
+                    snprintf(error, error_size, "record objects do not define methods");
+                    free(call_arguments); ok = 0; goto done;
+                }
                 target = find_function(object_value.object->room,
                                        instruction->operand);
                 if (target == NULL) {
@@ -4928,6 +5514,27 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                         ok = 0;
                         goto done;
                     }
+                }
+                if (instruction->index_operand == 1 && lookup_name(room, current_object, locals,
+                        local_count, instruction->operand, &value) && value.type == ZVALUE_OBJECT && value.object) {
+                    RuntimeValue ignored = {0};
+                    if (value.object->foreign_language) {
+                        ok = interop_object_invoke(value.object, instruction->call_function, call_arguments,
+                            instruction->argument_count, &ignored, error, error_size);
+                    } else {
+                        ZSharpFunction *method = value.object->room ? find_function(value.object->room,
+                            instruction->call_function) : NULL;
+                        int did_return = 0;
+                        if (!method || (!method->is_public && value.object->room != room)) {
+                            snprintf(error, error_size, "object has no visible method '%s'", instruction->call_function);
+                            ok = 0;
+                        } else ok = execute_function(program, value.object->room, method, value.object, heap,
+                            project_root, providers, provider_count, module_cache, depth + 1, call_arguments,
+                            instruction->argument_count, NULL, &ignored, &did_return, error, error_size);
+                    }
+                    free(call_arguments);
+                    if (!ok) goto done;
+                    break;
                 }
                 if (!split_value_path(instruction->operand,
                                       instruction->index_operand, &storage,
@@ -5140,6 +5747,18 @@ static int execute_function(ZSharpProgram *program, ZSharpRoom *room,
                     instruction = &scoped_instruction;
                     call_root = foreign_root;
                 }
+                if (instruction->operand && instruction->operand[0] == '@') {
+                    int bridged = interop_qualified_call(instruction, call_arguments, call_root,
+                        &call_return, error, error_size);
+                    if (bridged >= 0) {
+                        free(call_arguments);
+                        if (!bridged || (instruction->op == ZOP_CALL_QUALIFIED_VALUE &&
+                            !push(stack, stack_capacity, &stack_count, call_return, error, error_size))) {
+                            ok = 0; goto done;
+                        }
+                        break;
+                    }
+                }
                 if (instruction->operand != NULL &&
                     strcmp(instruction->operand, "@py") == 0) {
                     if (!execute_python_call(program, instruction,
@@ -5351,8 +5970,8 @@ source_dependency_loaded:
                 if (instruction->op == ZOP_CALL_QUALIFIED_VALUE) {
                     if (!call_did_return) {
                         if (target_function->return_type == ZRETURN_VOID &&
-                            instruction->call_outcome != NULL &&
-                            instruction->call_outcome[0] != '\0') {
+                            ((instruction->call_outcome != NULL && instruction->call_outcome[0] != '\0') ||
+                             interop_frame.callback_wrapper == function)) {
                             memset(&call_return, 0, sizeof(call_return));
                             call_return.type = ZVALUE_NULL;
                         } else {
@@ -5483,6 +6102,7 @@ source_dependency_loaded:
     }
 
 done:
+    interop_current_frame = previous_interop_frame;
     if (!ok && error != NULL && error_size > 0) {
         size_t used = strlen(error);
         if (used < error_size - 1) {
@@ -5641,6 +6261,15 @@ static int pump_native_services(RuntimeHeap *heap, RuntimeModuleCache *cache,
     *active = 0;
     if (cache->pumping_services) return 1;
     cache->pumping_services = 1;
+    for (s = 0; s < cache->speech_count; s++) {
+        int speech_active = 0;
+        if (!zsharp_speech_poll(cache->speech[s].service, &speech_active,
+                                  error, error_size)) {
+            cache->pumping_services = 0;
+            return 0;
+        }
+        if (speech_active) *active = 1;
+    }
     cache->network_poll = network_tick();
     for (s = 0; s < cache->network_count && ok; s++) {
         RuntimeNetworkService *service = &cache->network[s];
@@ -5869,7 +6498,14 @@ static void cleanup_program_objects(ZSharpProgram *program) {
 }
 
 static void cleanup_module_cache(RuntimeModuleCache *cache) {
+    interop_vm_free(cache->interop);
+    cache->interop = NULL;
     size_t index;
+    for (index = 0; index < cache->speech_count; index++) {
+        zsharp_speech_destroy(cache->speech[index].service);
+        free(cache->speech[index].root);
+    }
+    free(cache->speech);
     for (index = 0; index < cache->network_count; index++) {
         char ignored[256] = {0};
         free(network_bridge(&cache->network[index], "shutdown", "[]", ignored, sizeof(ignored)));
@@ -5917,25 +6553,7 @@ typedef struct WindowExecutionContext {
     int stopping;
 } WindowExecutionContext;
 
-typedef struct WindowSharedVariable {
-    char *name;
-    ZSharpValueType type;
-    char *text;
-    int32_t number;
-} WindowSharedVariable;
-
-typedef struct WindowRoomState {
-    char *source_path;
-    char *room_name;
-    WindowSharedVariable *variables;
-    size_t variable_count;
-    int initialized;
-#ifdef _WIN32
-    CRITICAL_SECTION mutex;
-#else
-    pthread_mutex_t mutex;
-#endif
-} WindowRoomState;
+#include "vm_room_state.h"
 
 typedef struct WindowTask {
     WindowExecutionContext *context;
@@ -5953,30 +6571,6 @@ typedef struct WindowTask {
 #endif
 } WindowTask;
 
-/* A task owns its parsed program, stack, locals and heap. Only the persistent
-   scalar room state is shared with other callback tasks. Publish/reload that
-   state at explicit wait boundaries instead of holding its mutex while asleep. */
-typedef struct WindowTaskYield {
-    WindowRoomState *state;
-    ZSharpRoom *room;
-    int *state_locked;
-} WindowTaskYield;
-
-static void lock_window_room_state(WindowRoomState *state) {
-#ifdef _WIN32
-    EnterCriticalSection(&state->mutex);
-#else
-    pthread_mutex_lock(&state->mutex);
-#endif
-}
-
-static void unlock_window_room_state(WindowRoomState *state) {
-#ifdef _WIN32
-    LeaveCriticalSection(&state->mutex);
-#else
-    pthread_mutex_unlock(&state->mutex);
-#endif
-}
 
 static char *window_room_source_key(const char *path, char *error,
                                     size_t error_size) {
@@ -6077,124 +6671,6 @@ out_of_memory:
     return NULL;
 }
 
-static int restore_window_room_state(WindowRoomState *state,
-                                     ZSharpRoom *room, RuntimeHeap *suspended_values,
-                                     char *error,
-                                     size_t error_size) {
-    size_t index;
-    if (!state->initialized) return 1;
-    for (index = 0; index < state->variable_count; index++) {
-        WindowSharedVariable *saved = &state->variables[index];
-        ZSharpVariable *variable = find_variable(room, saved->name);
-        char *copy, **slot;
-        const char *text;
-        if (variable == NULL || variable->type != saved->type) continue;
-        if (saved->type == ZVALUE_STATUS) {
-            variable->number_value = saved->number;
-        } else if (saved->type == ZVALUE_NUMBER || saved->type == ZVALUE_TEXT ||
-                   saved->type == ZVALUE_FUNCTION) {
-            slot = saved->type == ZVALUE_NUMBER ? &variable->number_text :
-                                                  &variable->text_value;
-            text = saved->text == NULL ? "" : saved->text;
-            if (*slot != NULL && strcmp(*slot, text) == 0) continue;
-            copy = zsharp_copy_text(text, strlen(text));
-            if (copy == NULL) goto out_of_memory;
-            if (suspended_values != NULL && *slot != NULL) {
-                /* Parameters, locals or an outer expression may still refer to
-                   the old scalar buffer across a nested wait. Transfer that
-                   buffer to this task's heap instead of freeing live aliases.
-                   Allocate first so an OOM leaves the old variable untouched. */
-                char **resized = (char **)realloc(suspended_values->texts,
-                    (suspended_values->text_count + 1) * sizeof(*resized));
-                if (resized == NULL) { free(copy); goto out_of_memory; }
-                suspended_values->texts = resized;
-                suspended_values->texts[suspended_values->text_count++] = *slot;
-            } else free(*slot);
-            *slot = copy;
-        }
-    }
-    return 1;
-
-out_of_memory:
-    snprintf(error, error_size, "out of memory");
-    return 0;
-}
-
-static int save_window_room_state(WindowRoomState *state, ZSharpRoom *room,
-                                  char *error, size_t error_size) {
-    WindowSharedVariable *variables = NULL;
-    size_t count = 0;
-    size_t index;
-    for (index = 0; index < room->variable_count; index++) {
-        ZSharpVariable *variable = &room->variables[index];
-        WindowSharedVariable *resized;
-        WindowSharedVariable *saved;
-        const char *text = NULL;
-        if (variable->type != ZVALUE_NUMBER && variable->type != ZVALUE_TEXT &&
-            variable->type != ZVALUE_FUNCTION && variable->type != ZVALUE_STATUS) continue;
-        resized = (WindowSharedVariable *)realloc(
-            variables, (count + 1) * sizeof(*variables));
-        if (resized == NULL) goto out_of_memory;
-        variables = resized;
-        saved = &variables[count++];
-        memset(saved, 0, sizeof(*saved));
-        saved->name = zsharp_copy_text(variable->name, strlen(variable->name));
-        saved->type = variable->type;
-        saved->number = variable->number_value;
-        if (variable->type == ZVALUE_NUMBER) text = variable->number_text;
-        else if (variable->type == ZVALUE_TEXT || variable->type == ZVALUE_FUNCTION) text = variable->text_value;
-        if (saved->name == NULL) goto out_of_memory;
-        if (text != NULL) {
-            saved->text = zsharp_copy_text(text, strlen(text));
-            if (saved->text == NULL) goto out_of_memory;
-        }
-    }
-    for (index = 0; index < state->variable_count; index++) {
-        free(state->variables[index].name);
-        free(state->variables[index].text);
-    }
-    free(state->variables);
-    state->variables = variables;
-    state->variable_count = count;
-    state->initialized = 1;
-    return 1;
-
-out_of_memory:
-    for (index = 0; index < count; index++) {
-        free(variables[index].name);
-        free(variables[index].text);
-    }
-    free(variables);
-    snprintf(error, error_size, "out of memory");
-    return 0;
-}
-
-static int cooperative_window_wait(RuntimeModuleCache *cache, RuntimeHeap *heap,
-    const char *milliseconds, char *error, size_t error_size) {
-    WindowTaskYield *yield = cache->window_yield;
-    int released = 0, ok;
-    if (yield != NULL && *yield->state_locked) {
-        if (!save_window_room_state(yield->state, yield->room, error, error_size))
-            return 0;
-        unlock_window_room_state(yield->state);
-        *yield->state_locked = 0;
-        released = 1;
-    }
-    if (cache->window_runtime != NULL && cache->window_runtime->wait != NULL)
-        ok = cache->window_runtime->wait(cache->window_runtime->state,
-            milliseconds, error, error_size);
-    else ok = runtime_wait(milliseconds, error, error_size);
-    if (released) {
-        /* Always reacquire, even on cancellation or wait failure: unwinding and
-           the final state save must have exactly the same ownership contract
-           as normal execution. Never restore another task's locals or stack. */
-        lock_window_room_state(yield->state);
-        *yield->state_locked = 1;
-        if (!restore_window_room_state(yield->state, yield->room, heap,
-                                        error, error_size)) return 0;
-    }
-    return ok;
-}
 
 static void cleanup_window_room_states(WindowExecutionContext *context) {
     size_t index;
@@ -6247,6 +6723,7 @@ static void run_window_task(WindowTask *task) {
     memset(&heap, 0, sizeof(heap));
     memset(&module_cache, 0, sizeof(module_cache));
     module_cache.window_runtime = task->runtime;
+    module_cache.interop_owner = task->context->module_cache;
     if (!zsharp_project_parse_file(task->source_path, &program, &diagnostic,
                                    parse_error, sizeof(parse_error))) {
         if (diagnostic.message[0] != '\0') {
@@ -6288,7 +6765,7 @@ static void run_window_task(WindowTask *task) {
         task->context->providers, task->context->provider_count,
         &module_cache, 1, NULL, 0, NULL, &ignored_return,
         &ignored_did_return, task->error, sizeof(task->error));
-    while (ok && (module_cache.service_count || module_cache.network_count) && !window_task_cancelled(task)) {
+    while (ok && (module_cache.service_count || module_cache.network_count || module_cache.speech) && !window_task_cancelled(task)) {
         int active = 0;
         if (!pump_native_services(&heap, &module_cache, task->context->providers,
             task->context->provider_count, &active, task->error, sizeof(task->error))) { ok = 0; break; }
@@ -6305,6 +6782,7 @@ done:
     if (!ok && task->runtime != NULL &&
         task->runtime->request_close != NULL)
         task->runtime->request_close(task->runtime->state);
+    interop_vm_detach_heap(task->context->module_cache->interop, &heap);
     cleanup_module_cache(&module_cache);
     if (initialized) cleanup_program_objects(&program);
     zsharp_program_free(&program);
@@ -6692,6 +7170,9 @@ int zsharp_vm_run_with_providers(
         context.room_states = NULL;
         context.room_state_count = 0;
         context.stopping = 0;
+        /* Worker/module state belongs to the application, not one short-lived
+         * button callback or Start task. Publish its owner before tasks start. */
+        if (!interop_state(&module_cache, error, error_size)) { ok = 0; goto done; }
         if (program->script_type == ZSCRIPT_WINDOW) {
             ok = zsharp_window_styles_apply(program, project_root, error,
                                             error_size) &&
@@ -6727,7 +7208,7 @@ int zsharp_vm_run_with_providers(
             }
         }
     }
-    while (ok && (module_cache.service_count || module_cache.network_count)) {
+    while (ok && (module_cache.service_count || module_cache.network_count || module_cache.speech)) {
         int active = 0;
         if (!pump_native_services(&heap, &module_cache, providers, provider_count,
                                    &active, error, error_size)) { ok = 0; break; }

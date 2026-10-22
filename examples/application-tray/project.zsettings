@@ -1,0 +1,14 @@
+zsharp = type.settings
+
+Project: "Z# Tray Example":
+PID: "zsharp_tray_example":
+Version: [1.4.0.0]:
+Authors: ["ZombieOS"]:
+Description: "Regular exit, background tray mode, and shutdown cleanup.":
+ZSharp: [1.4.0.0]:
+Dependencies (
+ zsharpwindow:1.0.0.0
+):
+Window (
+ Startup: "Startup.zsharp":
+):

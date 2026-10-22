@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.zombieos.zsharp</string>
+    <key>CFBundleName</key>
+    <string>ZSharp</string>
+    <key>CFBundleVersion</key>
+    <string>@PROJECT_VERSION_MAJOR@.@PROJECT_VERSION_MINOR@.@PROJECT_VERSION_PATCH@</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>A Z# application requested microphone recording or local speech recognition. Audio is captured only when its script requests it.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>A Z# application requested permission to manage desktop application windows.</string>
+</dict>
+</plist>

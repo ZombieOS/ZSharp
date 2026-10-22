@@ -130,6 +130,17 @@ jobs:
           libibus-1.0-dev libudev-dev libthai-dev libusb-1.0-0-dev
           libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
 
+      - name: Set up portable Java interop helper build
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up portable C# interop helper build
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       - name: Configure native runtime
         shell: pwsh
         run: |
@@ -172,7 +183,17 @@ jobs:
           tar -xzf python-download.tar.gz -C build/python-runtime
           Copy-Item native/python/zsharp_bridge.py build/python-runtime/python/zsharp_bridge.py -Force
           Copy-Item native/python/zsharp_network.py build/python-runtime/python/zsharp_network.py -Force
+          Copy-Item native/python/zsharp_voice.py build/python-runtime/python/zsharp_voice.py -Force
+          Copy-Item native/python/zsharp_speech_input.py build/python-runtime/python/zsharp_speech_input.py -Force
+          Copy-Item tools/install-speech-components.py build/python-runtime/python/install-speech-components.py -Force
           tar -czf stage/bin/python-runtime.tar.gz -C build/python-runtime python
+
+      - name: Bundle language interop helpers and SDKs
+        shell: pwsh
+        run: |
+          & ./scripts/build-interop-archive.ps1 `
+            -SourceDirectory stage/bin/interop `
+            -Archive stage/bin/interop-runtime.zip
 
       - name: Stage checksummed runtime files
         shell: pwsh
@@ -183,6 +204,7 @@ jobs:
             $support += $moltenVk
           }
           $support += "stage/bin/python-runtime.tar.gz"
+          $support += "stage/bin/interop-runtime.zip"
           & ./scripts/stage-native-runtime.ps1 `
             -Platform "${{ matrix.platform }}" `
             -Runtime "${{ matrix.runtime }}" `

@@ -31,7 +31,7 @@ try {
     if[LocalState == "initial" and LocalCount == 0] (
      Print("[ROOM STATE] Task-local snapshots survived shared updates"):
     ) else ()
-    Application.Quit:
+    Application.Quit("regular"):
    ) else ()
    wait(8ms):`);
  for(const nested of [false,true]) {

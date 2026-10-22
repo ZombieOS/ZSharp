@@ -6,6 +6,8 @@
 
 #define ZSHARP_RUST_ABI_VERSION ZSHARP_CPP_ABI_VERSION
 #define ZSHARP_RUST_ENTRY_NAME "zsharp_rust_call_v1"
+#define ZSHARP_RUST_ENTRY_V2_NAME "zsharp_rust_call_v2"
+typedef ZSharpInteropCallV2 ZSharpRustCallV2;
 
 typedef ZSharpCppValueType ZSharpRustValueType;
 typedef ZSharpCppValue ZSharpRustValue;

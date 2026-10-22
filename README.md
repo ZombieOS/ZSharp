@@ -5,6 +5,89 @@ Official website and downloads: <https://www.zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
+## Version 1.4.0.0
+
+All work originally planned for 1.3.1.0 is included in this version. Desktop support also
+adds C#, Java, Go and Ruby bridges (`cs:`, `java:`, `go:`, `rb:`), live foreign
+objects, constructors, property/field writes, instance methods, explicit release
+and synchronous callbacks into imported Z# brains. Existing C++, C, Python,
+JavaScript, Lua, Rust and Kotlin/Native bridges remain available; native modules
+opt into the additive v2 ABI for objects and callbacks without breaking old
+scalar entry points. Module/object state persists between calls. Java requires
+Java 17+, C# requires .NET 8, Ruby requires Ruby, and Go modules are distributed
+as precompiled workers. These are desktop integrations, not browser APIs.
+See [SYNTAX.md](SYNTAX.md#desktop-language-bridges-and-live-objects-1400-development)
+and the SDKs under `native/interop` for export rules, examples and limitations.
+
+Upgrade note: installers from older Z# releases do not understand the new
+language-helper archive. If an older installer or auto-updater upgrades the
+executable without those support files, rerun the current **1.4.0.0 installer**
+once before using the new bridges. Fresh development builds already copy the
+helpers beside their executable. Java/.NET/Ruby runtime installation is still
+separate; this helper archive does not bundle those third-party runtimes.
+
+Native desktop development adds imported Speech, Microphone, Speaker and
+Desktop APIs, plus optional per-project launch-at-login. System voice presets,
+recording/device control and OS window actions have platform-specific support.
+Desktop automation includes window focus, named focused-window text-entry
+regions, keyboard shortcuts and standalone play/pause, next and previous media
+keys; these act on the real desktop, not browser DOM elements, and require
+native permissions. Windows focusing synchronizes activation and offers one
+OK/Cancel confirmation if automatic switching is denied. External native Unicode
+Edit/RichEdit controls receive an acknowledged click and one undoable insertion
+at the resulting caret/selection, with normalized paragraph endings and no
+clipboard changes or whole-document replacement. Same-process and other controls
+retain paced keyboard input. Input failures stop without replay; an insertion
+timeout can leave partial or complete text. Real Windows Notepad passed saved-text
+checks with both reported paragraphs, Unicode and 80 numbered lines. Windows
+graceful app closing includes
+subprocess windows while preserving save/cancel prompts. Media-key coverage uses
+mocks, not actual playback. Optional
+voice cloning and recognition require local models. The explicit
+`python tools/install-speech-components.py` setup creates a private environment
+and installs accessible models; genuine Pocket TTS weights may need your own
+publisher-approved access. Speech calls do not download models automatically.
+An authorized browser download can be imported with `--voice-weights PATH`;
+setup verifies it against the publisher's exact revision and checksum.
+These features are not browser APIs and
+still need physical-device, subjective voice-quality and Linux/macOS desktop
+validation. See
+[SYNTAX.md](SYNTAX.md#desktop-speech-microphone-speaker-and-application-control-1400)
+for exact syntax, permissions and limits.
+
+Installed distributions include the same setup helper at
+`python/install-speech-components.py` beside the ZVM executable.
+
+Optional real-model checks use only a generated reference and dummy audio:
+
+```text
+python tests/speech-model-tests.py --speech-home ABSOLUTE_DIRECTORY --zvm build/Release/zsharp.exe --recognize --adjustments
+```
+
+They require installed authorized models and the synthetic diagnostic reference;
+they do not record the microphone or play sound and are not part of normal CTest.
+`tests/speech-stream-model-tests.py --speech-home ABSOLUTE_DIRECTORY` measures
+cold preparation and warm first-PCM latency using only that synthetic reference.
+Use `Speech.prepare("Voice.zvoice"):` before an assistant's listening indicator
+to pay model-loading costs at startup. Default cloned pitch/speed supports
+incremental playback; recognition waits roughly 400 ms of silence before
+transcribing rather than recording every utterance for a fixed five seconds.
+
+This update removes the browser loader's one-entry-script-per-page
+restriction. A page may explicitly include several `type="text/zsharp"` scripts
+in one shared bZVM. Their automatic startup brains begin once in HTML order;
+waiting in one does not block the others. Project imports and visibility rules
+still apply to cross-file calls. See [SYNTAX.md](SYNTAX.md#browser-prototype-1220-development)
+for loading and startup details.
+
+Native apps also gain imported `Application.Quit("regular")` and
+`Application.Quit("tray")` actions. Tray mode keeps background tasks running
+and adds Show/Exit actions; regular mode performs graceful cleanup and exit.
+New source must import `ZSharp.Application` and use an explicit mode. See
+`examples/application-tray` for a small app using both actions. Windows behavior
+has been tested live; Linux/macOS backends have compilation coverage and still
+need live desktop testing. Tray availability depends on the desktop environment.
+
 ## Version 1.3.0.0
 
 This update adds shared desktop/browser Time expressions, HTTP/HTTPS and named

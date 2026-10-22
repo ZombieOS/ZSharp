@@ -48,6 +48,8 @@ typedef struct ZSharpSettings {
     unsigned allowed_devices; /* Windows=1, Linux=2, MacOS=4; XR is separate. */
     int xr_allowed;
     int xr_required;
+    int has_launch_at_start;
+    int launch_at_start;
 } ZSharpSettings;
 
 void zsharp_settings_init(ZSharpSettings *settings);

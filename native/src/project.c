@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "project.h"
+#include "system_ops.h"
 #include "achievement.h"
 
 #include "window_style.h"
@@ -1256,6 +1257,9 @@ static int validate_file_function(const ZSharpProgram *program,
 static int function_has_prior_local(const ZSharpFunction *function,
                                     size_t instruction_index,
                                     const char *name);
+static int function_has_dynamic_object(const ZSharpFunction *function,
+                                       size_t instruction_index,
+                                       const char *name);
 static int project_version_before(const ZSharpSettings *settings,
                                   unsigned major, unsigned minor,
                                   unsigned patch, unsigned revision);
@@ -1278,8 +1282,17 @@ static int validate_foreign_call(const ZSharpProgram *program,
     size_t project_length = strlen(settings->project_id);
     size_t index;
     int imported = 0;
+    int modern_bridge = strcmp(language, "cs") == 0 ||
+                        strcmp(language, "java") == 0 ||
+                        strcmp(language, "go") == 0 ||
+                        strcmp(language, "rb") == 0;
     FILE *file;
-    if (project_version_before(settings, 1, 1, min_patch, 0)) {
+    if (modern_bridge && project_version_before(settings, 1, 4, 0, 0)) {
+        snprintf(error, error_size,
+                 "%s imports require ZSharp: [1.4.0.0]: or newer", label);
+        return 0;
+    }
+    if (!modern_bridge && project_version_before(settings, 1, 1, min_patch, 0)) {
         snprintf(error, error_size,
                  "%s imports require ZSharp: [1.1.%u.0]: or newer",
                  label, min_patch);
@@ -1325,7 +1338,11 @@ static int validate_foreign_call(const ZSharpProgram *program,
         free(resolved_root);
         return 0;
     }
-    snprintf(relative, sizeof(relative), "%s.%s", local_module, extension);
+    if (snprintf(relative, sizeof(relative), "%s", local_module) >= (int)sizeof(relative)) {
+        snprintf(error, error_size, "%s module path is too long", label);
+        free(resolved_root);
+        return 0;
+    }
     for (index = 0; relative[index] != '\0'; index++)
         if (relative[index] == '.') relative[index] =
 #ifdef _WIN32
@@ -1333,18 +1350,35 @@ static int validate_foreign_call(const ZSharpProgram *program,
 #else
             '/';
 #endif
-    /* Restore the extension separator replaced by the loop. */
-    if (strlen(relative) >= strlen(extension) + 1)
-        relative[strlen(relative) - strlen(extension) - 1] = '.';
-    snprintf(absolute, sizeof(absolute), "%s%c%s", resolved_root,
+    if (snprintf(absolute, sizeof(absolute), "%s%c%s.%s", resolved_root,
 #ifdef _WIN32
              '\\',
 #else
              '/',
 #endif
-             relative);
-    free(resolved_root);
+             relative, extension) >= (int)sizeof(absolute)) {
+        snprintf(error, error_size, "%s module path is too long", label);
+        free(resolved_root);
+        return 0;
+    }
     file = fopen(absolute, "rb");
+    if (file == NULL && modern_bridge && strcmp(language, "rb") != 0) {
+        const char *companion = strcmp(language, "cs") == 0 ? "zcs.dll" :
+                                strcmp(language, "java") == 0 ? "zjava.jar" :
+#ifdef _WIN32
+                                "zgo.exe";
+#else
+                                "zgo";
+#endif
+        if (snprintf(absolute, sizeof(absolute), "%s/%s.%s", resolved_root,
+                     relative, companion) >= (int)sizeof(absolute)) {
+            snprintf(error, error_size, "%s module path is too long", label);
+            free(resolved_root);
+            return 0;
+        }
+        file = fopen(absolute, "rb");
+    }
+    free(resolved_root);
     if (file == NULL) {
         snprintf(error, error_size,
                  "%s module '%s' was not found at '%s'", label, module,
@@ -1434,6 +1468,50 @@ static int validate_instruction(const ZSharpProgram *program,
     char *parts[5] = {0};
     size_t count = 0;
     int ok = 1;
+    /* A generic local/parameter carries a runtime value or retained foreign
+     * instance rather than the name of a room in this source file. Resolve its
+     * members in the owning runtime; do not mistake it for a file import. */
+    if (instruction->operand &&
+        (instruction->op == ZOP_LOAD_PATH || instruction->op == ZOP_STORE_PATH ||
+         instruction->op == ZOP_SET_MEMBER_PATH || instruction->op == ZOP_CALL_METHOD_PATH)) {
+        const char *dot = strchr(instruction->operand, '.');
+        char receiver[256];
+        if (dot && (size_t)(dot - instruction->operand) < sizeof(receiver)) {
+            memcpy(receiver, instruction->operand, (size_t)(dot - instruction->operand));
+            receiver[dot - instruction->operand] = '\0';
+            if (function_has_dynamic_object(function, instruction_index, receiver)) return 1;
+        } else if (!dot && instruction->op == ZOP_CALL_METHOD_PATH &&
+                   function_has_dynamic_object(function, instruction_index, instruction->operand)) {
+            return 1;
+        }
+    }
+    if (instruction->op == ZOP_SYSTEM) {
+        const ZSharpSystemOperation *operation =
+            zsharp_system_operation(instruction->operand);
+        size_t i;
+        char expected[64];
+        if (operation == NULL ||
+            instruction->argument_count < operation->minimum_arguments ||
+            instruction->argument_count > operation->maximum_arguments) {
+            snprintf(error, error_size, "unknown desktop API operation or invalid arguments");
+            return 0;
+        }
+        snprintf(expected, sizeof(expected), "ZSharp.%s", operation->family);
+        for (i = 0; i < room->import_count; i++)
+            if (strcmp(room->imports[i].path, expected) == 0) return 1;
+        snprintf(error, error_size, "%s requires import %s()",
+                 operation->name, expected);
+        return 0;
+    }
+    if (instruction->op == ZOP_APPLICATION_QUIT_MODE) {
+        size_t import_index;
+        for (import_index = 0; import_index < room->import_count; import_index++)
+            if (strcmp(room->imports[import_index].path,
+                       "ZSharp.Application") == 0) return 1;
+        snprintf(error, error_size,
+                 "Application.Quit(mode) requires import ZSharp.Application()");
+        return 0;
+    }
     if (instruction->operand && !strncmp(instruction->operand,"Gamepad.",8) &&
         (instruction->op==ZOP_LOAD_PATH || instruction->op==ZOP_STORE_PATH ||
          instruction->op==ZOP_UI_SET || instruction->op==ZOP_UI_SET_VALUE)) {
@@ -1596,6 +1674,30 @@ static int validate_instruction(const ZSharpProgram *program,
                                          project_root, "kt", "Kotlin",
                                          "kt", 0, error, error_size);
         }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@cs") == 0) {
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "cs", "C#", "cs",
+                                         0, error, error_size);
+        }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@java") == 0) {
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "java", "Java", "java",
+                                         0, error, error_size);
+        }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@go") == 0) {
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "go", "Go", "go",
+                                         0, error, error_size);
+        }
+        if (instruction->operand != NULL &&
+            strcmp(instruction->operand, "@rb") == 0) {
+            return validate_foreign_call(program, settings, room, instruction,
+                                         project_root, "rb", "Ruby", "rb",
+                                         0, error, error_size);
+        }
         if (instruction->operand != NULL && instruction->operand[0] != '\0') {
             char lookup_error[512] = {0};
             char *dependency_root;
@@ -1732,7 +1834,8 @@ static int function_knows_name(const ZSharpRoom *room,
         if ((instruction->op == ZOP_STORE_LOCAL ||
              instruction->op == ZOP_STORE_LOCAL_TEXT ||
              instruction->op == ZOP_STORE_LOCAL_FUNCTION ||
-             instruction->op == ZOP_STORE_LOCAL_VALUE || instruction->op == ZOP_STORE_LOCAL_TEXT_ARRAY) &&
+             instruction->op == ZOP_STORE_LOCAL_VALUE || instruction->op == ZOP_STORE_LOCAL_TEXT_ARRAY ||
+             instruction->op == ZOP_STORE_LOCAL_STATUS) &&
             strcmp(instruction->operand, name) == 0) {
             return 1;
         }
@@ -1749,7 +1852,26 @@ static int function_has_prior_local(const ZSharpFunction *function,
         if ((instruction->op == ZOP_STORE_LOCAL ||
              instruction->op == ZOP_STORE_LOCAL_TEXT ||
              instruction->op == ZOP_STORE_LOCAL_FUNCTION ||
-             instruction->op == ZOP_STORE_LOCAL_VALUE || instruction->op == ZOP_STORE_LOCAL_TEXT_ARRAY) &&
+             instruction->op == ZOP_STORE_LOCAL_VALUE || instruction->op == ZOP_STORE_LOCAL_TEXT_ARRAY ||
+             instruction->op == ZOP_STORE_LOCAL_STATUS) &&
+            strcmp(instruction->operand, name) == 0) return 1;
+    }
+    return 0;
+}
+
+static int function_has_dynamic_object(const ZSharpFunction *function,
+                                       size_t instruction_index,
+                                       const char *name) {
+    size_t index;
+    for (index = 0; index < function->parameter_count; ++index) {
+        const ZSharpParameter *parameter = &function->parameters[index];
+        if (parameter->type == ZVALUE_OBJECT && parameter->object_type &&
+            strcmp(parameter->object_type, "object") == 0 &&
+            strcmp(parameter->name, name) == 0) return 1;
+    }
+    for (index = 0; index < instruction_index; ++index) {
+        const ZSharpInstruction *instruction = &function->instructions[index];
+        if (instruction->op == ZOP_STORE_LOCAL_VALUE &&
             strcmp(instruction->operand, name) == 0) return 1;
     }
     return 0;
@@ -1773,6 +1895,23 @@ static int validate_feature_version(const ZSharpSettings *settings,
                                     size_t error_size) {
     const ZSharpInstruction *instruction =
         &function->instructions[instruction_index];
+    if (((instruction->op == ZOP_CALL_QUALIFIED_VALUE && instruction->call_room &&
+          strcmp(instruction->call_room, "$new") == 0) ||
+         (instruction->op == ZOP_STORE_LOCAL_VALUE && instruction->call_room &&
+          strcmp(instruction->call_room, "$object") == 0) ||
+         (instruction->op == ZOP_CALL_METHOD && instruction->operand &&
+          strcmp(instruction->operand, "$foreign.release") == 0)) &&
+        project_version_before(settings, 1, 4, 0, 0)) {
+        snprintf(error, error_size,
+                 "foreign objects and generic object locals require ZSharp: [1.4.0.0]: or newer");
+        return 0;
+    }
+    if (instruction->op == ZOP_SYSTEM &&
+        project_version_before(settings, 1, 4, 0, 0)) {
+        snprintf(error, error_size,
+                 "Speech, Microphone, Speaker and Desktop require ZSharp: [1.4.0.0]: or newer");
+        return 0;
+    }
     if((instruction->op==ZOP_FILE_SEARCH_EXTENSION || instruction->op==ZOP_STORE_LOCAL_TEXT_ARRAY) && project_version_before(settings,1,2,1,0)) {
         snprintf(error,error_size,"File.searchExtension requires ZSharp: [1.2.1.0]: or newer");return 0;
     }
@@ -1848,6 +1987,18 @@ static int validate_feature_version(const ZSharpSettings *settings,
                  "Print(...).update requires ZSharp: [1.2.0.1]: or newer");
         return 0;
     }
+    if (instruction->op == ZOP_APPLICATION_QUIT_MODE &&
+        project_version_before(settings, 1, 4, 0, 0)) {
+        snprintf(error, error_size,
+                 "Application.Quit(mode) requires ZSharp: [1.4.0.0]: or newer");
+        return 0;
+    }
+    if (instruction->op == ZOP_STORE_LOCAL_STATUS &&
+        project_version_before(settings, 1, 4, 0, 0)) {
+        snprintf(error, error_size,
+                 "local status declarations require ZSharp: [1.4.0.0]: or newer");
+        return 0;
+    }
     if (instruction->op == ZOP_APPLICATION_QUIT &&
         project_version_before(settings, 1, 2, 1, 0)) {
         snprintf(error, error_size,
@@ -1918,6 +2069,9 @@ static int validate_simple_name(const ZSharpProgram *program,
             return 0;
         }
     } else if (instruction->op == ZOP_CALL_METHOD &&
+               strcmp(instruction->operand, "$foreign.release") != 0 &&
+               !(instruction->call_file && function_has_dynamic_object(
+                   function, instruction_index, instruction->call_file)) &&
                !program_has_method(program, instruction->operand)) {
         snprintf(error, error_size,
                  "no room in file '%s' has a method named '%s'",
@@ -2076,6 +2230,24 @@ static int validate_window_program(const ZSharpProgram *program,
     return 1;
 }
 
+static int validate_bridge_import_versions(const ZSharpImport *imports,
+                                           size_t count,
+                                           const ZSharpSettings *settings,
+                                           char *error, size_t error_size) {
+    size_t index;
+    if (!project_version_before(settings, 1, 4, 0, 0)) return 1;
+    for (index = 0; index < count; index++) {
+        const char *path = imports[index].path;
+        if (strncmp(path, "cs:", 3) == 0 || strncmp(path, "java:", 5) == 0 ||
+            strncmp(path, "go:", 3) == 0 || strncmp(path, "rb:", 3) == 0) {
+            snprintf(error, error_size,
+                     "import %s() requires ZSharp: [1.4.0.0]: or newer", path);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int zsharp_project_validate(const ZSharpProgram *program,
                             const ZSharpSettings *settings,
                             const char *project_root, char *error,
@@ -2094,7 +2266,10 @@ int zsharp_project_validate_with_context(const ZSharpProgram *program,
                             size_t error_size) {
     size_t room_index;
     if (program->script_type == ZSCRIPT_WINDOW) {
-        return validate_window_program(program, settings, project_root, error,
+        return validate_bridge_import_versions(program->window.imports,
+                                                program->window.import_count,
+                                                settings, error, error_size) &&
+               validate_window_program(program, settings, project_root, error,
                                        error_size) &&
                zsharp_window_styles_validate(program, project_root, error,
                                               error_size);
@@ -2128,6 +2303,8 @@ int zsharp_project_validate_with_context(const ZSharpProgram *program,
         const ZSharpRoom *room = &program->rooms[room_index];
         size_t variable_index;
         size_t function_index;
+        if (!validate_bridge_import_versions(room->imports, room->import_count,
+                                             settings, error, error_size)) return 0;
         if (room->json_schema_count > 0 &&
             project_version_before(settings, 1, 0, 2, 4)) {
             snprintf(error, error_size,

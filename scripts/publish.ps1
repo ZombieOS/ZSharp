@@ -245,6 +245,16 @@ foreach ($platform in $platforms) {
             throw "The $platform workflow artifact Python checksum does not match"
         }
         $support += $pythonRuntime
+        $interopRuntime = Join-Path $drop 'interop-runtime.zip'
+        if (-not (Test-Path -LiteralPath $interopRuntime -PathType Leaf) -or
+            -not (Test-Path -LiteralPath ($interopRuntime + '.sha256') -PathType Leaf)) {
+            throw "The $platform workflow artifact is missing its language interop helpers"
+        }
+        $expectedInteropChecksum = (Get-Content -LiteralPath ($interopRuntime + '.sha256') -Raw).Trim().ToLowerInvariant()
+        if ($expectedInteropChecksum -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $interopRuntime).Hash.ToLowerInvariant()) {
+            throw "The $platform workflow artifact language interop checksum does not match"
+        }
+        $support += $interopRuntime
         & (Join-Path $PSScriptRoot "stage-native-runtime.ps1") `
             -Platform $platform -Runtime $droppedRuntime -Support $support `
             -RuntimeVersion $droppedVersion

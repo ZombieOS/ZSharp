@@ -244,6 +244,23 @@ foreach ($target in $targets) {
         "runtimes/$($target.Id)/python-runtime.tar.gz"
     $platformMetadata.pythonSha256 = $pythonChecksum
     $platformMetadata.pythonSize = (Get-Item -LiteralPath $pythonSource).Length
+    $interopSource = Join-Path (Join-Path $resourceRoot $target.Id) 'interop-runtime.zip'
+    $interopChecksumFile = $interopSource + '.sha256'
+    if (-not (Test-Path -LiteralPath $interopSource -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $interopChecksumFile -PathType Leaf)) {
+        throw "The embedded $($target.Id) language interop helpers are missing"
+    }
+    $interopChecksum = (Get-Content -LiteralPath $interopChecksumFile -Raw).Trim()
+    if ($interopChecksum -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $interopSource).Hash.ToLowerInvariant()) {
+        throw "The embedded $($target.Id) language interop checksum does not match"
+    }
+    Copy-Item -LiteralPath $interopSource -Destination $archiveRuntimeDirectory
+    if (-not $directWebsite) {
+        Copy-Item -LiteralPath $interopSource, $interopChecksumFile -Destination $siteInstallerDirectory -Force
+    }
+    $platformMetadata.interopPath = "runtimes/$($target.Id)/interop-runtime.zip"
+    $platformMetadata.interopSha256 = $interopChecksum
+    $platformMetadata.interopSize = (Get-Item -LiteralPath $interopSource).Length
     if ($target.ContainsKey("Support")) {
         $supportSource = Join-Path (Join-Path $resourceRoot $target.Id) `
             $target.Support

@@ -2,6 +2,7 @@
 
 #include "package.h"
 #include "package_ignore.h"
+#include "package_executable.h"
 
 #include "game_model.h"
 
@@ -1616,7 +1617,7 @@ static int write_entry(FILE *package, const char *target, uint64_t size,
                       "package entry '%s' failed SHA-256 verification", target);
         return 0;
     }
-    return 1;
+    return zsharp_package_enable_go_companion(target, error, error_size);
 }
 
 static int write_zip_entry(FILE *package, const char *target, uint32_t size,
@@ -1650,7 +1651,7 @@ static int write_zip_entry(FILE *package, const char *target, uint32_t size,
                       "package entry '%s' failed ZIP CRC verification", target);
         return 0;
     }
-    return 1;
+    return zsharp_package_enable_go_companion(target, error, error_size);
 }
 
 static int extract_source_zip(const char *package_path, char **project_root,

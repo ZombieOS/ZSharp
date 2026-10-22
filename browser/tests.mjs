@@ -57,7 +57,7 @@ assert.equal(decode(instance.exports.bzvm_project_name()), 'Browser Test');
 for (const [source, expected] of [
   [settingsText.replace('PID: "browser_test":', ''), 'must define'],
   [settingsText.replace('Dependencies ():', 'Dependencies ( playfab:1.0.0.0: ):'), 'Store dependencies'],
-  [settingsText.replace('[1.2.2.0]', '[1.4.0.0]'), 'newer bZVM']
+  [settingsText.replace('[1.2.2.0]', '[1.4.0.1]'), 'newer bZVM']
 ]) {
   const pointer=put(source);
   try {assert.equal(instance.exports.bzvm_settings(pointer),0);assert.ok(decode(instance.exports.bzvm_error()).includes(expected));}
@@ -215,3 +215,27 @@ noticed room Main[] (
 )`,'WaitReturn');
 assert.equal(printed.length,0);resume();assert.deepEqual(printed,['answer 15']);
 console.log('PASS: typed parameters and nested returned values across waits');
+// Nullable properties may return their declared type or null. Test both operand
+// orders without treating empty text, zero or dead as an absent value.
+printed.length=0;
+const nullComparisons = [
+  ['null == null', 'alive'], ['null != null', 'dead'],
+  ['Device == null', 'dead'], ['Device != null', 'alive'],
+  ['null == Device', 'dead'], ['null != Device', 'alive'],
+  ['"" == null', 'dead'], ['"" != null', 'alive'],
+  ['null == ""', 'dead'], ['null != ""', 'alive'],
+  ['0 == null', 'dead'], ['0 != null', 'alive'],
+  ['null == 0', 'dead'], ['null != 0', 'alive'],
+  ['dead == null', 'dead'], ['dead != null', 'alive'],
+  ['null == dead', 'dead'], ['null != dead', 'alive']
+];
+invoke('bzvm_start',`zsharp = type.script
+noticed room Main[] (
+ noticed brain Start[] (
+  text Device = "Microphone":
+  ${nullComparisons.map(([expression]) => `Print(${expression}):`).join('\n  ')}
+  if[Device != null] ( Print("device present"): ) else ( Print("wrong"): )
+ )
+)`,'NullableEquality');
+assert.deepEqual(printed,[...nullComparisons.map(([,expected]) => expected),'device present']);
+console.log('PASS: null equality/inequality in both orders, including falsey non-null values');

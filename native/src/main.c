@@ -3,7 +3,10 @@
 #include "zsharp.h"
 
 #include "bytecode.h"
+#include "audio_api.h"
+#include "speech_input.h"
 #include "desktop.h"
+#include "desktop_api.h"
 #include "game_runtime.h"
 #include "hub.h"
 #include "package.h"
@@ -37,6 +40,25 @@
 #endif
 
 static char command_failure[4096];
+static unsigned package_launch_depth;
+
+static void prepare_audio_for_run(void) {
+#if !defined(__ANDROID__)
+    char ignored[512] = {0};
+    /* Preparation only initializes/enumerates audio. A machine without an
+     * audio host must still be able to run a non-audio Z# program. */
+    (void)zsharp_audio_prepare(ignored, sizeof(ignored));
+#endif
+}
+
+static void finish_audio_for_run(void) {
+#if !defined(__ANDROID__)
+    if (package_launch_depth == 0) {
+        zsharp_speech_input_shutdown();
+        zsharp_audio_shutdown();
+    }
+#endif
+}
 
 static int make_log_directory(const char *path) {
 #ifdef _WIN32
@@ -672,6 +694,12 @@ static int run_source_command(const char *source_path, int argc, char **argv,
         fprintf(stderr, "runtime error: out of memory\n");
         return 1;
     }
+    if (package_launch_depth == 0) {
+        char startup_error[512] = {0};
+        if (!zsharp_desktop_apply_startup(&settings, source_path, 0,
+                                           startup_error, sizeof(startup_error)))
+            fprintf(stderr, "startup warning: %s\n", startup_error);
+    }
     zsharp_settings_free(&settings);
     if (!load_providers(argc, argv, first_option, &loaded, &bindings,
                         &provider_count, error, sizeof(error))) {
@@ -681,8 +709,10 @@ static int run_source_command(const char *source_path, int argc, char **argv,
         fprintf(stderr, "runtime error: %s\n", error);
         return 1;
     }
+    prepare_audio_for_run();
     ok = zsharp_vm_run_with_providers(&program, project_root, bindings,
                                       provider_count, error, sizeof(error));
+    finish_audio_for_run();
     unload_providers(loaded, provider_count);
     free(bindings);
     free(project_root);
@@ -751,6 +781,13 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
         fprintf(stderr, "compile error: %s\n", error);
         return 1;
     }
+    if (package_launch_depth == 0) {
+        char startup_error[512] = {0};
+        if (!zsharp_desktop_apply_startup(&settings, bytecode_path,
+                                          ZDESKTOP_ENTRY_BYTECODE,
+                                          startup_error, sizeof(startup_error)))
+            fprintf(stderr, "startup warning: %s\n", startup_error);
+    }
     zsharp_settings_free(&settings);
     if (!load_providers(argc, argv, first_option, &loaded, &bindings,
                         &provider_count, error, sizeof(error))) {
@@ -760,8 +797,10 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
         fprintf(stderr, "runtime error: %s\n", error);
         return 1;
     }
+    prepare_audio_for_run();
     ok = zsharp_vm_run_with_providers(&program, project_root, bindings,
                                       provider_count, error, sizeof(error));
+    finish_audio_for_run();
     unload_providers(loaded, provider_count);
     free(bindings);
     free(project_root);
@@ -1172,6 +1211,12 @@ static int open_package_command(const char *package_path, int argc,
                                      settings.icon);
         }
     }
+    {
+        char startup_error[512] = {0};
+        if (!zsharp_desktop_apply_startup(&settings, package_path, 1,
+                                           startup_error, sizeof(startup_error)))
+            fprintf(stderr, "startup warning: %s\n", startup_error);
+    }
     zsharp_settings_free(&settings);
     free(root);
     {
@@ -1181,6 +1226,8 @@ static int open_package_command(const char *package_path, int argc,
             fprintf(stderr, "terminal warning: %s\n", terminal_error);
     }
     play_started = time(NULL);
+    prepare_audio_for_run();
+    package_launch_depth++;
     if (native_startup) {
         puts("running native startup");
         result = run_native_startup(startup, argc, argv, first_option);
@@ -1194,6 +1241,8 @@ static int open_package_command(const char *package_path, int argc,
         result = run_source_command(startup, argc, argv, first_option,
                                     package_kind == ZSHARP_PACKAGE_GAME);
     }
+    package_launch_depth--;
+    finish_audio_for_run();
     free(startup);
     free(startup_bytecode);
     zsharp_terminal_stop();
@@ -1292,6 +1341,9 @@ static int uninstall_package_command(const char *package_path) {
         zsharp_package_info_free(&info);
         return 1;
     }
+    error[0] = '\0';
+    if (!zsharp_desktop_remove_startup(info.project_id, error, sizeof(error)))
+        fprintf(stderr, "startup warning: %s\n", error);
     error[0] = '\0';
     if (!zsharp_registry_forget_package(info.project_id, error,
                                         sizeof(error)))

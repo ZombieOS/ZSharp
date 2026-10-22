@@ -3,8 +3,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "zsharp_interop.h"
 
 #define ZSHARP_CPP_ABI_VERSION 1u
+#define ZSHARP_CPP_ENTRY_V2_NAME "zsharp_cpp_call_v2"
+typedef ZSharpInteropCallV2 ZSharpCppCallV2;
 
 #ifdef _WIN32
 #define ZSHARP_CPP_EXPORT __declspec(dllexport)

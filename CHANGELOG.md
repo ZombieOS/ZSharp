@@ -1,5 +1,76 @@
 # Changelog
 
+## 1.4.0.0 - 2026-10-22
+
+- Added desktop C#, Java, Go and Ruby language bridges, using `cs:`, `java:`,
+  `go:` and `rb:` imports alongside the existing C++, C, Python, JavaScript,
+  Lua, Rust and Kotlin/Native integrations. Java and C# provide opt-in export
+  annotations/attributes and persistent workers; Go modules are precompiled
+  workers and Ruby modules explicitly register their exports. Java 17+, .NET 8
+  and Ruby require their respective installed runtimes; Go users distribute
+  their compiled module executable. These integrations are not bZVM features.
+  The current installer also installs the checksummed language-helper/SDK
+  archive. Upgrades performed by an older installer may omit those support
+  files: rerun the 1.4.0.0 installer once before using the new bridges.
+- Added shared foreign-object construction, instance field/property access,
+  writes, method calls and explicit release, plus synchronous foreign-to-Z#
+  callbacks and live Z# object proxies. Objects retain their identity and state
+  across calls. Existing native scalar v1 entry points remain compatible; native
+  objects/callbacks use the additive v2 ABI. JavaScript and Lua modules now retain
+  their runtime state too. The bridge enforces import/visibility rules, rejects
+  stale references and unsupported same-worker reentry, preserves tagged exact
+  numeric values, and bounds protocol frames to 1 MiB. Language-specific native
+  number precision and OS/runtime requirements still apply.
+
+- Fixed equality/inequality checks against `null` rejecting non-null values,
+  including device-name availability checks. Other mixed-type comparisons remain
+  strict, and ordering comparisons with `null` remain invalid.
+
+- Added imported native desktop Speech, Microphone, Speaker and Desktop APIs:
+  queued system/preset speech, optional genuine local voice conditioning,
+  startup voice preparation and cached, incremental cloned-voice playback,
+  microphone recording/levels, offline recognition with explicitly installed
+  models cached in a dedicated worker for repeated input and adaptive
+  end-of-utterance detection, per-process
+  input/output device selection, and graceful OS application
+  and window actions. On Windows, graceful close includes a selected app's
+  descendant windows without mistaking same-name helpers for unrelated app
+  instances, while preserving normal save/cancel prompts. Desktop automation
+  includes verified foreground focusing with a Windows OK/Cancel confirmation
+  when automatic switching is denied, focused-window region text entry with
+  an acknowledged native click and undoable caret/selection insertion for
+  external Windows Unicode Edit/RichEdit controls, normalized multiline text,
+  and paced keyboard input for same-process/custom controls without clipboard
+  changes or whole-document replacement. Native insertion timeouts never replay
+  or fall back and may leave partial or complete text. Actual Windows Notepad
+  passed saved-text validation with both reported paragraphs, Unicode and 80
+  numbered lines. Desktop automation also includes validated keyboard shortcuts plus
+  standalone play/pause, next and previous media keys. Ongoing focus checks and
+  no-replay failures protect against redirected or repeated input, subject to
+  native permissions and platform capabilities.
+  An explicit local
+  setup helper provisions optional speech
+  components without global package installation; publisher model access may be
+  required. Optional model dependencies are not bundled; Linux/macOS
+  capabilities and hardware validation remain platform-dependent.
+- Added per-project `LaunchAtStart` login registration for actual source/bytecode/package
+  launches, with stable PID identity, opt-out removal and isolated test controls.
+  Checking, compiling and packaging do not register an application at login.
+- Fixed room-level variables and functions without visibility words being
+  rejected instead of inheriting their containing room's visibility. Explicit
+  `noticed`/`silent`, file-only rooms and import restrictions keep their meaning.
+- Fixed local `status` declarations being rejected inside functions. Status
+  initialization and reassignment enforce the normal status value type.
+- Added imported `Application.Quit("regular")` / `Application.Quit("tray")`
+  modes and native-app tray/menu-bar Show and Exit actions. Tray mode keeps
+  scripts running and reports a recoverable warning when the desktop cannot
+  provide a tray. New source requires `import ZSharp.Application():` and an
+  explicit mode; old bytecode keeps its regular-close behavior.
+- Fixed bZVM rejecting HTML pages with more than one Z# entry script. Explicitly
+  listed scripts now share one VM, load before startup, and begin their automatic
+  `Start[]` brains once in HTML order. A waiting startup task does not prevent
+  later entries from starting; imported-only files remain explicit-call helpers.
+
 ## 1.3.0.0 - 2026-10-16
 
 - Added experimental Windows PCVR through OpenXR: optional/required VR launch

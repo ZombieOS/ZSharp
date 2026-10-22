@@ -63,6 +63,9 @@ typedef struct MacWindowState {
     MacId target;
     MacId scroll_view;
     MacId content;
+    MacId tray_bar;
+    MacId tray_item;
+    MacId tray_menu;
     MacControl *controls;
     size_t control_count;
     double scale;
@@ -97,8 +100,16 @@ typedef struct MacReadRequest {
     char error[512];
 } MacReadRequest;
 
+typedef struct MacQuitRequest {
+    MacWindowState *state;
+    volatile int done;
+    int result;
+    char error[512];
+} MacQuitRequest;
+
 static MacWindowState *active_state;
 static void layout_controls(MacWindowState *state);
+static void mac_tray_dispose(MacWindowState *state);
 
 static MacSelector selector(MacApi *api, const char *name) {
     return api->selector(name);
@@ -480,7 +491,7 @@ static int mac_window_cancelled(void *data) {
 static void mac_window_request_close(void *data) {
     MacWindowState *state = (MacWindowState *)data;
     if (state == NULL) return;
-    __atomic_store_n(&state->closing, 1, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&state->closing, 1, __ATOMIC_ACQ_REL)) return;
     state->api.dispatch_async_f(state->api.dispatch_get_main_queue(), state,
                                 mac_finish_close);
 }
@@ -492,7 +503,179 @@ static void mac_finish_close(void *data) {
                                     state, mac_finish_close);
         return;
     }
+    mac_tray_dispose(state);
     send_void_id(&state->api, state->application, "stop:", NULL);
+}
+
+static void mac_tray_dispose(MacWindowState *state) {
+    MacId bar = state->tray_bar, item = state->tray_item;
+    MacId menu = state->tray_menu;
+    state->tray_bar = NULL;
+    state->tray_item = NULL;
+    state->tray_menu = NULL;
+    if (item != NULL) {
+        send_void_id(&state->api, item, "setMenu:", NULL);
+        if (bar != NULL)
+            send_void_id(&state->api, bar, "removeStatusItem:", item);
+        send_void(&state->api, item, "release");
+    }
+    if (menu != NULL) send_void(&state->api, menu, "release");
+}
+
+static void mac_tray_show(MacId target, MacSelector command, MacId sender) {
+    MacWindowState *state = active_state;
+    (void)target;
+    (void)command;
+    (void)sender;
+    if (state == NULL || mac_window_cancelled(state)) return;
+    send_void_id(&state->api, state->window, "deminiaturize:", NULL);
+    send_void_id(&state->api, state->window, "makeKeyAndOrderFront:", NULL);
+    send_void_bool(&state->api, state->application,
+                    "activateIgnoringOtherApps:", 1);
+}
+
+static void mac_tray_exit(MacId target, MacSelector command, MacId sender) {
+    (void)target;
+    (void)command;
+    (void)sender;
+    if (active_state != NULL) mac_window_request_close(active_state);
+}
+
+static MacId mac_tray_menu_item(MacWindowState *state, const char *title,
+                                 const char *action) {
+    MacApi *api = &state->api;
+    MacId item = send_id(api, (MacId)api->get_class("NSMenuItem"), "alloc");
+    item = ((MacId (*)(MacId, MacSelector, MacId, MacSelector, MacId))
+        api->message)(item, selector(api, "initWithTitle:action:keyEquivalent:"),
+                      ns_string(api, title), selector(api, action),
+                      ns_string(api, ""));
+    if (item != NULL) send_void_id(api, item, "setTarget:", state->target);
+    return item;
+}
+
+static int mac_tray_create(MacWindowState *state, char *error,
+                            size_t error_size) {
+    MacApi *api = &state->api;
+    MacId bar, item, button, menu, show, exit, image;
+    MacClass bar_class = api->get_class("NSStatusBar");
+    if (state->tray_item != NULL) {
+        if (!responds_to(api, state->tray_item, "isVisible") ||
+            ((signed char (*)(MacId, MacSelector))api->message)(
+                state->tray_item, selector(api, "isVisible"))) return 1;
+        mac_tray_dispose(state);
+    }
+    if (bar_class == NULL || api->get_class("NSMenu") == NULL ||
+        api->get_class("NSMenuItem") == NULL) goto unavailable;
+    bar = send_id(api, (MacId)bar_class, "systemStatusBar");
+    if (bar == NULL || !responds_to(api, bar, "statusItemWithLength:"))
+        goto unavailable;
+    item = ((MacId (*)(MacId, MacSelector, double))api->message)(
+        bar, selector(api, "statusItemWithLength:"), -1.0);
+    if (item == NULL) goto unavailable;
+    state->tray_bar = bar;
+    state->tray_item = send_id(api, item, "retain");
+    button = send_id(api, item, "button");
+    if (button == NULL) goto failed;
+    menu = send_id_id(api, send_id(api, (MacId)api->get_class("NSMenu"),
+                                   "alloc"), "initWithTitle:",
+                       ns_string(api, "Application"));
+    if (menu == NULL) goto failed;
+    state->tray_menu = menu;
+    show = mac_tray_menu_item(state, "Show", "zsharpTrayShow:");
+    if (show == NULL) goto failed;
+    send_void_id(api, menu, "addItem:", show);
+    send_void(api, show, "release");
+    exit = mac_tray_menu_item(state, "Exit", "zsharpTrayExit:");
+    if (exit == NULL) goto failed;
+    send_void_id(api, menu, "addItem:", exit);
+    send_void(api, exit, "release");
+    send_void_id(api, item, "setMenu:", menu);
+    send_void_id(api, button, "setTitle:", ns_string(api, "Z#"));
+    send_void_id(api, button, "setToolTip:",
+                  send_id(api, state->window, "title"));
+    image = send_id(api, state->application, "applicationIconImage");
+    if (image != NULL) {
+        MacId small = send_id(api, image, "copy");
+        if (small != NULL) {
+            MacSize size = {18.0, 18.0};
+            send_void_size(api, small, "setSize:", size);
+            send_void_id(api, button, "setImage:", small);
+            send_void_id(api, button, "setTitle:", ns_string(api, ""));
+            send_void(api, small, "release");
+        }
+    }
+    if (responds_to(api, item, "setVisible:"))
+        send_void_bool(api, item, "setVisible:", 1);
+    if (responds_to(api, item, "isVisible") &&
+        !((signed char (*)(MacId, MacSelector))api->message)(
+            item, selector(api, "isVisible"))) goto failed;
+    return 1;
+failed:
+    mac_tray_dispose(state);
+unavailable:
+    snprintf(error, error_size,
+             "could not create an AppKit menu-bar item with Show/Exit actions; "
+             "the application window remains open");
+    return 0;
+}
+
+static void mac_apply_tray_request(void *data) {
+    MacQuitRequest *request = (MacQuitRequest *)data;
+    MacWindowState *state = request->state;
+    if (mac_window_cancelled(state)) {
+        snprintf(request->error, sizeof(request->error),
+                 "the application window is closing");
+    } else if (mac_tray_create(state, request->error,
+                                sizeof(request->error))) {
+        send_void_id(&state->api, state->window, "orderOut:", NULL);
+        request->result = 1;
+    } else {
+        /* A removed/unavailable status item must not strand a hidden window. */
+        send_void_id(&state->api, state->window, "makeKeyAndOrderFront:", NULL);
+    }
+    __atomic_store_n(&request->done, 1, __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+}
+
+static int mac_window_request_quit(void *data, ZSharpApplicationQuitMode mode,
+                                    char *error, size_t error_size) {
+    MacWindowState *state = (MacWindowState *)data;
+    MacQuitRequest *request;
+    struct timespec pause = {0, 1000000L};
+    int result;
+    if (state == NULL || mac_window_cancelled(state)) {
+        snprintf(error, error_size, "the application window is closing");
+        return 0;
+    }
+    if (mode == ZAPPLICATION_QUIT_REGULAR) {
+        mac_window_request_close(state);
+        return 1;
+    }
+    if (mode != ZAPPLICATION_QUIT_TRAY) {
+        snprintf(error, error_size, "unknown application quit mode");
+        return 0;
+    }
+    request = (MacQuitRequest *)calloc(1, sizeof(*request));
+    if (request == NULL) {
+        snprintf(error, error_size, "out of memory");
+        return 0;
+    }
+    request->state = state;
+    __atomic_add_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+    if (mac_window_cancelled(state)) {
+        __atomic_sub_fetch(&state->pending_requests, 1, __ATOMIC_ACQ_REL);
+        free(request);
+        snprintf(error, error_size, "the application window is closing");
+        return 0;
+    }
+    state->api.dispatch_async_f(state->api.dispatch_get_main_queue(), request,
+                                mac_apply_tray_request);
+    while (!__atomic_load_n(&request->done, __ATOMIC_ACQUIRE))
+        nanosleep(&pause, NULL);
+    result = request->result;
+    if (!result) snprintf(error, error_size, "%s", request->error);
+    free(request);
+    return result;
 }
 
 static void mac_window_closed(MacId target, MacSelector command,
@@ -500,12 +683,7 @@ static void mac_window_closed(MacId target, MacSelector command,
     (void)target;
     (void)command;
     (void)notification;
-    if (active_state != NULL) {
-        __atomic_store_n(&active_state->closing, 1, __ATOMIC_RELEASE);
-        active_state->api.dispatch_async_f(
-            active_state->api.dispatch_get_main_queue(), active_state,
-            mac_finish_close);
-    }
+    if (active_state != NULL) mac_window_request_close(active_state);
 }
 
 static void mac_window_resized(MacId target, MacSelector command,
@@ -632,6 +810,10 @@ static MacId make_target(MacWindowState *state) {
                         (MacImp)mac_window_resized, "v@:@");
         api->add_method(target_class, selector(api, "zsharpTimer:"),
                         (MacImp)mac_timer_fired, "v@:@");
+        api->add_method(target_class, selector(api, "zsharpTrayShow:"),
+                        (MacImp)mac_tray_show, "v@:@");
+        api->add_method(target_class, selector(api, "zsharpTrayExit:"),
+                        (MacImp)mac_tray_exit, "v@:@");
         api->register_class_pair(target_class);
     }
     return send_id(api, send_id(api, (MacId)target_class, "alloc"), "init");
@@ -1482,6 +1664,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.runtime.wait = wait_with_window_events;
     state.runtime.is_cancelled = mac_window_cancelled;
     state.runtime.request_close = mac_window_request_close;
+    state.runtime.request_quit = mac_window_request_quit;
     design = design_element(&program->window);
     if (design == NULL) {
         snprintf(error, error_size, "window bytecode has no design");
@@ -1582,6 +1765,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
                   error, error_size)) {
         __atomic_store_n(&state.closing, 1, __ATOMIC_RELEASE);
         drain_pending_requests(&state);
+        mac_tray_dispose(&state);
         callback(user_data, ZSHARP_WINDOW_TASKS_STOP, &state.runtime,
                  state.callback_error, sizeof(state.callback_error));
         active_state = NULL;
@@ -1603,6 +1787,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     send_void(api, state.application, "run");
     __atomic_store_n(&state.closing, 1, __ATOMIC_RELEASE);
     drain_pending_requests(&state);
+    mac_tray_dispose(&state);
     if (!callback(user_data, ZSHARP_WINDOW_TASKS_STOP, &state.runtime,
                   error, error_size)) result = 0;
     active_state = NULL;

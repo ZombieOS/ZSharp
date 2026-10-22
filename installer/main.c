@@ -86,6 +86,9 @@ typedef struct ReleaseInfo {
     char *python_path;
     char *python_sha256;
     uint64_t python_size;
+    char *interop_path;
+    char *interop_sha256;
+    uint64_t interop_size;
 } ReleaseInfo;
 
 static void report_error(char *error, size_t error_size,
@@ -424,6 +427,197 @@ done:
         report_error(error, error_size,
                      "the ZVM archive is invalid or is missing '%s'", member);
     }
+    return ok;
+}
+
+typedef struct InteropMember {
+    char *name;
+    uint32_t size;
+} InteropMember;
+
+static int safe_interop_member(const char *name) {
+    const char *part = name, *cursor;
+    if (strncmp(name, "interop/", 8) != 0 || name[8] == '\0' || strlen(name) > 512)
+        return 0;
+    for (cursor = name;; cursor++) {
+        unsigned char ch = (unsigned char)*cursor;
+        if (ch == '/' || ch == '\0') {
+            size_t length = (size_t)(cursor - part), base = 0;
+            char stem[8] = {0};
+            if (length == 0 || length > 128 || part[length - 1] == '.' ||
+                (length == 1 && part[0] == '.') ||
+                (length == 2 && part[0] == '.' && part[1] == '.')) return 0;
+            while (base < length && part[base] != '.' && base < sizeof(stem) - 1) {
+                stem[base] = (char)toupper((unsigned char)part[base]); base++;
+            }
+            if (!strcmp(stem, "CON") || !strcmp(stem, "PRN") || !strcmp(stem, "AUX") ||
+                !strcmp(stem, "NUL") ||
+                (strlen(stem) == 4 && (!strncmp(stem, "COM", 3) || !strncmp(stem, "LPT", 3)) &&
+                 stem[3] >= '1' && stem[3] <= '9')) return 0;
+            if (!ch) break;
+            part = cursor + 1;
+        } else if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                     (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-')) return 0;
+    }
+    return 1;
+}
+
+static int equal_interop_member(const char *left, const char *right) {
+    while (*left && *right) {
+        if (tolower((unsigned char)*left++) != tolower((unsigned char)*right++)) return 0;
+    }
+    return *left == *right;
+}
+
+/* Only stored regular files under one fixed interop/ subtree are accepted.
+ * There is no tar invocation, shell expansion, link extraction or ZIP traversal.
+ * The complete index is checked before creating or replacing any helper file. */
+static int install_interop_archive(const char *archive_path, const char *directory,
+                                    char *error, size_t error_size) {
+    FILE *archive = fopen(archive_path, "rb");
+    unsigned char *tail = NULL, central[46];
+    long length, tail_start, eocd = -1;
+    size_t tail_size, index, count = 0;
+    InteropMember *members = NULL;
+    uint32_t central_offset, central_size;
+    uint64_t total = 0;
+    char name[96], *stage = NULL, *staged_interop = NULL, *destination = NULL, *backup = NULL;
+    int staged = 0, moved_previous = 0, ok = 0;
+#ifdef _WIN32
+    unsigned long pid = (unsigned long)GetCurrentProcessId();
+#else
+    unsigned long pid = (unsigned long)getpid();
+#endif
+    if (!archive || fseek(archive, 0, SEEK_END) || (length = ftell(archive)) < 22 ||
+        (uint64_t)length > 64u * 1024u * 1024u) goto done;
+    tail_start = length > 65557 ? length - 65557 : 0;
+    tail_size = (size_t)(length - tail_start);
+    tail = (unsigned char *)malloc(tail_size);
+    if (!tail || fseek(archive, tail_start, SEEK_SET) || fread(tail, 1, tail_size, archive) != tail_size) goto done;
+    for (eocd = (long)tail_size - 22; eocd >= 0; eocd--)
+        if (read_u32(tail + eocd) == 0x06054b50u &&
+            eocd + 22 + read_u16(tail + eocd + 20) == (long)tail_size) break;
+    if (eocd < 0 || read_u16(tail + eocd + 4) || read_u16(tail + eocd + 6) ||
+        read_u16(tail + eocd + 8) != read_u16(tail + eocd + 10)) goto done;
+    count = read_u16(tail + eocd + 10);
+    central_size = read_u32(tail + eocd + 12);
+    central_offset = read_u32(tail + eocd + 16);
+    if (!count || count > 4096 || (uint64_t)central_offset + central_size != (uint64_t)(tail_start + eocd) ||
+        fseek(archive, (long)central_offset, SEEK_SET)) goto done;
+    members = (InteropMember *)calloc(count, sizeof(*members));
+    if (!members) goto done;
+    for (index = 0; index < count; index++) {
+        uint16_t name_size, extra, comment, flags, mode;
+        uint32_t compressed, uncompressed, local_offset;
+        size_t prior;
+        long after;
+        if (fread(central, 1, sizeof(central), archive) != sizeof(central) || read_u32(central) != 0x02014b50u) goto done;
+        flags = read_u16(central + 8);
+        name_size = read_u16(central + 28); extra = read_u16(central + 30); comment = read_u16(central + 32);
+        compressed = read_u32(central + 20); uncompressed = read_u32(central + 24);
+        local_offset = read_u32(central + 42);
+        mode = (uint16_t)(read_u32(central + 38) >> 16) & 0170000u;
+        if ((flags & ~0x0808u) || read_u16(central + 10) != 0 || compressed != uncompressed ||
+            name_size == 0 || name_size > 512 || uncompressed > 16u * 1024u * 1024u ||
+            (mode != 0 && mode != 0100000u) || (read_u32(central + 38) & 0x10u) || read_u16(central + 34) != 0 ||
+            local_offset >= central_offset || (total += uncompressed) > 64u * 1024u * 1024u) goto done;
+        members[index].name = (char *)malloc((size_t)name_size + 1);
+        members[index].size = uncompressed;
+        if (!members[index].name || fread(members[index].name, 1, name_size, archive) != name_size) goto done;
+        members[index].name[name_size] = '\0';
+        if (memchr(members[index].name, '\0', name_size) || !safe_interop_member(members[index].name)) goto done;
+        for (prior = 0; prior < index; prior++)
+            if (equal_interop_member(members[prior].name, members[index].name)) goto done;
+        after = ftell(archive) + extra + comment;
+        if (after < 0 || (uint64_t)after > (uint64_t)central_offset + central_size || fseek(archive, after, SEEK_SET)) goto done;
+    }
+    if ((uint64_t)ftell(archive) != (uint64_t)central_offset + central_size) goto done;
+    fclose(archive); archive = NULL;
+    snprintf(name, sizeof(name), ".zsharp-interop-stage-%lu", pid);
+    stage = join_path(directory, name);
+    destination = join_path(directory, "interop");
+    snprintf(name, sizeof(name), ".zsharp-interop-previous-%lu", pid);
+    backup = join_path(directory, name);
+    if (!stage || !destination || !backup) goto done;
+#ifdef _WIN32
+    if (!CreateDirectoryA(stage, NULL)) goto done;
+#else
+    if (mkdir(stage, 0700)) goto done;
+#endif
+    staged = 1;
+    staged_interop = join_path(stage, "interop");
+    if (!staged_interop) goto done;
+    for (index = 0; index < count; index++) {
+        char *path = join_path(stage, members[index].name), *separator;
+        if (!path) goto done;
+        separator = strrchr(path, '/');
+#ifdef _WIN32
+        { char *backslash = strrchr(path, '\\'); if (!separator || (backslash && backslash > separator)) separator = backslash; }
+#endif
+        if (!separator) { free(path); goto done; }
+        *separator = '\0';
+        if (!make_directories(path)) { free(path); goto done; }
+        *separator = '/';
+        if (!extract_stored_zip_member(archive_path, members[index].name, path, members[index].size, error, error_size)) {
+            free(path); goto done;
+        }
+        free(path);
+    }
+#ifdef _WIN32
+    if (GetFileAttributesA(backup) != INVALID_FILE_ATTRIBUTES) goto done;
+    if (GetFileAttributesA(destination) != INVALID_FILE_ATTRIBUTES) {
+        if (!MoveFileExA(destination, backup, MOVEFILE_WRITE_THROUGH)) goto done;
+        moved_previous = 1;
+    }
+    if (!MoveFileExA(staged_interop, destination, MOVEFILE_WRITE_THROUGH)) {
+        if (moved_previous) MoveFileExA(backup, destination, MOVEFILE_WRITE_THROUGH);
+        goto done;
+    }
+#else
+    { struct stat status;
+      if (lstat(backup, &status) == 0) goto done;
+      if (lstat(destination, &status) == 0) {
+          if (rename(destination, backup)) goto done;
+          moved_previous = 1;
+      }
+      if (rename(staged_interop, destination)) {
+          if (moved_previous) rename(backup, destination);
+          goto done;
+      }
+    }
+#endif
+    ok = 1;
+done:
+    if (archive) fclose(archive);
+    if (staged) {
+        /* Remove only names validated above in this newly-created stage. */
+        for (index = 0; members && index < count; index++) {
+            char *path, *cursor;
+            if (!members[index].name) continue;
+            path = join_path(stage, members[index].name);
+            if (!path) continue;
+            remove(path);
+            for (cursor = path + strlen(path); cursor > path + strlen(stage); cursor--)
+                if (*cursor == '/' || *cursor == '\\') {
+                    *cursor = '\0';
+#ifdef _WIN32
+                    RemoveDirectoryA(path);
+#else
+                    rmdir(path);
+#endif
+                }
+            free(path);
+        }
+#ifdef _WIN32
+        RemoveDirectoryA(stage);
+#else
+        rmdir(stage);
+#endif
+    }
+    for (index = 0; members && index < count; index++) free(members[index].name);
+    free(members); free(tail); free(stage); free(staged_interop); free(destination); free(backup);
+    if (!ok && (!error || !*error))
+        report_error(error, error_size, "the interop helper archive is unsafe, incomplete, or could not be installed; close Z# apps and retry");
     return ok;
 }
 
@@ -776,6 +970,8 @@ static int parse_release(const char *manifest, const char *platform,
     release->support_sha256 = json_string(begin, end, "supportSha256");
     release->python_path = json_string(begin, end, "pythonPath");
     release->python_sha256 = json_string(begin, end, "pythonSha256");
+    release->interop_path = json_string(begin, end, "interopPath");
+    release->interop_sha256 = json_string(begin, end, "interopSha256");
     if (release->archive_url == NULL || release->archive_sha256 == NULL ||
         release->runtime_path == NULL || release->runtime_sha256 == NULL ||
         !json_u64(download_begin, download_end, "size",
@@ -818,6 +1014,18 @@ static int parse_release(const char *manifest, const char *platform,
             return 0;
         }
     }
+    if (json_value(begin, end, "interopPath") != NULL ||
+        json_value(begin, end, "interopSha256") != NULL ||
+        json_value(begin, end, "interopSize") != NULL) {
+        if (release->interop_path == NULL || release->interop_sha256 == NULL ||
+            !json_u64(begin, end, "interopSize", &release->interop_size) ||
+            !valid_sha256(release->interop_sha256) ||
+            !safe_zip_member(release->interop_path, platform) ||
+            release->interop_size == 0 || release->interop_size > 64u * 1024u * 1024u) {
+            report_error(error, error_size, "the update site returned invalid interop helper metadata");
+            return 0;
+        }
+    }
     return 1;
 }
 
@@ -831,6 +1039,8 @@ static void release_free(ReleaseInfo *release) {
     free(release->support_sha256);
     free(release->python_path);
     free(release->python_sha256);
+    free(release->interop_path);
+    free(release->interop_sha256);
     memset(release, 0, sizeof(*release));
 }
 
@@ -1290,6 +1500,7 @@ static int installer_core_main(int argc, char **argv) {
     char *runtime_temporary = NULL;
     char *support_temporary = NULL;
     char *python_temporary = NULL;
+    char *interop_temporary = NULL;
     char *installed_installer = NULL;
     char *installer_backup = NULL;
     char *installer_temporary = NULL;
@@ -1463,6 +1674,16 @@ static int installer_core_main(int argc, char **argv) {
         snprintf(name, sizeof(name), ".zsharp-python-%lu.tmp", pid);
         python_temporary = join_path(install_directory, name);
     }
+    if (release.interop_path != NULL) {
+        char name[96];
+#ifdef _WIN32
+        unsigned long pid = (unsigned long)GetCurrentProcessId();
+#else
+        unsigned long pid = (unsigned long)getpid();
+#endif
+        snprintf(name, sizeof(name), ".zsharp-interop-%lu.tmp", pid);
+        interop_temporary = join_path(install_directory, name);
+    }
 #ifdef _WIN32
     runtime = join_path(install_directory, "zsharp.exe");
     runtime_backup = join_path(install_directory, "zsharp.previous.exe");
@@ -1517,7 +1738,8 @@ static int installer_core_main(int argc, char **argv) {
           support_temporary == NULL)) ||
         (release.python_path != NULL &&
          (python_archive == NULL || python_archive_backup == NULL ||
-          python_temporary == NULL))) {
+          python_temporary == NULL)) ||
+        (release.interop_path != NULL && interop_temporary == NULL)) {
         strcpy(error, "out of memory");
         goto done;
     }
@@ -1586,6 +1808,19 @@ static int installer_core_main(int argc, char **argv) {
         strcpy(error, "the Python runtime failed SHA-256 verification");
         goto done;
     }
+    if (release.interop_path != NULL) {
+        if (!extract_stored_zip_member(archive, release.interop_path, interop_temporary,
+                                       release.interop_size, error, sizeof(error)) ||
+            !zsharp_sha256_file(interop_temporary, digest)) {
+            if (!error[0]) strcpy(error, "the interop helper checksum could not be read");
+            goto done;
+        }
+        zsharp_hash_hex(digest, digest_hex);
+        if (strcmp(digest_hex, release.interop_sha256)) {
+            strcpy(error, "the interop helper archive failed SHA-256 verification");
+            goto done;
+        }
+    }
 #ifndef _WIN32
     if (chmod(runtime_temporary, 0755) != 0) {
         strcpy(error, "could not make the downloaded ZVM executable");
@@ -1606,6 +1841,8 @@ static int installer_core_main(int argc, char **argv) {
     }
     wait_for_process(wait_process_id);
     installer_gui_step("Installing Z# and setting up the Hub...");
+    if (interop_temporary && !install_interop_archive(interop_temporary,
+            install_directory, error, sizeof(error))) goto done;
     if (!same_path(self, installed_installer) &&
         !replace_file(installer_temporary, installed_installer,
                       installer_backup, "Z# updater", error,
@@ -1693,6 +1930,7 @@ done:
     if (runtime_temporary != NULL) remove(runtime_temporary);
     if (support_temporary != NULL) remove(support_temporary);
     if (python_temporary != NULL) remove(python_temporary);
+    if (interop_temporary != NULL) remove(interop_temporary);
     if (installer_temporary != NULL) remove(installer_temporary);
     if (manifest_temp[0] != '\0') remove(manifest_temp);
 #ifdef _WIN32
@@ -1712,6 +1950,7 @@ done:
     free(support_backup);
     free(support);
     free(python_temporary);
+    free(interop_temporary);
     free(python_archive_backup);
     free(python_archive);
     free(archive);

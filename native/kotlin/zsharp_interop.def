@@ -1,0 +1,3 @@
+headers = zsharp_kotlin.h
+headerFilter = zsharp_kotlin.h zsharp_c.h zsharp_interop.h
+package = zsharp.interop

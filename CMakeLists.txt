@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.3.0.0 LANGUAGES C)
+project(zsharp VERSION 1.4.0.0 LANGUAGES C)
 if(MSVC)
     # The bootstrap installs one native executable, not a machine-wide VC++
     # redistributable. Keep the C and C++ runtimes inside that executable.
@@ -86,8 +86,16 @@ endif()
 
 add_executable(zsharp
     native/src/c_syntax.c
+    native/src/interop_process.c
+    native/src/interop_embedded.c
+    native/src/interop_script.c
+    native/src/interop_script_lua.c
     native/src/achievement.c
     native/src/desktop.c
+    native/src/desktop_api.c
+    native/src/audio_api.c
+    native/src/speech_api.c
+    native/src/speech_input.c
     native/src/hub.c
     native/src/game_runtime.c
     native/src/game_animation.c
@@ -123,9 +131,17 @@ if(ANDROID)
     # a common runtime-library target.
     add_library(zsharp_android_vm SHARED
         native/src/c_syntax.c
+        native/src/interop_process.c
+        native/src/interop_embedded.c
+        native/src/interop_script.c
+        native/src/interop_script_lua.c
         native/src/android_vm_bridge.c
         native/src/achievement.c
         native/src/desktop.c
+        native/src/desktop_api.c
+        native/src/audio_api.c
+        native/src/speech_api.c
+        native/src/speech_input.c
         native/src/hub.c
         native/src/game_runtime.c
         native/src/game_animation.c
@@ -160,7 +176,7 @@ if(ANDROID)
         zsharp_language_core qjs zsharp_lua zsharp_ufbx Threads::Threads ${CMAKE_DL_LIBS} m log)
 endif()
 
-add_custom_command(TARGET zsharp POST_BUILD
+add_custom_target(zsharp_python_helpers
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:zsharp>/python"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/native/python/zsharp_bridge.py"
@@ -168,7 +184,81 @@ add_custom_command(TARGET zsharp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/native/python/zsharp_network.py"
             "$<TARGET_FILE_DIR:zsharp>/python/zsharp_network.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/native/python/zsharp_voice.py"
+            "$<TARGET_FILE_DIR:zsharp>/python/zsharp_voice.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/native/python/zsharp_speech_input.py"
+            "$<TARGET_FILE_DIR:zsharp>/python/zsharp_speech_input.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/install-speech-components.py"
+            "$<TARGET_FILE_DIR:zsharp>/python/install-speech-components.py"
     VERBATIM)
+add_dependencies(zsharp zsharp_python_helpers)
+
+# Managed helpers are portable assets. Toolchains are optional for development
+# builds, while release CI installs both so every desktop archive ships them.
+find_package(Java 17 COMPONENTS Development QUIET)
+find_program(ZSHARP_DOTNET_EXECUTABLE NAMES dotnet)
+set(ZSHARP_DOTNET_SDK_AVAILABLE FALSE)
+if(ZSHARP_DOTNET_EXECUTABLE)
+    execute_process(COMMAND "${ZSHARP_DOTNET_EXECUTABLE}" --list-sdks
+        OUTPUT_VARIABLE ZSHARP_DOTNET_SDKS RESULT_VARIABLE ZSHARP_DOTNET_SDK_RESULT
+        ERROR_QUIET)
+    if(ZSHARP_DOTNET_SDK_RESULT EQUAL 0 AND
+       ZSHARP_DOTNET_SDKS MATCHES "(^|\n)(8|9|[1-9][0-9]+)\\.")
+        set(ZSHARP_DOTNET_SDK_AVAILABLE TRUE)
+    endif()
+endif()
+find_program(ZSHARP_GO_EXECUTABLE NAMES go)
+find_program(ZSHARP_RUBY_EXECUTABLE NAMES ruby)
+set(ZSHARP_INTEROP_BUILD "${CMAKE_CURRENT_BINARY_DIR}/interop-build")
+set(ZSHARP_INTEROP_DEPENDENCIES)
+if(Java_FOUND AND NOT ANDROID)
+    file(GLOB ZSHARP_JAVA_INTEROP_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/native/interop/java/src/ZSharp/*.java")
+    add_custom_command(OUTPUT "${ZSHARP_INTEROP_BUILD}/java/zsharp-java-worker.jar"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${ZSHARP_INTEROP_BUILD}/java/classes"
+        COMMAND "${Java_JAVAC_EXECUTABLE}" --release 17 -encoding UTF-8
+            -d "${ZSHARP_INTEROP_BUILD}/java/classes" ${ZSHARP_JAVA_INTEROP_SOURCES}
+        COMMAND "${Java_JAR_EXECUTABLE}" --create
+            --file "${ZSHARP_INTEROP_BUILD}/java/zsharp-java-worker.jar"
+            -C "${ZSHARP_INTEROP_BUILD}/java/classes" .
+        DEPENDS ${ZSHARP_JAVA_INTEROP_SOURCES}
+        VERBATIM)
+    add_custom_target(zsharp_java_interop_worker
+        DEPENDS "${ZSHARP_INTEROP_BUILD}/java/zsharp-java-worker.jar")
+    list(APPEND ZSHARP_INTEROP_DEPENDENCIES zsharp_java_interop_worker)
+else()
+    message(STATUS "Java 17+ development tools not found: shipping Java SDK sources without a rebuilt worker JAR")
+endif()
+if(ZSHARP_DOTNET_SDK_AVAILABLE AND NOT ANDROID)
+    file(GLOB ZSHARP_CSHARP_INTEROP_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/native/interop/csharp/*.cs"
+        "${CMAKE_CURRENT_SOURCE_DIR}/native/interop/csharp/*.csproj")
+    add_custom_command(OUTPUT "${ZSHARP_INTEROP_BUILD}/csharp/ZSharp.Interop.Worker.dll"
+        COMMAND "${ZSHARP_DOTNET_EXECUTABLE}" build
+            "${CMAKE_CURRENT_SOURCE_DIR}/native/interop/csharp/ZSharp.Interop.Worker.csproj"
+            --configuration Release --nologo
+            --artifacts-path "${ZSHARP_INTEROP_BUILD}/dotnet"
+            --output "${ZSHARP_INTEROP_BUILD}/csharp"
+        DEPENDS ${ZSHARP_CSHARP_INTEROP_SOURCES}
+        VERBATIM)
+    add_custom_target(zsharp_csharp_interop_worker
+        DEPENDS "${ZSHARP_INTEROP_BUILD}/csharp/ZSharp.Interop.Worker.dll")
+    list(APPEND ZSHARP_INTEROP_DEPENDENCIES zsharp_csharp_interop_worker)
+else()
+    message(STATUS ".NET SDK not found: shipping C# SDK sources without a rebuilt managed worker")
+endif()
+add_custom_target(zsharp_interop_helpers ALL
+    COMMAND ${CMAKE_COMMAND}
+        "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/native/interop"
+        "-DBUILD=${ZSHARP_INTEROP_BUILD}"
+        "-DDESTINATION=$<TARGET_FILE_DIR:zsharp>/interop"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/stage-interop.cmake"
+    DEPENDS ${ZSHARP_INTEROP_DEPENDENCIES}
+    VERBATIM)
+add_dependencies(zsharp zsharp_interop_helpers)
 
 if(MSVC)
     get_filename_component(ZSHARP_MSVC_TOOL_DIRECTORY "${CMAKE_LINKER}" DIRECTORY)
@@ -308,9 +398,18 @@ if(NOT WIN32)
     target_link_libraries(zsharp PRIVATE m)
 endif()
 
+if(APPLE)
+    # The command-line ZVM also needs a usage description for macOS TCC; it is
+    # not necessarily launched from an .app bundle with an external Info.plist.
+    configure_file(native/macos/Info.plist.in
+        "${CMAKE_CURRENT_BINARY_DIR}/zsharp-runtime-Info.plist" @ONLY)
+    target_link_options(zsharp PRIVATE
+        "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/zsharp-runtime-Info.plist")
+endif()
+
 if(WIN32)
     target_link_libraries(zsharp PRIVATE user32 gdi32 msimg32 comdlg32 ole32 windowscodecs
-                                            shell32 advapi32 uuid winhttp)
+                                            shell32 advapi32 uuid winhttp sapi oleaut32)
     target_link_libraries(zsharp_installer PRIVATE winhttp advapi32 user32 shell32)
 endif()
 
@@ -328,6 +427,11 @@ if(WIN32)
 endif()
 install(FILES native/python/zsharp_bridge.py DESTINATION bin/python)
 install(FILES native/python/zsharp_network.py DESTINATION bin/python)
+install(FILES native/python/zsharp_voice.py native/python/zsharp_speech_input.py
+        DESTINATION bin/python)
+install(FILES tools/install-speech-components.py DESTINATION bin/python)
+install(DIRECTORY "$<TARGET_FILE_DIR:zsharp>/interop/" DESTINATION bin/interop
+        OPTIONAL)
 install(FILES native/rust/zsharp_ffi.rs DESTINATION share/zsharp/rust)
 install(FILES
     native/include/zsharp.h
@@ -335,6 +439,8 @@ install(FILES
     native/include/zsharp_c.h
     native/include/zsharp_rust.h
     native/include/zsharp_provider.h
+    native/include/zsharp_interop.h
+    native/include/zsharp_kotlin.h
     DESTINATION include
 )
 install(FILES
@@ -366,6 +472,74 @@ set(CPACK_GENERATOR "ZIP")
 include(CPack)
 
 if(BUILD_TESTING)
+    add_executable(zsharp_test_package_executable tests/package-executable-tests.c)
+    target_include_directories(zsharp_test_package_executable PRIVATE native/src)
+    target_compile_features(zsharp_test_package_executable PRIVATE c_std_17)
+    add_test(NAME zsharp_package_executable COMMAND zsharp_test_package_executable)
+    enable_language(CXX)
+    add_executable(zsharp_test_interop_process tests/interop-process-tests.c
+        native/src/interop_process.c)
+    target_include_directories(zsharp_test_interop_process PRIVATE native/src)
+    target_compile_features(zsharp_test_interop_process PRIVATE c_std_17)
+    add_test(NAME zsharp_interop_process COMMAND zsharp_test_interop_process
+        "${CMAKE_CURRENT_BINARY_DIR}/owned interop process fixture")
+    set_tests_properties(zsharp_interop_process PROPERTIES TIMEOUT 25)
+    add_library(zsharp_test_interop_c_v2 SHARED tests/native-interop-v2/fixture.c)
+    add_library(zsharp_test_interop_cpp_v2 SHARED tests/native-interop-v2/fixture.cpp)
+    target_include_directories(zsharp_test_interop_c_v2 PRIVATE native/include)
+    target_include_directories(zsharp_test_interop_cpp_v2 PRIVATE native/include)
+    target_compile_features(zsharp_test_interop_c_v2 PRIVATE c_std_17)
+    target_compile_features(zsharp_test_interop_cpp_v2 PRIVATE cxx_std_17)
+    add_executable(zsharp_test_interop_native_abi tests/native-interop-v2/abi-tests.c)
+    target_include_directories(zsharp_test_interop_native_abi PRIVATE native/include)
+    target_compile_features(zsharp_test_interop_native_abi PRIVATE c_std_17)
+    target_link_libraries(zsharp_test_interop_native_abi PRIVATE ${CMAKE_DL_LIBS})
+    add_test(NAME zsharp_interop_native_abi COMMAND zsharp_test_interop_native_abi
+        "$<TARGET_FILE:zsharp_test_interop_c_v2>" "$<TARGET_FILE:zsharp_test_interop_cpp_v2>")
+    add_executable(zsharp_test_interop_native_backend tests/native-interop-v2/backend-tests.c
+        native/src/interop_embedded.c)
+    target_include_directories(zsharp_test_interop_native_backend PRIVATE native/include native/src)
+    target_compile_features(zsharp_test_interop_native_backend PRIVATE c_std_17)
+    target_link_libraries(zsharp_test_interop_native_backend PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+    add_test(NAME zsharp_interop_native_backend COMMAND zsharp_test_interop_native_backend
+        "$<TARGET_FILE:zsharp_test_interop_c_v2>" "$<TARGET_FILE:zsharp_test_c_module>")
+    add_executable(zsharp_test_foreign_imports tests/foreign-import-tests.c)
+    target_link_libraries(zsharp_test_foreign_imports PRIVATE zsharp_language_core)
+    add_test(NAME zsharp_foreign_imports COMMAND zsharp_test_foreign_imports
+        "${CMAKE_CURRENT_BINARY_DIR}/foreign-import-tests.zbc")
+    add_executable(zsharp_test_interop_script tests/interop-managed/script-tests.c
+        native/src/interop_script.c native/src/interop_script_lua.c)
+    target_include_directories(zsharp_test_interop_script PRIVATE native/src)
+    target_compile_features(zsharp_test_interop_script PRIVATE c_std_17)
+    target_link_libraries(zsharp_test_interop_script PRIVATE qjs zsharp_lua Threads::Threads)
+    add_test(NAME zsharp_interop_javascript COMMAND zsharp_test_interop_script
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/interop-managed/ScriptSample.js"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/interop-managed/ScriptLegacy.js"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/interop-managed/ScriptDefault.js")
+    set_tests_properties(zsharp_interop_javascript PROPERTIES TIMEOUT 20)
+    add_executable(zsharp_test_interop_lua tests/interop-managed/lua-tests.c
+        native/src/interop_script_lua.c)
+    target_include_directories(zsharp_test_interop_lua PRIVATE native/src)
+    target_compile_features(zsharp_test_interop_lua PRIVATE c_std_17)
+    target_link_libraries(zsharp_test_interop_lua PRIVATE qjs zsharp_lua Threads::Threads)
+    add_test(NAME zsharp_interop_lua COMMAND zsharp_test_interop_lua
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/interop-managed/LuaSample.lua")
+    set_tests_properties(zsharp_interop_lua PROPERTIES TIMEOUT 20)
+    add_executable(zsharp_test_foreign_object_syntax tests/foreign-object-syntax-tests.c)
+    target_link_libraries(zsharp_test_foreign_object_syntax PRIVATE zsharp_language_core)
+    add_test(NAME zsharp_foreign_object_syntax COMMAND zsharp_test_foreign_object_syntax
+        "${CMAKE_CURRENT_BINARY_DIR}/foreign-object-syntax-tests.zbc")
+    if(ZSHARP_GO_EXECUTABLE)
+        add_test(NAME zsharp_interop_go COMMAND ${CMAKE_COMMAND} -E env GOWORK=off
+            "${ZSHARP_GO_EXECUTABLE}" test ./...)
+        set_tests_properties(zsharp_interop_go PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/native/interop/go" TIMEOUT 90)
+    endif()
+    if(ZSHARP_RUBY_EXECUTABLE)
+        add_test(NAME zsharp_interop_ruby COMMAND "${ZSHARP_RUBY_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/native/interop/ruby/zsharp_worker_test.rb")
+        set_tests_properties(zsharp_interop_ruby PROPERTIES TIMEOUT 30)
+    endif()
     if(WIN32 AND TARGET openxr_loader)
         add_executable(zsharp_test_xr_d3d11 tests/xr-d3d11-tests.cpp)
         target_include_directories(zsharp_test_xr_d3d11 PRIVATE native/src)
@@ -494,6 +668,176 @@ if(BUILD_TESTING)
     add_executable(zsharp_test_time tests/time-tests.c)
     target_link_libraries(zsharp_test_time PRIVATE zsharp_language_core)
     add_test(NAME zsharp_time COMMAND zsharp_test_time)
+    add_executable(zsharp_test_application_quit tests/application-quit-tests.c)
+    target_link_libraries(zsharp_test_application_quit PRIVATE zsharp_language_core)
+    add_test(NAME zsharp_application_quit
+        COMMAND zsharp_test_application_quit
+            "${CMAKE_CURRENT_BINARY_DIR}/application-quit-roundtrip.zbc")
+    add_executable(zsharp_test_member_visibility_status
+        tests/member-visibility-status-tests.c)
+    target_link_libraries(zsharp_test_member_visibility_status
+        PRIVATE zsharp_language_core)
+    add_test(NAME zsharp_member_visibility_status
+        COMMAND zsharp_test_member_visibility_status
+            "${CMAKE_CURRENT_BINARY_DIR}/member-visibility-status-roundtrip.zbc")
+    add_executable(zsharp_test_system_api tests/system-api-tests.c)
+    target_link_libraries(zsharp_test_system_api PRIVATE zsharp_language_core)
+    add_test(NAME zsharp_system_api COMMAND zsharp_test_system_api
+        "${CMAKE_CURRENT_BINARY_DIR}/system-api-roundtrip.zbc")
+    add_executable(zsharp_test_audio_api tests/audio-api-tests.c native/src/audio_api.c)
+    target_include_directories(zsharp_test_audio_api PRIVATE native/src)
+    target_compile_features(zsharp_test_audio_api PRIVATE c_std_17)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_audio_api PRIVATE m)
+    endif()
+    add_test(NAME zsharp_audio_api COMMAND zsharp_test_audio_api
+        "${CMAKE_CURRENT_BINARY_DIR}/audio-api-fixture.wav")
+    if(TARGET SDL3::SDL3-static)
+        add_executable(zsharp_test_audio_stream tests/audio-stream-tests.c native/src/audio_api.c)
+        target_include_directories(zsharp_test_audio_stream PRIVATE native/src)
+        target_compile_features(zsharp_test_audio_stream PRIVATE c_std_17)
+        target_compile_definitions(zsharp_test_audio_stream PRIVATE ZSHARP_HAS_SDL_AUDIO=1)
+        target_link_libraries(zsharp_test_audio_stream PRIVATE SDL3::SDL3-static)
+        if(NOT WIN32)
+            target_link_libraries(zsharp_test_audio_stream PRIVATE m)
+        endif()
+        add_test(NAME zsharp_audio_stream COMMAND zsharp_test_audio_stream)
+        set_tests_properties(zsharp_audio_stream PROPERTIES ENVIRONMENT "SDL_AUDIODRIVER=dummy" TIMEOUT 30)
+    endif()
+    add_executable(zsharp_test_desktop_api tests/desktop-api-tests.c native/src/desktop_api.c)
+    target_include_directories(zsharp_test_desktop_api PRIVATE native/src)
+    target_compile_features(zsharp_test_desktop_api PRIVATE c_std_17)
+    if(WIN32)
+        target_link_libraries(zsharp_test_desktop_api PRIVATE user32 advapi32)
+    else()
+        target_link_libraries(zsharp_test_desktop_api PRIVATE m ${CMAKE_DL_LIBS} Threads::Threads)
+    endif()
+    add_test(NAME zsharp_desktop_api COMMAND zsharp_test_desktop_api
+        "${CMAKE_CURRENT_BINARY_DIR}")
+    add_executable(zsharp_test_desktop_input tests/desktop-input-tests.c)
+    target_include_directories(zsharp_test_desktop_input PRIVATE native/src)
+    target_compile_features(zsharp_test_desktop_input PRIVATE c_std_17)
+    add_test(NAME zsharp_desktop_input COMMAND zsharp_test_desktop_input)
+    if(WIN32)
+        add_executable(zsharp_test_desktop_close tests/desktop-close-tests.c
+            native/src/desktop_api.c)
+        target_include_directories(zsharp_test_desktop_close PRIVATE native/src)
+        target_compile_features(zsharp_test_desktop_close PRIVATE c_std_17)
+        target_link_libraries(zsharp_test_desktop_close PRIVATE user32 advapi32)
+        add_test(NAME zsharp_desktop_close COMMAND zsharp_test_desktop_close)
+        set_tests_properties(zsharp_desktop_close PROPERTIES TIMEOUT 60)
+        add_executable(zsharp_test_desktop_input_windows
+            tests/desktop-input-windows-tests.c)
+        target_include_directories(zsharp_test_desktop_input_windows PRIVATE native/src)
+        target_compile_features(zsharp_test_desktop_input_windows PRIVATE c_std_17)
+        target_link_libraries(zsharp_test_desktop_input_windows PRIVATE user32 advapi32)
+        add_test(NAME zsharp_desktop_input_windows COMMAND zsharp_test_desktop_input_windows)
+        set_tests_properties(zsharp_desktop_input_windows PROPERTIES TIMEOUT 30)
+        # Real message transport into hidden, process-owned edit controls only:
+        # this regression never activates a window or sends keyboard/mouse input.
+        add_executable(zsharp_test_desktop_input_ack
+            tests/desktop-input-ack-tests.c)
+        target_include_directories(zsharp_test_desktop_input_ack PRIVATE native/src)
+        target_compile_features(zsharp_test_desktop_input_ack PRIVATE c_std_17)
+        target_link_libraries(zsharp_test_desktop_input_ack PRIVATE user32 advapi32)
+        add_test(NAME zsharp_desktop_input_ack COMMAND zsharp_test_desktop_input_ack)
+        set_tests_properties(zsharp_desktop_input_ack PROPERTIES TIMEOUT 30)
+        # Manual only: waits for its Run button, then types into its own visible
+        # receiver. Never register foreground/input integration as unattended CTest.
+        add_executable(zsharp_test_desktop_input_live WIN32 EXCLUDE_FROM_ALL
+            tests/desktop-input-live-tests.c)
+        target_include_directories(zsharp_test_desktop_input_live PRIVATE native/src)
+        target_compile_features(zsharp_test_desktop_input_live PRIVATE c_std_17)
+        target_link_libraries(zsharp_test_desktop_input_live PRIVATE user32 advapi32 gdi32)
+        # Manual opt-in test against a separate, uniquely named Notepad fixture.
+        # Never register real application input as an unattended CTest.
+        add_executable(zsharp_test_desktop_input_notepad WIN32 EXCLUDE_FROM_ALL
+            tests/desktop-input-notepad-tests.c)
+        target_include_directories(zsharp_test_desktop_input_notepad PRIVATE native/src)
+        target_compile_features(zsharp_test_desktop_input_notepad PRIVATE c_std_17)
+        target_link_libraries(zsharp_test_desktop_input_notepad PRIVATE user32 advapi32 gdi32)
+    endif()
+    add_executable(zsharp_test_speech_api tests/speech-api-tests.c
+        native/src/speech_api.c native/src/speech_input.c)
+    target_include_directories(zsharp_test_speech_api PRIVATE native/src)
+    target_compile_features(zsharp_test_speech_api PRIVATE c_std_17)
+    target_link_libraries(zsharp_test_speech_api PRIVATE qjs Threads::Threads)
+    if(WIN32)
+        target_link_libraries(zsharp_test_speech_api PRIVATE sapi ole32 oleaut32 uuid)
+    else()
+        target_link_libraries(zsharp_test_speech_api PRIVATE m)
+    endif()
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME zsharp_interop_python_worker
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/python-interop-worker-tests.py")
+        add_executable(zsharp_test_speech_stream_api tests/speech-stream-api-tests.c
+            native/src/speech_api.c native/src/speech_input.c)
+        target_include_directories(zsharp_test_speech_stream_api PRIVATE native/src)
+        target_compile_features(zsharp_test_speech_stream_api PRIVATE c_std_17)
+        target_link_libraries(zsharp_test_speech_stream_api PRIVATE qjs Threads::Threads)
+        if(WIN32)
+            target_link_libraries(zsharp_test_speech_stream_api PRIVATE sapi ole32 oleaut32 uuid)
+        else()
+            target_link_libraries(zsharp_test_speech_stream_api PRIVATE m)
+        endif()
+        add_test(NAME zsharp_speech_stream_api COMMAND zsharp_test_speech_stream_api
+            "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/speech-voice-stream.py")
+        set_tests_properties(zsharp_speech_stream_api PROPERTIES TIMEOUT 45)
+        add_executable(zsharp_test_speech_input_worker
+            tests/speech-input-worker-tests.c native/src/speech_input.c)
+        target_include_directories(zsharp_test_speech_input_worker PRIVATE native/src)
+        target_compile_features(zsharp_test_speech_input_worker PRIVATE c_std_17)
+        target_link_libraries(zsharp_test_speech_input_worker PRIVATE Threads::Threads)
+        add_test(NAME zsharp_speech_input_worker
+            COMMAND zsharp_test_speech_input_worker "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/speech-input-worker.py")
+        add_test(NAME zsharp_speech_input_helper
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/speech-input-helper-tests.py")
+        add_test(NAME zsharp_speech_api COMMAND zsharp_test_speech_api
+            "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/native/python/zsharp_voice.py")
+        add_test(NAME zsharp_speech_voice_helper
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/speech-voice-helper-tests.py")
+        add_test(NAME zsharp_speech_voice_worker
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/speech-voice-worker-tests.py")
+        add_test(NAME zsharp_speech_installer
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/speech-installer-tests.py")
+    else()
+        add_test(NAME zsharp_speech_api COMMAND zsharp_test_speech_api)
+    endif()
+    find_program(ZSHARP_NODE_TEST_EXECUTABLE NAMES node)
+    if(ZSHARP_NODE_TEST_EXECUTABLE)
+        if(Java_FOUND AND ZSHARP_DOTNET_SDK_AVAILABLE)
+            add_test(NAME zsharp_interop_managed_workers
+                COMMAND "${ZSHARP_NODE_TEST_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/interop-managed/run.mjs"
+                    "${CMAKE_CURRENT_BINARY_DIR}/managed-worker-tests")
+            set_tests_properties(zsharp_interop_managed_workers PROPERTIES TIMEOUT 150)
+        endif()
+        add_test(NAME zsharp_interop_installer
+            COMMAND "${ZSHARP_NODE_TEST_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/interop-managed/installer-tests.mjs"
+                "$<TARGET_FILE:zsharp_installer>")
+        add_test(NAME zsharp_foreign_import_validation
+            COMMAND "${ZSHARP_NODE_TEST_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/foreign-import-validation-tests.mjs"
+                "$<TARGET_FILE:zsharp>")
+        add_test(NAME zsharp_desktop_input_posix
+            COMMAND "${ZSHARP_NODE_TEST_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/desktop-input-posix-tests.mjs")
+        add_test(NAME zsharp_system_api_runtime
+            COMMAND "${ZSHARP_NODE_TEST_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/system-api-runtime-tests.mjs"
+                "$<TARGET_FILE:zsharp>" "${Python3_EXECUTABLE}")
+        add_test(NAME zsharp_member_visibility_status_runtime
+            COMMAND "${ZSHARP_NODE_TEST_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/member-visibility-status-runtime-tests.mjs"
+                "$<TARGET_FILE:zsharp>")
+        add_test(NAME zsharp_application_quit_runtime
+            COMMAND "${ZSHARP_NODE_TEST_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/application-quit-runtime-tests.mjs"
+                "$<TARGET_FILE:zsharp>")
+    endif()
     add_executable(zsharp_test_game_projection
         tests/game-projection-tests.c
         native/src/game_projection.c
@@ -620,6 +964,12 @@ if(BUILD_TESTING)
     add_test(NAME zsharp_source_dependencies COMMAND "${CMAKE_COMMAND}"
         "-DBIN=$<TARGET_FILE:zsharp>" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}"
         "-DOUT=${CMAKE_CURRENT_BINARY_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run-source-dependency-tests.cmake")
+    add_executable(zsharp_test_vm_blocking_state tests/vm-blocking-state-tests.c)
+    target_include_directories(zsharp_test_vm_blocking_state PRIVATE native/src)
+    target_compile_features(zsharp_test_vm_blocking_state PRIVATE c_std_17)
+    target_link_libraries(zsharp_test_vm_blocking_state PRIVATE Threads::Threads)
+    add_test(NAME zsharp_vm_blocking_state COMMAND zsharp_test_vm_blocking_state)
+    set_tests_properties(zsharp_vm_blocking_state PROPERTIES TIMEOUT 15)
     if(WIN32)
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
             set(ZSHARP_TEST_PLATFORM "windows-aarch64")
