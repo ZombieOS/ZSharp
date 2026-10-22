@@ -19,6 +19,8 @@ jobs:
         uses: actions/checkout@v6
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
       - name: Install Android NDK
         shell: bash
         run: sdkmanager --install 'ndk;27.0.12077973'
@@ -134,7 +136,9 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          # Temurin Windows ARM64 starts at JDK 21. javac --release 17 keeps
+          # the shipped helper compatible with Java 17 on every platform.
+          java-version: ${{ matrix.platform == 'windows-aarch64' && '21' || '17' }}
 
       - name: Set up portable C# interop helper build
         uses: actions/setup-dotnet@v4
