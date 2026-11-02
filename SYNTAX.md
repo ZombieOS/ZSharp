@@ -4183,6 +4183,76 @@ entry points remain unchanged and continue to work, but do not acquire object
 operations/callbacks automatically. The host pointer/context is borrowed only
 for the current entry call; never retain it for later use.
 
+### Package-relative imports from Maven projects
+
+The Java/Maven integration uses the normal language source directories. Keep
+`project.zsettings` at the Maven module root and put matching package folders
+under each language directory:
+
+```text
+project.zsettings
+src/main/java/com/user/project/Java.java
+src/main/kotlin/com/user/project/Kotlin.kt
+src/main/zsharp/com/user/project/Main.zsharp
+src/main/zsharp/com/user/project/ZSharp.zsharp
+```
+
+When the Java integration runs or compiles `Main.zsharp`, imports start at its
+package directory (`com.user.project` in this example):
+
+```zsharp
+noticed room Main[] (
+ import java:project_id.Java():
+ import kt:project_id.Kotlin():
+ import project_id.ZSharp():
+
+ noticed brain Start[] (
+  Print(Function.call(java:Java:greet ["Z#"])):
+  Print(Function.call(kt:Kotlin:greet ["Z#"])):
+ )
+)
+```
+
+Replace `project_id` with the settings PID. An import such as
+`java:project_id.utilities.Tools()` selects
+`src/main/java/com/user/project/utilities/Tools.java`. Generated copies under
+`target` are not additional Z# declarations. Source and asset files keep their
+ordinary project-root file paths; this mapping does not copy or rewrite source.
+
+Maven must compile Java/Kotlin classes before Z# calls them. The integration
+uses the invoking JVM's classpath and the module's `target/classes`; it does not
+compile raw Java/Kotlin source at runtime. `@ZSharp_Export` and the existing
+visibility rules still apply. The Maven artifact includes the Java interop SDK,
+so both Java and Kotlin can import `ZSharp.ZSharp` and
+`ZSharp.ZSharp_Export` directly.
+
+In this Maven mode, `kt:` uses Kotlin/JVM, including exported top-level
+functions and `@file:JvmName` facades. Kotlin can call back into Z# through
+`ZSharp.call("File:Room:Function", ...)`, just like Java. Synchronous callback
+and worker re-entry restrictions remain unchanged. Outside Maven mode,
+`kt:` retains the existing Kotlin/Native shared-library bridge.
+
+For an entry file outside `src/main/zsharp`, select the base package explicitly:
+
+```java
+var toolchain = com.zombieos.zsharp.ZSharp.toolchain()
+    .withBasePackage("com.user.project");
+var result = toolchain.run(java.nio.file.Path.of("Main.zsharp"));
+```
+
+Use the same `withBasePackage(...)` override when running compiled `.zbc` files
+from `target`, because their output location does not identify a source package.
+
+Different Java/Kotlin files share their JVM static state within one ZVM run,
+while each import exposes only the classes compiled from that source
+file. Missing compiled classes and ambiguous declarations produce errors.
+Ordinary Z# projects and existing precompiled foreign modules keep their
+previous import behavior.
+
+This source mapping uses the calling Java application's classpath. A standalone
+`.zapp` or `.zgame` still needs portable compiled foreign modules and the normal
+packaged layout; importing a Maven source file does not embed its JVM dependencies.
+
 ### Java exports
 
 ```java

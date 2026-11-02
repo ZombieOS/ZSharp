@@ -1,6 +1,9 @@
 package ZSharp;
 
 import java.io.BufferedReader;
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.lang.reflect.Array;
@@ -14,10 +17,13 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
@@ -34,8 +40,13 @@ public final class Worker {
     private long nextObject = 1;
     private long nextCallback = 1;
     private final Thread workerThread = Thread.currentThread();
+    private URLClassLoader sourceLoader;
+    private List<Path> sourceClassPath;
 
-    private record Module(Path path, URLClassLoader loader, TreeSet<String> classes) {
+    private record Module(Path path, URLClassLoader loader, TreeSet<String> classes, boolean source) {
+    }
+
+    private record SourceClass(String name, String sourceFile) {
     }
 
     private record Match(Executable executable, Object[] arguments, int score) {
@@ -68,8 +79,15 @@ public final class Worker {
         ZSharp.connect(null);
         objects.clear();
         identities.clear();
+        LinkedHashSet<URLClassLoader> loaders = new LinkedHashSet<>();
         for (Module module : modules.values()) {
-            module.loader.close();
+            loaders.add(module.loader);
+        }
+        if (sourceLoader != null) {
+            loaders.add(sourceLoader);
+        }
+        for (URLClassLoader loader : loaders) {
+            loader.close();
         }
         modules.clear();
     }
@@ -189,6 +207,10 @@ public final class Worker {
         if (existing != null) {
             return existing;
         }
+        String lowerName = path.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+        if (lowerName.endsWith(".java") || lowerName.endsWith(".kt")) {
+            return sourceModule(path, lowerName.endsWith(".kt"));
+        }
         TreeSet<String> classes = new TreeSet<>();
         try (JarFile jar = new JarFile(path.toFile())) {
             jar.stream().filter(entry -> !entry.isDirectory() && entry.getName().endsWith(".class"))
@@ -196,9 +218,210 @@ public final class Worker {
                 .forEach(entry -> classes.add(entry.getName().substring(0, entry.getName().length() - 6).replace('/', '.')));
         }
         URLClassLoader loader = new URLClassLoader(new java.net.URL[] {path.toUri().toURL()}, Worker.class.getClassLoader());
-        Module loaded = new Module(path, loader, classes);
+        Module loaded = new Module(path, loader, classes, false);
         modules.put(path.toString(), loaded);
         return loaded;
+    }
+
+    private Module sourceModule(Path path, boolean kotlin) throws Exception {
+        String configuredProject = System.getenv("ZSHARP_MAVEN_PROJECT_ROOT");
+        String rootName = kotlin ? "ZSHARP_MAVEN_KOTLIN_ROOT" : "ZSHARP_MAVEN_JAVA_ROOT";
+        String configuredRoot = System.getenv(rootName);
+        if (configuredProject == null || configuredProject.isBlank()
+                || configuredRoot == null || configuredRoot.isBlank()) {
+            throw new IllegalArgumentException("Java/Kotlin source imports require scoped Maven project roots");
+        }
+        Path project = Path.of(configuredProject).toAbsolutePath().normalize().toRealPath();
+        Path languageRoot = project.resolve(kotlin ? "src/main/kotlin" : "src/main/java").toRealPath();
+        Path selected = Path.of(configuredRoot);
+        if (!selected.isAbsolute()) {
+            selected = project.resolve(selected);
+        }
+        selected = selected.toRealPath();
+        if (!languageRoot.startsWith(project) || !selected.startsWith(languageRoot)
+                || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IllegalArgumentException("Source import is outside its Maven source root: " + path);
+        }
+        Path source = path.toRealPath();
+        if (!source.startsWith(selected)) {
+            throw new IllegalArgumentException("Source import is outside its selected Maven package root: " + source);
+        }
+        Path relative = languageRoot.relativize(source);
+        String packageName = relative.getParent() == null ? ""
+                : relative.getParent().toString().replace('\\', '.').replace('/', '.');
+        String filename = source.getFileName().toString();
+        String stem = filename.substring(0, filename.lastIndexOf('.'));
+        String primaryName = packageName.isEmpty() ? stem : packageName + "." + stem;
+        TreeSet<String> classes = new TreeSet<>();
+        Map<String, Path> origins = new LinkedHashMap<>();
+        String prefix = packageName.replace('.', '/');
+        if (!prefix.isEmpty()) {
+            prefix += "/";
+        }
+        for (Path entry : sourceClassPath()) {
+            if (Files.isDirectory(entry)) {
+                Path directory = packageName.isEmpty() ? entry
+                        : entry.resolve(packageName.replace('.', '/'));
+                if (!Files.isDirectory(directory)) {
+                    continue;
+                }
+                try (var files = Files.list(directory)) {
+                    for (Path file : files.filter(Files::isRegularFile)
+                            .filter(file -> file.getFileName().toString().endsWith(".class")).toList()) {
+                        if (Files.size(file) > 16L * 1024 * 1024) {
+                            throw new IOException("Compiled JVM class exceeds the 16 MiB limit");
+                        }
+                        try (InputStream input = Files.newInputStream(file)) {
+                            addSourceClass(readSourceClass(input), filename, primaryName, kotlin,
+                                    packageName, entry, origins, classes);
+                        }
+                    }
+                }
+            } else {
+                try (JarFile jar = new JarFile(entry.toFile())) {
+                    var entries = jar.entries();
+                    while (entries.hasMoreElements()) {
+                        var file = entries.nextElement();
+                        String name = file.getName();
+                        if (file.isDirectory() || !name.startsWith(prefix) || !name.endsWith(".class")
+                                || name.indexOf('/', prefix.length()) >= 0) {
+                            continue;
+                        }
+                        if (file.getSize() < 0 || file.getSize() > 16L * 1024 * 1024) {
+                            throw new IOException("Compiled JVM class exceeds the 16 MiB limit");
+                        }
+                        try (InputStream input = jar.getInputStream(file)) {
+                            addSourceClass(readSourceClass(input), filename, primaryName, kotlin,
+                                    packageName, entry, origins, classes);
+                        }
+                    }
+                }
+            }
+        }
+        if (classes.isEmpty()) {
+            throw new IllegalArgumentException("No compiled JVM classes were found for source '" + source
+                    + "'; build the project and include its output in ZSHARP_JVM_CLASSPATH");
+        }
+        Module loaded = new Module(source, sourceLoader, classes, true);
+        modules.put(path.toString(), loaded);
+        return loaded;
+    }
+
+    private List<Path> sourceClassPath() throws Exception {
+        if (sourceClassPath != null) {
+            return sourceClassPath;
+        }
+        String configured = System.getenv("ZSHARP_JVM_CLASSPATH");
+        if (configured == null || configured.isBlank()) {
+            throw new IllegalArgumentException("Source imports require a compiled ZSHARP_JVM_CLASSPATH");
+        }
+        LinkedHashSet<Path> entries = new LinkedHashSet<>();
+        for (String value : configured.split(java.util.regex.Pattern.quote(java.io.File.pathSeparator))) {
+            if (!value.isBlank()) {
+                Path path = Path.of(value).toAbsolutePath().normalize();
+                if (Files.exists(path)) {
+                    entries.add(path.toRealPath());
+                }
+            }
+        }
+        if (entries.isEmpty()) {
+            throw new IllegalArgumentException("ZSHARP_JVM_CLASSPATH contains no existing compiled classpath entries");
+        }
+        var urls = new java.net.URL[entries.size()];
+        int index = 0;
+        for (Path entry : entries) {
+            urls[index++] = entry.toUri().toURL();
+        }
+        sourceLoader = new URLClassLoader(urls, Worker.class.getClassLoader());
+        sourceClassPath = List.copyOf(entries);
+        return sourceClassPath;
+    }
+
+    private static void addSourceClass(SourceClass info, String filename, String primaryName,
+                                       boolean kotlin, String packageName, Path origin,
+                                       Map<String, Path> origins, TreeSet<String> classes) {
+        int separator = info.name.lastIndexOf('.');
+        String actualPackage = separator < 0 ? "" : info.name.substring(0, separator);
+        if (!actualPackage.equals(packageName)) {
+            return;
+        }
+        boolean matches = filename.equals(info.sourceFile)
+                || (!kotlin && info.sourceFile == null
+                    && info.name.equals(primaryName));
+        if (!matches) {
+            return;
+        }
+        Path previous = origins.putIfAbsent(info.name, origin);
+        if (previous != null && !previous.equals(origin)) {
+            throw new IllegalArgumentException("Compiled class '" + info.name
+                    + "' is ambiguous across JVM classpath entries: " + previous + " and " + origin);
+        }
+        classes.add(info.name);
+    }
+
+    private static SourceClass readSourceClass(InputStream stream) throws IOException {
+        DataInputStream input = new DataInputStream(stream);
+        if (input.readInt() != 0xcafebabe) {
+            throw new IOException("Invalid compiled JVM class header");
+        }
+        input.readUnsignedShort();
+        input.readUnsignedShort();
+        int count = input.readUnsignedShort();
+        String[] strings = new String[count];
+        int[] classNames = new int[count];
+        for (int index = 1; index < count; index++) {
+            switch (input.readUnsignedByte()) {
+                case 1 -> strings[index] = input.readUTF();
+                case 7 -> classNames[index] = input.readUnsignedShort();
+                case 3, 4, 9, 10, 11, 12, 17, 18 -> input.skipNBytes(4);
+                case 5, 6 -> { input.skipNBytes(8); index++; }
+                case 8, 16, 19, 20 -> input.skipNBytes(2);
+                case 15 -> input.skipNBytes(3);
+                default -> throw new IOException("Unsupported JVM constant-pool entry");
+            }
+        }
+        input.readUnsignedShort();
+        int type = input.readUnsignedShort();
+        if (type <= 0 || type >= count || classNames[type] <= 0
+                || classNames[type] >= count || strings[classNames[type]] == null) {
+            throw new IOException("Invalid compiled JVM class name");
+        }
+        String name = strings[classNames[type]].replace('/', '.');
+        input.readUnsignedShort();
+        input.skipNBytes(2L * input.readUnsignedShort());
+        skipClassMembers(input);
+        skipClassMembers(input);
+        String source = null;
+        for (int left = input.readUnsignedShort(); left > 0; left--) {
+            int attribute = input.readUnsignedShort();
+            long length = Integer.toUnsignedLong(input.readInt());
+            if (attribute <= 0 || attribute >= count) {
+                throw new IOException("Invalid compiled JVM class attribute");
+            }
+            if ("SourceFile".equals(strings[attribute])) {
+                if (length != 2 || source != null) {
+                    throw new IOException("Invalid JVM SourceFile attribute");
+                }
+                int value = input.readUnsignedShort();
+                if (value <= 0 || value >= count || strings[value] == null) {
+                    throw new IOException("Invalid JVM SourceFile name");
+                }
+                source = strings[value];
+            } else {
+                input.skipNBytes(length);
+            }
+        }
+        return new SourceClass(name, source);
+    }
+
+    private static void skipClassMembers(DataInputStream input) throws IOException {
+        for (int left = input.readUnsignedShort(); left > 0; left--) {
+            input.skipNBytes(6);
+            for (int attributes = input.readUnsignedShort(); attributes > 0; attributes--) {
+                input.readUnsignedShort();
+                input.skipNBytes(Integer.toUnsignedLong(input.readInt()));
+            }
+        }
     }
 
     private Class<?> exportedClass(Module module, String name) throws Exception {
@@ -251,6 +474,42 @@ public final class Worker {
         throw new IllegalArgumentException("Java target requires an explicit exported class name");
     }
 
+    private Class<?> defaultClass(Module module, String member) throws Exception {
+        if (!module.source || member.isEmpty()) {
+            return defaultClass(module);
+        }
+        List<Class<?>> candidates = new ArrayList<>();
+        for (String name : module.classes) {
+            Class<?> type = Class.forName(name, false, module.loader);
+            if (!Modifier.isPublic(type.getModifiers())) {
+                continue;
+            }
+            boolean matches = false;
+            for (Method method : type.getDeclaredMethods()) {
+                if (method.getName().equals(member) && Modifier.isStatic(method.getModifiers()) && exported(method)) {
+                    matches = true;
+                }
+            }
+            for (Field field : type.getDeclaredFields()) {
+                if (field.getName().equals(member) && Modifier.isStatic(field.getModifiers()) && exported(field)) {
+                    matches = true;
+                }
+            }
+            if (matches) {
+                candidates.add(type);
+            }
+        }
+        if (candidates.size() == 1) {
+            return candidates.get(0);
+        }
+        if (candidates.isEmpty()) {
+            throw new IllegalArgumentException("No exported static member '" + member
+                    + "' belongs to source '" + module.path + "'");
+        }
+        throw new IllegalArgumentException("Exported member '" + member
+                + "' is ambiguous within source '" + module.path + "'; use a qualified class target");
+    }
+
     private static boolean exported(java.lang.reflect.Member member) {
         if (!Modifier.isPublic(member.getModifiers()) || !Modifier.isPublic(member.getDeclaringClass().getModifiers())) {
             return false;
@@ -296,7 +555,7 @@ public final class Worker {
                     target = "";
                 }
             }
-            type = target.isEmpty() ? defaultClass(module) : exportedClass(module, target);
+            type = target.isEmpty() ? defaultClass(module, member) : exportedClass(module, target);
         }
         Object rawArguments = request.get("args");
         if (rawArguments != null && !(rawArguments instanceof List<?>)) {

@@ -20,6 +20,14 @@ char *zsharp_project_dependency_root(const char *project_root, const char *proje
 int zsharp_project_foreign_root(const char *project_root, const char *module,
     char **resolved_root, const char **local_module, char *error, size_t error_size);
 
+/* Maven wrapper mappings are scoped to one physical project root. These return
+ * 1 for an applicable mapping, 0 outside it, and -1 for invalid configuration or
+ * a missing mapped module. Returned paths are owned by the caller. */
+int zsharp_project_maven_source_root(const char *project_root,
+    const char *language, char **source_root, char *error, size_t error_size);
+int zsharp_project_maven_module(const char *project_root, const char *language,
+    const char *module, char **module_path, char *error, size_t error_size);
+
 int zsharp_project_find_source(const char *project_root, const char *file_name,
                                char **source_path, char *error,
                                size_t error_size);

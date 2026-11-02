@@ -769,6 +769,11 @@ if(BUILD_TESTING)
     endif()
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME zsharp_maven_source_imports
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/maven-source-import-tests.py"
+                "$<TARGET_FILE:zsharp>")
+        set_tests_properties(zsharp_maven_source_imports PROPERTIES TIMEOUT 120)
         add_test(NAME zsharp_interop_python_worker
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/python-interop-worker-tests.py")
         add_executable(zsharp_test_speech_stream_api tests/speech-stream-api-tests.c

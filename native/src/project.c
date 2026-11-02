@@ -387,6 +387,209 @@ static char *absolute_path(const char *path, char *error, size_t error_size) {
 #endif
 }
 
+static int maven_absolute_path(const char *path) {
+    if (path == NULL || path[0] == '\0') return 0;
+#ifdef _WIN32
+    return ((path[0] >= 'A' && path[0] <= 'Z') ||
+            (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' &&
+            (path[2] == '/' || path[2] == '\\')
+        ? 1 : ((path[0] == '\\' && path[1] == '\\') ||
+               (path[0] == '/' && path[1] == '/'));
+#else
+    return path[0] == '/';
+#endif
+}
+
+/* Resolve directory links as well as '..' before comparing package roots. */
+static char *maven_real_path(const char *path, char *error, size_t error_size) {
+#ifdef _WIN32
+    HANDLE handle = CreateFileA(path, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    DWORD length, written;
+    char *result;
+    if (handle == INVALID_HANDLE_VALUE) {
+        snprintf(error, error_size, "could not resolve Maven project path '%s'", path);
+        return NULL;
+    }
+    length = GetFinalPathNameByHandleA(handle, NULL, 0, FILE_NAME_NORMALIZED);
+    result = length ? (char *)malloc((size_t)length + 1) : NULL;
+    written = result ? GetFinalPathNameByHandleA(handle, result, length + 1,
+                                                FILE_NAME_NORMALIZED) : 0;
+    CloseHandle(handle);
+    if (written == 0 || written > length) {
+        free(result);
+        set_error(error, error_size, "could not resolve a physical Maven project path");
+        return NULL;
+    }
+    if (strncmp(result, "\\\\?\\UNC\\", 8) == 0) {
+        memmove(result + 2, result + 8, strlen(result + 8) + 1);
+        result[0] = result[1] = '\\';
+    } else if (strncmp(result, "\\\\?\\", 4) == 0) {
+        memmove(result, result + 4, strlen(result + 4) + 1);
+    }
+    return result;
+#else
+    char *result = realpath(path, NULL);
+    if (result == NULL)
+        snprintf(error, error_size, "could not resolve Maven project path '%s'", path);
+    return result;
+#endif
+}
+
+static int maven_path_prefix(const char *prefix, const char *path,
+                             int exact) {
+    size_t index, length = strlen(prefix);
+    if (strlen(path) < length) return 0;
+    for (index = 0; index < length; index++) {
+        unsigned char a = (unsigned char)prefix[index];
+        unsigned char b = (unsigned char)path[index];
+#ifdef _WIN32
+        if (a == '\\') a = '/';
+        if (b == '\\') b = '/';
+        if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+        if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+#endif
+        if (a != b) return 0;
+    }
+    if (path[length] == '\0') return 1;
+    if (exact) return 0;
+    if (length > 0 && (prefix[length - 1] == '/'
+#ifdef _WIN32
+                       || prefix[length - 1] == '\\'
+#endif
+                       )) return 1;
+    return path[length] == '/'
+#ifdef _WIN32
+        || path[length] == '\\'
+#endif
+        ;
+}
+
+int zsharp_project_maven_source_root(const char *project_root,
+    const char *language, char **source_root, char *error, size_t error_size) {
+    const char *scope = getenv("ZSHARP_MAVEN_PROJECT_ROOT");
+    const char *variable, *folder, *selected;
+    char *physical_project = NULL, *physical_scope = NULL;
+    char *physical_root = NULL, *expected = NULL, *physical_expected = NULL;
+    int result = -1;
+    *source_root = NULL;
+    if (!scope || !*scope) return 0;
+    if (!strcmp(language, "java")) {
+        variable = "ZSHARP_MAVEN_JAVA_ROOT"; folder = "src/main/java";
+    } else if (!strcmp(language, "kt")) {
+        variable = "ZSHARP_MAVEN_KOTLIN_ROOT"; folder = "src/main/kotlin";
+    } else if (!strcmp(language, "zsharp")) {
+        variable = "ZSHARP_MAVEN_ZSHARP_ROOT"; folder = "src/main/zsharp";
+    } else return 0;
+    if (!maven_absolute_path(scope)) {
+        set_error(error, error_size, "ZSHARP_MAVEN_PROJECT_ROOT must be absolute");
+        return -1;
+    }
+    physical_project = maven_real_path(project_root, error, error_size);
+    physical_scope = maven_real_path(scope, error, error_size);
+    if (!physical_project || !physical_scope) goto done;
+    if (!maven_path_prefix(physical_project, physical_scope, 1)) {
+        result = 0; /* Never apply a caller's package roots to a dependency. */
+        goto done;
+    }
+    selected = getenv(variable);
+    if (!selected || !*selected) { result = 0; goto done; }
+    if (!maven_absolute_path(selected)) {
+        snprintf(error, error_size, "%s must be an absolute package directory", variable);
+        goto done;
+    }
+    expected = join_path(physical_project, folder);
+    physical_expected = expected ? maven_real_path(expected, error, error_size) : NULL;
+    physical_root = maven_real_path(selected, error, error_size);
+    if (!expected || !physical_expected || !physical_root) goto done;
+    if (!path_is_directory(physical_root) ||
+        !maven_path_prefix(physical_project, physical_expected, 0) ||
+        !maven_path_prefix(physical_expected, physical_root, 0)) {
+        snprintf(error, error_size, "%s must stay inside the project's %s directory",
+                 variable, folder);
+        goto done;
+    }
+    *source_root = physical_root;
+    physical_root = NULL;
+    result = 1;
+done:
+    free(physical_project); free(physical_scope); free(physical_root);
+    free(expected); free(physical_expected);
+    return result;
+}
+
+static int maven_module_name(const char *module) {
+    size_t index;
+    int segment_start = 1;
+    if (!module || !*module) return 0;
+    for (index = 0; module[index]; index++) {
+        unsigned char value = (unsigned char)module[index];
+        if (value == '.') {
+            if (segment_start) return 0;
+            segment_start = 1;
+        } else {
+            if (!((value >= 'A' && value <= 'Z') ||
+                  (value >= 'a' && value <= 'z') || value == '_' ||
+                  (!segment_start && value >= '0' && value <= '9'))) return 0;
+            segment_start = 0;
+        }
+    }
+    return !segment_start;
+}
+
+int zsharp_project_maven_module(const char *project_root, const char *language,
+    const char *module, char **module_path, char *error, size_t error_size) {
+    char *source_root = NULL, *relative = NULL, *candidate = NULL;
+    const char *extensions[2];
+    size_t index, choice, capacity;
+    int mapped;
+    *module_path = NULL;
+    if (strcmp(language, "java") && strcmp(language, "kt")) return 0;
+    mapped = zsharp_project_maven_source_root(project_root, language,
+                                             &source_root, error, error_size);
+    if (mapped <= 0) return mapped;
+    if (!maven_module_name(module)) {
+        snprintf(error, error_size, "invalid Maven %s module name '%s'", language,
+                 module ? module : "");
+        free(source_root);
+        return -1;
+    }
+    relative = zsharp_copy_text(module, strlen(module));
+    capacity = strlen(source_root) + strlen(module) + 32;
+    candidate = (char *)malloc(capacity);
+    if (!relative || !candidate) {
+        set_error(error, error_size, "out of memory");
+        free(source_root); free(relative); free(candidate);
+        return -1;
+    }
+    for (index = 0; relative[index]; index++)
+        if (relative[index] == '.') relative[index] = '/';
+    extensions[0] = ".zjava.jar";
+    extensions[1] = !strcmp(language, "java") ? ".java" : ".kt";
+    for (choice = 0; choice < 2; choice++) {
+        snprintf(candidate, capacity, "%s/%s%s", source_root, relative,
+                 extensions[choice]);
+        if (path_is_file(candidate)) {
+            char *physical = maven_real_path(candidate, error, error_size);
+            if (!physical || !maven_path_prefix(source_root, physical, 0)) {
+                free(physical);
+                set_error(error, error_size, "Maven module escapes its selected package directory");
+                free(source_root); free(relative); free(candidate);
+                return -1;
+            }
+            *module_path = physical;
+            free(source_root); free(relative); free(candidate);
+            return 1;
+        }
+    }
+    snprintf(error, error_size,
+             "Maven %s module '%s' was not found under '%s' (expected %s or %s)",
+             language, module, source_root, extensions[0], extensions[1]);
+    free(source_root); free(relative); free(candidate);
+    return -1;
+}
+
 static void trim_to_parent(char *path) {
     size_t length = strlen(path);
     while (length > 1 && (path[length - 1] == '/' ||
@@ -466,23 +669,41 @@ int zsharp_project_find_source(const char *project_root, const char *file_name,
                                char **source_path, char *error,
                                size_t error_size) {
     SearchState state;
+    char *mapped_root = NULL;
+    int mapped = zsharp_project_maven_source_root(project_root, "zsharp",
+                                                 &mapped_root, error, error_size);
+    if (mapped < 0) return 0;
     memset(&state, 0, sizeof(state));
     state.file_name = file_name;
     state.error = error;
     state.error_size = error_size;
-    search_directory(project_root, &state);
+    search_directory(mapped ? mapped_root : project_root, &state);
     if (state.failed) {
         free(state.match);
+        free(mapped_root);
         return 0;
     }
     if (state.match == NULL) {
         if (error != NULL && error_size > 0) {
             snprintf(error, error_size,
                      "could not find Z# file '%s%s' anywhere under '%s'",
-                     file_name, ZSHARP_SOURCE_EXTENSION, project_root);
+                     file_name, ZSHARP_SOURCE_EXTENSION,
+                     mapped ? mapped_root : project_root);
         }
+        free(mapped_root);
         return 0;
     }
+    if (mapped) {
+        char *physical = maven_real_path(state.match, error, error_size);
+        if (!physical || !maven_path_prefix(mapped_root, physical, 0)) {
+            free(physical); free(state.match); free(mapped_root);
+            set_error(error, error_size, "Z# source escapes its selected Maven package directory");
+            return 0;
+        }
+        free(state.match);
+        state.match = physical;
+    }
+    free(mapped_root);
     *source_path = state.match;
     return 1;
 }
@@ -590,8 +811,31 @@ static int list_source_directory(const char *directory,
 int zsharp_project_list_sources(const char *project_root,
                                 ZSharpSourceList *sources,
                                 char *error, size_t error_size) {
-    return zsharp_project_list_files(project_root, ZSHARP_SOURCE_EXTENSION,
-                                     sources, error, error_size);
+    char *mapped_root = NULL;
+    int mapped = zsharp_project_maven_source_root(project_root, "zsharp",
+                                                 &mapped_root, error, error_size);
+    int result;
+    size_t index;
+    if (mapped < 0) { memset(sources, 0, sizeof(*sources)); return 0; }
+    result = zsharp_project_list_files(mapped ? mapped_root : project_root,
+                                      ZSHARP_SOURCE_EXTENSION,
+                                      sources, error, error_size);
+    if (result && mapped) {
+        for (index = 0; index < sources->count; index++) {
+            char *physical = maven_real_path(sources->items[index], error, error_size);
+            if (!physical || !maven_path_prefix(mapped_root, physical, 0)) {
+                free(physical);
+                zsharp_project_source_list_free(sources);
+                set_error(error, error_size, "Z# source escapes its selected Maven package directory");
+                result = 0;
+                break;
+            }
+            free(sources->items[index]);
+            sources->items[index] = physical;
+        }
+    }
+    free(mapped_root);
+    return result;
 }
 
 int zsharp_project_list_files(const char *project_root, const char *extension,
@@ -1337,6 +1581,23 @@ static int validate_foreign_call(const ZSharpProgram *program,
         snprintf(error, error_size, "invalid %s module path '%s'", label, module);
         free(resolved_root);
         return 0;
+    }
+    {
+        char *mapped_path = NULL;
+        int mapped = zsharp_project_maven_module(resolved_root, language,
+            local_module, &mapped_path, error, error_size);
+        if (mapped != 0) {
+            free(resolved_root);
+            free(mapped_path);
+            if (mapped < 0) return 0;
+            if (strcmp(language, "kt") == 0 &&
+                project_version_before(settings, 1, 4, 0, 0)) {
+                set_error(error, error_size,
+                          "Kotlin/JVM imports require ZSharp: [1.4.0.0]: or newer");
+                return 0;
+            }
+            return 1;
+        }
     }
     if (snprintf(relative, sizeof(relative), "%s", local_module) >= (int)sizeof(relative)) {
         snprintf(error, error_size, "%s module path is too long", label);

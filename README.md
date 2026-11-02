@@ -357,6 +357,16 @@ not contain the SDL/Vulkan runtime.
 
 ## Java integration
 
+The Maven integration also supports package-relative imports using standard
+`src/main/java`, `src/main/kotlin`, and `src/main/zsharp` folders. An entry such
+as `src/main/zsharp/com/user/project/Main.zsharp` can import
+`java:project_id.Java()`, `kt:project_id.Kotlin()`, and `project_id.ZSharp()`
+from the matching package in each language folder. Java and Kotlin classes
+must already be compiled by the JVM build. Maven-mode Kotlin uses Kotlin/JVM
+and retains calls back into Z#; ordinary projects keep Kotlin/Native behavior.
+See [package-relative imports](SYNTAX.md#package-relative-imports-from-maven-projects)
+for the layout and explicit base-package override.
+
 The Java library requires Java 17 or newer. It provides the same API to Gradle
 and Maven projects and communicates with the native toolchain as a child
 process. Native runtimes are bundled for Windows x64/ARM64, Linux x64/ARM64,

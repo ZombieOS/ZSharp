@@ -18,6 +18,7 @@ import java.util.concurrent.CompletionException;
  */
 public final class ZSharpToolchain {
     private final Path executable;
+    private final String basePackage;
 
     /**
      * Creates a toolchain backed by a specific executable.
@@ -25,7 +26,26 @@ public final class ZSharpToolchain {
      * @param executable path or command used to launch Z#
      */
     public ZSharpToolchain(Path executable) {
+        this(executable, null);
+    }
+
+    private ZSharpToolchain(Path executable, String basePackage) {
         this.executable = Objects.requireNonNull(executable, "executable");
+        this.basePackage = basePackage;
+    }
+
+    /**
+     * Selects the package used by short Java, Kotlin and Z# imports in a Maven
+     * project. Without this override, source calls infer it from the entry file's
+     * directory under {@code src/main/zsharp}.
+     *
+     * @param packageName Java package, for example {@code com.user.project}; an
+     *                    empty value selects the default package
+     * @return an immutable toolchain with the selected package
+     */
+    public ZSharpToolchain withBasePackage(String packageName) {
+        return new ZSharpToolchain(executable,
+                MavenProjectLayout.validatePackage(packageName));
     }
 
     /**
@@ -294,7 +314,20 @@ public final class ZSharpToolchain {
         command.add(executable.toString());
         command.addAll(arguments);
 
-        Process process = new ProcessBuilder(command).start();
+        ProcessBuilder builder = new ProcessBuilder(command);
+        MavenProjectLayout.ENVIRONMENT_KEYS.forEach(builder.environment()::remove);
+        Path context = null;
+        if (arguments.size() >= 2 && List.of("run", "compile", "run-bytecode", "check", "project")
+                .contains(arguments.get(0))) {
+            context = Path.of(arguments.get(1));
+        } else if (arguments.size() >= 3 && arguments.get(0).equals("package")) {
+            context = Path.of(arguments.get(2));
+        }
+        var layout = MavenProjectLayout.scope(context, basePackage);
+        if (layout.isPresent()) {
+            builder.environment().putAll(layout.get().environment());
+        }
+        Process process = builder.start();
         CompletableFuture<String> stdout = readAsync(process.getInputStream());
         CompletableFuture<String> stderr = readAsync(process.getErrorStream());
         int exitCode = process.waitFor();

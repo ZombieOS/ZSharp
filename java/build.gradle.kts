@@ -22,6 +22,10 @@ java {
     withJavadocJar()
 }
 
+sourceSets.main {
+    java.srcDir("../native/interop/java/src")
+}
+
 publishing {
     publications {
         create<MavenPublication>("mavenJava") {

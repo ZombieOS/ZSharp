@@ -731,6 +731,23 @@ static int interop_qualified_call(const ZSharpInstruction *instruction, const Ru
     pid_length = interop_current_frame->program->project_id ? strlen(interop_current_frame->program->project_id) : 0;
     if (pid_length && !strncmp(module_name, interop_current_frame->program->project_id, pid_length) && module_name[pid_length] == '.')
         module_name += pid_length + 1;
+    {
+        char *mapped_module = NULL;
+        int mapped = zsharp_project_maven_module(root, language, module_name,
+                                                 &mapped_module, error, size);
+        if (mapped != 0) {
+            int ok;
+            if (mapped < 0) return 0;
+            /* Maven Kotlin runs in the same JVM worker as Java. The worker
+               recognizes .java/.kt source paths and uses the caller classpath. */
+            ok = interop_request("java", mapped_module,
+                instruction->call_room && !strcmp(instruction->call_room, "$new") ? "new" : "call",
+                instruction->call_function, "", "", args,
+                instruction->argument_count, result, error, size);
+            free(mapped_module);
+            return ok;
+        }
+    }
     if (strlen(module_name) >= sizeof(relative)) { snprintf(error, size, "foreign module name is too long"); return 0; }
     strcpy(relative, module_name);
     for (index = 0; relative[index]; index++) if (relative[index] == '.') relative[index] = '/';

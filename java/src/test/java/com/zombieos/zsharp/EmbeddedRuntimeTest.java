@@ -13,6 +13,7 @@ import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class EmbeddedRuntimeTest {
     @Test
@@ -63,6 +64,28 @@ class EmbeddedRuntimeTest {
                                 .digest(executable.readAllBytes()));
                 assertEquals(expected, actual, platform);
             }
+            for (String support : List.of("python-runtime.tar.gz",
+                    "interop-runtime.zip")) {
+                String supportResource = "/META-INF/zsharp/runtime/"
+                        + platform + "/" + support;
+                try (InputStream input = EmbeddedRuntimeTest.class
+                             .getResourceAsStream(supportResource);
+                     InputStream checksum = EmbeddedRuntimeTest.class
+                             .getResourceAsStream(supportResource + ".sha256")) {
+                    assertNotNull(input, supportResource);
+                    assertNotNull(checksum, supportResource + ".sha256");
+                    String actual = HexFormat.of().formatHex(
+                            MessageDigest.getInstance("SHA-256")
+                                    .digest(input.readAllBytes()));
+                    assertEquals(new String(checksum.readAllBytes()).trim(),
+                            actual, supportResource);
+                }
+            }
+            try (InputStream version = EmbeddedRuntimeTest.class.getResourceAsStream(
+                    "/META-INF/zsharp/runtime/" + platform + "/zsharp.version")) {
+                assertNotNull(version);
+                assertEquals(ZSharp.VERSION, new String(version.readAllBytes()).trim());
+            }
         }
     }
 
@@ -70,6 +93,12 @@ class EmbeddedRuntimeTest {
     void extractsAndRunsTheCurrentPlatformsBundledRuntime() throws Exception {
         Path executable = EmbeddedRuntime.discover().orElseThrow();
         assertTrue(Files.isRegularFile(executable));
+        assertTrue(Files.isRegularFile(executable.resolveSibling("python-runtime.tar.gz")));
+        assertTrue(Files.isRegularFile(executable.resolveSibling("interop-runtime.zip")));
+        assertTrue(Files.isRegularFile(executable.resolveSibling(
+                "interop/python/zsharp_worker.py")));
+        assertTrue(Files.isRegularFile(executable.resolveSibling(
+                "interop/java/zsharp-java-worker.jar")));
 
         ZSharpResult result = new ZSharpToolchain(executable).version();
         assertEquals(0, result.exitCode(), result.standardError());
@@ -81,5 +110,44 @@ class EmbeddedRuntimeTest {
         assertTrue(gameInfo.standardOutput().contains(
                 "Z# game runtime: available"));
         assertTrue(gameInfo.standardOutput().contains("SDL3 + Vulkan"));
+    }
+
+    @Test
+    void bundledPythonCanCallBackIntoZSharp(@TempDir Path project) throws Exception {
+        Path executable = EmbeddedRuntime.discover().orElseThrow();
+        Files.writeString(project.resolve("project.zsettings"), """
+                zsharp = type.settings
+                Project: "Embedded Python validation":
+                PID: "embedded_python_validation":
+                Version: [1.0.0.0]:
+                Authors: ["Validation"]:
+                Description: "Embedded Python callback validation":
+                ZSharp: [1.4.0.0]:
+                Dependencies (
+                ):
+                """);
+        Files.writeString(project.resolve("Sample.py"), """
+                from zsharp import export, call
+
+                @export
+                def ping():
+                    return call("Main:Main:Reply", "Python")
+                """);
+        Path script = project.resolve("Main.zsharp");
+        Files.writeString(script, """
+                zsharp = type.script
+                noticed room Main[] (
+                    import py:embedded_python_validation.Sample():
+                    noticed text Reply[text Value] (
+                        feed(Value + " to Z# callback ready"):
+                    )
+                    noticed brain Start[] (
+                        Print(Function.call(py:Sample:ping [])):
+                    )
+                )
+                """);
+        ZSharpResult result = new ZSharpToolchain(executable).run(script);
+        assertEquals(0, result.exitCode(), result.standardError());
+        assertEquals("Python to Z# callback ready", result.standardOutput().trim());
     }
 }
