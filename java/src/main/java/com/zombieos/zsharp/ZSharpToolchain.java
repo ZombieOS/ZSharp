@@ -315,6 +315,12 @@ public final class ZSharpToolchain {
         command.addAll(arguments);
 
         ProcessBuilder builder = new ProcessBuilder(command);
+        String configuredJava = builder.environment().get("ZSHARP_JAVA");
+        if (configuredJava == null || configuredJava.isBlank()) {
+            builder.environment().put("ZSHARP_JAVA", Path.of(
+                    System.getProperty("java.home"), "bin",
+                    isWindows() ? "java.exe" : "java").toString());
+        }
         MavenProjectLayout.ENVIRONMENT_KEYS.forEach(builder.environment()::remove);
         Path context = null;
         if (arguments.size() >= 2 && List.of("run", "compile", "run-bytecode", "check", "project")

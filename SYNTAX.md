@@ -4225,6 +4225,8 @@ compile raw Java/Kotlin source at runtime. `@ZSharp_Export` and the existing
 visibility rules still apply. The Maven artifact includes the Java interop SDK,
 so both Java and Kotlin can import `ZSharp.ZSharp` and
 `ZSharp.ZSharp_Export` directly.
+The Java worker uses the calling application's Java installation unless an
+explicit `ZSHARP_JAVA` override selects another executable.
 
 In this Maven mode, `kt:` uses Kotlin/JVM, including exported top-level
 functions and `@file:JvmName` facades. Kotlin can call back into Z# through
