@@ -1,0 +1,12 @@
+zsharp = type.script
+
+noticed room Support[] (
+ noticed number Count = 10:
+ noticed brain Start[] (Print("IMPORT_START_MUST_NOT_RUN"):)
+ noticed brain Shutdown[] (Print("IMPORT_SHUTDOWN_MUST_NOT_RUN"):)
+ noticed number Triple[number Value] (feed(Value * 3):)
+ noticed number Next[] (
+  number.set:Count = Count + 1:
+  feed(Count):
+ )
+)

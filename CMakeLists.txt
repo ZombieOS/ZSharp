@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.4.1.0 LANGUAGES C)
+project(zsharp VERSION 1.4.1.1 LANGUAGES C)
 if(MSVC)
     # The bootstrap installs one native executable, not a machine-wide VC++
     # redistributable. Keep the C and C++ runtimes inside that executable.
@@ -26,6 +26,23 @@ endif()
 include(CTest)
 include(FetchContent)
 find_package(Threads REQUIRED)
+
+# Keep the official fallback icon inside the runtime, so applications and the
+# Hub have an icon on the first launch without a network connection.
+set(ZSHARP_GENERATED_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${ZSHARP_GENERATED_INCLUDE}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/native/assets/zsharp.png")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/native/assets/zsharp.png"
+    ZSHARP_DEFAULT_ICON_HEX HEX)
+string(REGEX REPLACE "(................................)" "\\1\n"
+    ZSHARP_DEFAULT_ICON_HEX "${ZSHARP_DEFAULT_ICON_HEX}")
+string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1,"
+    ZSHARP_DEFAULT_ICON_BYTES "${ZSHARP_DEFAULT_ICON_HEX}")
+file(WRITE "${ZSHARP_GENERATED_INCLUDE}/zsharp_default_icon.h"
+    "/* Generated from native/assets/zsharp.png. */\nstatic const unsigned char zsharp_default_icon_png[] = {\n${ZSHARP_DEFAULT_ICON_BYTES}\n};\n")
+unset(ZSHARP_DEFAULT_ICON_HEX)
+unset(ZSHARP_DEFAULT_ICON_BYTES)
 
 set(QJS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 set(QJS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -85,6 +102,7 @@ if(UNIX)
 endif()
 
 add_executable(zsharp
+    native/src/app_icon.c
     native/src/c_syntax.c
     native/src/interop_process.c
     native/src/interop_embedded.c
@@ -131,6 +149,7 @@ if(ANDROID)
     # Keep this target separate until the desktop and Android launchers share
     # a common runtime-library target.
     add_library(zsharp_android_vm SHARED
+        native/src/app_icon.c
         native/src/c_syntax.c
         native/src/interop_process.c
         native/src/interop_embedded.c
@@ -171,7 +190,8 @@ if(ANDROID)
         native/src/window_linux.c
         native/src/window_macos.c
     )
-    target_include_directories(zsharp_android_vm PRIVATE native/include native/src)
+    target_include_directories(zsharp_android_vm PRIVATE native/include native/src
+        "${ZSHARP_GENERATED_INCLUDE}")
     target_compile_features(zsharp_android_vm PRIVATE c_std_17)
     set_target_properties(zsharp_android_vm PROPERTIES LINKER_LANGUAGE CXX)
     target_link_libraries(zsharp_android_vm PRIVATE
@@ -294,7 +314,7 @@ if(WIN32)
     set_target_properties(zsharp_setup PROPERTIES OUTPUT_NAME "zsharp-setup")
 endif()
 
-target_include_directories(zsharp PRIVATE native/include)
+target_include_directories(zsharp PRIVATE native/include "${ZSHARP_GENERATED_INCLUDE}")
 target_include_directories(zsharp_installer PRIVATE native/src)
 target_compile_features(zsharp PRIVATE c_std_17)
 target_compile_features(zsharp_installer PRIVATE c_std_17)
@@ -771,7 +791,25 @@ if(BUILD_TESTING)
     endif()
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME zsharp_standalone_python_package
+            COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                -s "${CMAKE_CURRENT_SOURCE_DIR}/python/tests" -v)
+        set_tests_properties(zsharp_standalone_python_package PROPERTIES
+            TIMEOUT 60 ENVIRONMENT "ZSHARP_TEST_EXECUTABLE=$<TARGET_FILE:zsharp>")
+        add_test(NAME zsharp_standalone_python_call
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/standalone-python-call-tests.py"
+                "$<TARGET_FILE:zsharp>")
+        set_tests_properties(zsharp_standalone_python_call PROPERTIES TIMEOUT 120)
         if(UNIX AND NOT ANDROID)
+            add_executable(zsharp_test_installer_path tests/installer-path-driver.c)
+            target_include_directories(zsharp_test_installer_path PRIVATE installer)
+            target_compile_features(zsharp_test_installer_path PRIVATE c_std_17)
+            add_test(NAME zsharp_installer_path
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/installer-path-tests.py"
+                    "$<TARGET_FILE:zsharp_test_installer_path>")
+            set_tests_properties(zsharp_installer_path PROPERTIES TIMEOUT 90)
             add_executable(zsharp_test_updater_manifest
                 tests/updater-manifest-driver.c native/src/updater.c)
             target_include_directories(zsharp_test_updater_manifest
@@ -852,6 +890,31 @@ if(BUILD_TESTING)
             COMMAND "${ZSHARP_NODE_TEST_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/application-quit-runtime-tests.mjs"
                 "$<TARGET_FILE:zsharp>")
+    endif()
+    add_executable(zsharp_test_app_icon tests/app-icon-tests.c
+        native/src/app_icon.c native/src/settings.c)
+    target_include_directories(zsharp_test_app_icon PRIVATE native/include native/src
+        "${ZSHARP_GENERATED_INCLUDE}")
+    target_compile_features(zsharp_test_app_icon PRIVATE c_std_17)
+    target_link_libraries(zsharp_test_app_icon PRIVATE zsharp_language_core)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_app_icon PRIVATE m)
+    endif()
+    add_test(NAME zsharp_app_icon COMMAND zsharp_test_app_icon
+        "${CMAKE_CURRENT_BINARY_DIR}/app-icon-test"
+        "${CMAKE_CURRENT_SOURCE_DIR}/native/assets/zsharp.png")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND Python3_Interpreter_FOUND)
+        add_executable(zsharp_test_desktop_icon tests/desktop-icon-driver.c
+            native/src/desktop.c native/src/app_icon.c native/src/settings.c)
+        target_include_directories(zsharp_test_desktop_icon PRIVATE native/include native/src
+            "${ZSHARP_GENERATED_INCLUDE}")
+        target_compile_features(zsharp_test_desktop_icon PRIVATE c_std_17)
+        target_link_libraries(zsharp_test_desktop_icon PRIVATE zsharp_language_core m)
+        add_test(NAME zsharp_desktop_icon
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/desktop-icon-tests.py"
+                "$<TARGET_FILE:zsharp_test_desktop_icon>")
+        set_tests_properties(zsharp_desktop_icon PROPERTIES TIMEOUT 60)
     endif()
     add_executable(zsharp_test_game_projection
         tests/game-projection-tests.c

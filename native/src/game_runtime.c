@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "game_runtime.h"
+#include "app_icon.h"
 
 #include "achievement.h"
 #include "game_model.h"
@@ -49,6 +50,7 @@ typedef struct ZSharpGameState {
     Sint16 *achievement_samples;
     int achievement_sample_bytes;
     char *window_icon_path;
+    char *window_icon_source;
     int mouse_capture_dirty;
     int cancelled;
     ZSharpMouseEdges mouse_edges;
@@ -213,29 +215,45 @@ static int test_xr_buttons(ZSharpGameState *game,const ZSharpGameRenderFrame *fr
 static int set_game_icon(ZSharpGameState *game, const char *relative,
                          char *error, size_t error_size) {
     char *path;
+    char *source;
+    const char *requested = relative == NULL ? "" : relative;
     SDL_Surface *surface;
-    if (relative == NULL || relative[0] == '\0') return 1;
-    if (game->window_icon_path != NULL &&
-        strcmp(game->window_icon_path, relative) == 0) return 1;
-    path = join_project_path(game->model.project_root, relative);
+    if (game->window_icon_source != NULL && game->window_icon_path != NULL &&
+        strcmp(game->window_icon_source, requested) == 0) return 1;
+    path = zsharp_app_icon_resolve(game->model.project_root, relative,
+                                   error, error_size);
     if (path == NULL) {
-        game_error(error, error_size, "out of memory");
         return 0;
     }
     surface = SDL_LoadPNG(path);
-    if (surface == NULL) surface = SDL_LoadBMP(path);
-    free(path);
+    if (surface == NULL) {
+        free(path);
+        path = zsharp_app_icon_default_path(error, error_size);
+        if (path != NULL) surface = SDL_LoadPNG(path);
+    }
     if (surface == NULL) {
         if (error != NULL && error_size != 0)
-            snprintf(error, error_size, "could not load game icon '%s': %s",
-                     relative, SDL_GetError());
+            snprintf(error, error_size, "could not load game icon: %s",
+                     SDL_GetError());
+        free(path);
         return 0;
     }
+    source = zsharp_copy_text(requested, strlen(requested));
+    if (source == NULL) {
+        SDL_DestroySurface(surface);
+        free(path);
+        game_error(error, error_size, "out of memory");
+        return 0;
+    }
+    /* Some Wayland compositors obtain icons exclusively from the matching
+     * desktop entry. The same image still applies on supported backends. */
     SDL_SetWindowIcon(game->window, surface);
     SDL_DestroySurface(surface);
     free(game->window_icon_path);
-    game->window_icon_path = zsharp_copy_text(relative, strlen(relative));
-    return game->window_icon_path != NULL;
+    free(game->window_icon_source);
+    game->window_icon_path = path;
+    game->window_icon_source = source;
+    return 1;
 }
 
 static void play_achievement_sound(ZSharpGameState *game) {
@@ -1118,15 +1136,31 @@ int zsharp_game_run(const char *title, const char *project_root,
         game_error(error, error_size, "forced game launch failure");
         return 0;
     }
+    if (!zsharp_settings_load(project_root, &settings, &settings_diagnostic,
+                              error, error_size)) return 0;
+    {
+        char *application_id = zsharp_app_desktop_id(settings.project_id);
+        char version[64];
+        if (application_id == NULL) {
+            zsharp_settings_free(&settings);
+            game_error(error, error_size, "out of memory");
+            return 0;
+        }
+        snprintf(version, sizeof(version), "%u.%u.%u.%u",
+                 settings.version[0], settings.version[1],
+                 settings.version[2], settings.version[3]);
+        SDL_SetAppMetadata(settings.project_name, version, NULL);
+        SDL_SetHint(SDL_HINT_APP_ID, application_id);
+        free(application_id);
+    }
     /* Keep the physical snapshot fresh even while another application owns
        focus. Delivery to Z# is explicitly gated and baselined below. */
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         game_error(error, error_size, SDL_GetError());
+        zsharp_settings_free(&settings);
         return 0;
     }
-    if (!zsharp_settings_load(project_root, &settings, &settings_diagnostic,
-                              error, error_size)) goto done;
     {
 #ifdef _WIN32
         const unsigned device=1;
@@ -1506,6 +1540,7 @@ done:
     if (game.achievement_samples != NULL)
         SDL_free(game.achievement_samples);
     free(game.window_icon_path);
+    free(game.window_icon_source);
     if (game.gamepad != NULL) SDL_CloseGamepad(game.gamepad);
     if (game.test_gamepad_joystick) SDL_CloseJoystick(game.test_gamepad_joystick);
     if (game.test_gamepad_id) SDL_DetachVirtualJoystick(game.test_gamepad_id);

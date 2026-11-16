@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "window.h"
+#include "app_icon.h"
 
 #include "paint.h"
 #include "window_runtime.h"
@@ -2776,11 +2777,20 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
         if (uninitialize_com) CoUninitialize();
         return 0;
     }
-    if (icon != NULL && icon->text_value != NULL) {
-        char *icon_path = join_path(project_root, icon->text_value);
+    {
+        char *icon_path = zsharp_app_icon_for_window(
+            project_root, program->project_id,
+            icon == NULL ? NULL : icon->text_value, error, error_size);
         if (icon_path != NULL) {
             state.window_icon = load_window_icon(
                 icon_path, (int)(32.0 * scale + 0.5));
+            if (state.window_icon == NULL) {
+                char *fallback = zsharp_app_icon_default_path(NULL, 0);
+                if (fallback != NULL)
+                    state.window_icon = load_window_icon(
+                        fallback, (int)(32.0 * scale + 0.5));
+                free(fallback);
+            }
             if (state.window_icon != NULL) {
                 SendMessageA(state.window, WM_SETICON, ICON_BIG,
                              (LPARAM)state.window_icon);

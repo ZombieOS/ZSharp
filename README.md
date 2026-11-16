@@ -5,6 +5,14 @@ Official website and downloads: <https://zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
+## Version 1.4.1.1
+
+The installer saves persistent shell PATH settings on Linux and macOS, so
+`zsharp` is available in new terminals after installation. Native app windows,
+desktop launchers and the Hub also use the project's optional icon or the
+bundled Z# logo. See [installation behavior](INSTALLING.md#installation-behavior)
+for applying the PATH setup to an existing installation.
+
 ## Version 1.4.1.0
 
 Native games support spring bones for moving manes, tails, hair and accessories
@@ -159,6 +167,24 @@ when it is first needed, so end users do not need a separate Python install.
 Python is not kept running while an app is idle. If an older updater installs
 1.1.0.0 without the new component, the runtime downloads and SHA-256 verifies
 it automatically the first time a Python function is called.
+
+Z# 1.4.1.1 also adds the `zombieos-zsharp` Python distribution
+for calling Z# from ordinary Python, outside the ZVM. Install the repository's `python`
+directory into your Python environment, then call a noticed function by its
+`File:Room:Function` target:
+
+```python
+from zsharp import call
+
+answer = call("Math:Calculator:Add", 20, 22, project="/path/to/project")
+```
+
+This requires the new ZVM as well as the Python package. Each call uses a fresh
+VM and does not automatically run `Start` or `Shutdown`. Runtime discovery also
+checks the default installation directory when `zsharp` is missing from PATH.
+See [the standalone Python package guide](python/README.md) for installation,
+return values, errors and timeouts. The existing Python callback API inside
+ZVM remains available separately.
 
 Z# 1.1.1.0 embeds JavaScript without requiring Node.js. Z# 1.1.2.0 embeds Lua
 5.5.1 without requiring a separate Lua installation. Both use project-scoped
@@ -329,7 +355,8 @@ script runs. For `.zgame`, Z# selects a 3D startup script when one exists,
 otherwise a 2D startup script. Normal packages launch their embedded startup
 bytecode; source companions launch the validated `.zsharp` startup.
 On first installation, Z# offers to create a Desktop shortcut using the app's
-design icon. `zsharp associate` registers `.zapp` and `.zgame` for the current
+project icon, with its window design icon as a fallback for older projects.
+`zsharp associate` registers `.zapp` and `.zgame` for the current
 user so opening either launches the package without opening a terminal. Running
 `zsharp open`, `zsharp run`, or another command in a terminal keeps using that
 terminal normally.
@@ -337,9 +364,10 @@ terminal normally.
 Opening a package also adds it to the Z# Hub. `zsharp hub` opens the graphical
 Hub, where remembered apps and games can be launched, new package paths can be
 added, and entries can be forgotten without deleting the package. An optional
-`Icon: "assets/icon.png":` entry in `project.zsettings` supplies the image at
-the left of the project name and the app's Z#-created Desktop shortcut;
-otherwise the official Z# logo is used. Clicking the icon or project name
+`Icon: "assets/icon.png":` entry in `project.zsettings` supplies the running
+app's window icon, its desktop launcher and its image in the Hub. Without a
+project or legacy window icon, the bundled official Z# logo is used offline.
+The Hub's own window and shortcut also use the bundled logo. Clicking an icon or project name
 shows its type, PID, project version, required Z# version, accumulated
 playtime, and last-played time. Achievements are marked **Coming soon**. The
 script-friendly forms are `zsharp hub list`, `zsharp hub add <package>`, and

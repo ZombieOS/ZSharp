@@ -81,7 +81,8 @@ file(COPY "${PROJECT_ROOT}/tests/file_io/" DESTINATION "${FILE_IO_DIR}")
 file(COPY "${PROJECT_ROOT}/tests/package/"
      DESTINATION "${TEST_PACKAGE_PROJECT}")
 file(MAKE_DIRECTORY "${TEST_PACKAGE_PROJECT}/assets")
-file(WRITE "${TEST_PACKAGE_PROJECT}/assets/project-icon.png" "test icon")
+configure_file("${PROJECT_ROOT}/native/assets/zsharp.png"
+    "${TEST_PACKAGE_PROJECT}/assets/project-icon.png" COPYONLY)
 file(APPEND "${TEST_PACKAGE_PROJECT}/project.zsettings"
      "\nIcon: \"assets/project-icon.png\":\n")
 file(MAKE_DIRECTORY "${ICON_INVALID_PROJECT}")

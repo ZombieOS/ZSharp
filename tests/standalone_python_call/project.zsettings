@@ -1,0 +1,9 @@
+zsharp = type.settings
+Project: "Standalone Python Call Regression":
+PID: "standalone_python_call_regression":
+Version: [1.4.1.1]:
+Authors: ["Z# Tests"]:
+Description: "Public one-shot calls exercise existing VM execution and wire values.":
+ZSharp: [1.4.1.1]:
+Dependencies (
+):

@@ -3,6 +3,7 @@
 #include "zsharp.h"
 
 #include "bytecode.h"
+#include "app_icon.h"
 #include "audio_api.h"
 #include "speech_input.h"
 #include "desktop.h"
@@ -23,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -33,7 +35,6 @@
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #endif
 #else
-#include <errno.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -196,6 +197,8 @@ static void print_help(void) {
     puts("  zsharp project <project-directory|project.zsettings>");
     puts("  zsharp run <file.zsharp|file.zapp|file.zgame> [options]...");
     puts("  zsharp run-bytecode <file.zbc> [--provider Project=library]...");
+    puts("  zsharp call <file.zsharp|file.zbc> Room:Function --result-file <json>");
+    puts("              [--args-file <json>] [--provider Project=library]...");
 }
 
 static int has_source_extension(const char *path) {
@@ -645,6 +648,293 @@ static int prepare_run_dependencies(const char *root, int argc, char **argv,
     return ok;
 }
 
+/* A separate response file keeps application Print output out of the Python
+ * protocol. The caller supplies a private filename; replace it atomically. */
+static int write_call_response(const char *path, const char *value,
+                                const char *error) {
+    char *temporary = (char *)malloc(strlen(path) + 80);
+    FILE *file = NULL;
+    unsigned attempt;
+    int ok;
+    if (temporary == NULL) return 0;
+    for (attempt = 0; attempt < 16; attempt++) {
+#ifdef _WIN32
+        unsigned long process = (unsigned long)GetCurrentProcessId();
+#else
+        unsigned long process = (unsigned long)getpid();
+#endif
+        snprintf(temporary, strlen(path) + 80, "%s.tmp-%lu-%u",
+                 path, process, attempt);
+        file = fopen(temporary, "wbx");
+        if (file != NULL || errno != EEXIST) break;
+    }
+    if (file == NULL) { free(temporary); return 0; }
+    if (value != NULL) {
+        fprintf(file, "{\"ok\":true,\"value\":%s}\n", value);
+    } else {
+        const unsigned char *cursor = (const unsigned char *)error;
+        fputs("{\"ok\":false,\"error\":\"", file);
+        for (; *cursor != '\0'; cursor++) {
+            if (*cursor == '"' || *cursor == '\\') {
+                fputc('\\', file);
+                fputc(*cursor, file);
+            } else if (*cursor < 32) {
+                fprintf(file, "\\u%04x", (unsigned)*cursor);
+            } else {
+                fputc(*cursor, file);
+            }
+        }
+        fputs("\"}\n", file);
+    }
+    ok = !ferror(file);
+    if (fclose(file) != 0) ok = 0;
+    if (ok) {
+#ifdef _WIN32
+        ok = MoveFileExA(temporary, path, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+        ok = rename(temporary, path) == 0;
+#endif
+    }
+    if (!ok) remove(temporary);
+    free(temporary);
+    return ok;
+}
+
+static int call_same_file(const char *left, const char *right) {
+    if (left == NULL || right == NULL) return 0;
+    if (strcmp(left, right) == 0) return 1;
+#ifdef _WIN32
+    {
+        BY_HANDLE_FILE_INFORMATION a, b;
+        HANDLE first = CreateFileA(left, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        HANDLE second = CreateFileA(right, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        int same = first != INVALID_HANDLE_VALUE && second != INVALID_HANDLE_VALUE &&
+            GetFileInformationByHandle(first, &a) &&
+            GetFileInformationByHandle(second, &b) &&
+            a.dwVolumeSerialNumber == b.dwVolumeSerialNumber &&
+            a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow;
+        if (first != INVALID_HANDLE_VALUE) CloseHandle(first);
+        if (second != INVALID_HANDLE_VALUE) CloseHandle(second);
+        return same;
+    }
+#else
+    {
+        struct stat a, b;
+        return stat(left, &a) == 0 && stat(right, &b) == 0 &&
+               a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+    }
+#endif
+}
+
+static int call_identifier(const char *name) {
+    const unsigned char *cursor = (const unsigned char *)name;
+    if (!( (*cursor >= 'A' && *cursor <= 'Z') ||
+           (*cursor >= 'a' && *cursor <= 'z') || *cursor == '_')) return 0;
+    for (cursor++; *cursor; cursor++)
+        if (!( (*cursor >= 'A' && *cursor <= 'Z') ||
+               (*cursor >= 'a' && *cursor <= 'z') ||
+               (*cursor >= '0' && *cursor <= '9') || *cursor == '_')) return 0;
+    return 1;
+}
+
+static int call_command(int argc, char **argv) {
+    ZSharpProgram program = {0};
+    ZSharpSettings settings = {0};
+    ZSharpDiagnostic diagnostic = {0};
+    ZSharpLoadedProvider *loaded = NULL;
+    ZSharpProviderBinding *bindings = NULL;
+    size_t provider_count = 0;
+    char error[4096] = {0};
+    const char *args_path = NULL, *result_path = NULL;
+    char *project_root = NULL, *arguments = NULL, *result = NULL, *room = NULL;
+    char **provider_argv = NULL;
+    int provider_argc = 0, index, ok = 0, settings_loaded = 0;
+    int response_safe = 1, exit_code = 1;
+    const char *function_name, *separator, *extension;
+    if (argc < 4) {
+        fputs("error: use 'zsharp call <file.zsharp|file.zbc> Room:Function "
+              "--result-file <json> [--args-file <json>]'\n", stderr);
+        return 2;
+    }
+    provider_argv = (char **)calloc((size_t)argc, sizeof(*provider_argv));
+    if (provider_argv == NULL) { snprintf(error, sizeof(error), "out of memory"); goto done; }
+    for (index = 4; index < argc; index += 2) {
+        if (index + 1 >= argc) {
+            snprintf(error, sizeof(error), "call option '%s' needs a value", argv[index]);
+            exit_code = 2; goto done;
+        }
+        if (strcmp(argv[index], "--args-file") == 0 && args_path == NULL)
+            args_path = argv[index + 1];
+        else if (strcmp(argv[index], "--result-file") == 0 && result_path == NULL)
+            result_path = argv[index + 1];
+        else if (strcmp(argv[index], "--provider") == 0) {
+            provider_argv[provider_argc++] = argv[index];
+            provider_argv[provider_argc++] = argv[index + 1];
+        } else {
+            snprintf(error, sizeof(error), "unknown or repeated call option '%s'", argv[index]);
+            exit_code = 2; goto done;
+        }
+    }
+    if (result_path == NULL || result_path[0] == '\0') {
+        snprintf(error, sizeof(error), "call requires --result-file <json>");
+        exit_code = 2; goto done;
+    }
+    if (call_same_file(result_path, argv[2]) || call_same_file(result_path, args_path)) {
+        response_safe = 0;
+        snprintf(error, sizeof(error), "result file must not overwrite source or argument files");
+        goto done;
+    }
+    separator = strchr(argv[3], ':');
+    if (separator == NULL || strchr(separator + 1, ':') != NULL) {
+        snprintf(error, sizeof(error), "call target must be Room:Function");
+        exit_code = 2; goto done;
+    }
+    room = zsharp_copy_text(argv[3], (size_t)(separator - argv[3]));
+    function_name = separator + 1;
+    if (room == NULL) { snprintf(error, sizeof(error), "out of memory"); goto done; }
+    if (!call_identifier(room) || !call_identifier(function_name)) {
+        snprintf(error, sizeof(error), "call target must contain valid room and function names");
+        exit_code = 2; goto done;
+    }
+    extension = strrchr(argv[2], '.');
+    if (!has_source_extension(argv[2]) &&
+        (extension == NULL || strcmp(extension, ".zbc") != 0)) {
+        snprintf(error, sizeof(error), "call requires a .zsharp or .zbc file");
+        exit_code = 2; goto done;
+    }
+    arguments = (char *)malloc(1024 * 1024 + 2);
+    if (arguments == NULL) { snprintf(error, sizeof(error), "out of memory"); goto done; }
+    if (args_path != NULL) {
+        FILE *input = fopen(args_path, "rb");
+        size_t length;
+        int failed;
+        if (input == NULL) { snprintf(error, sizeof(error), "could not read call arguments '%s'", args_path); goto done; }
+        length = fread(arguments, 1, 1024 * 1024 + 1, input);
+        failed = ferror(input);
+        fclose(input);
+        if (failed || length > 1024 * 1024 || memchr(arguments, '\0', length) != NULL) {
+            snprintf(error, sizeof(error), "call arguments must be JSON text of at most 1 MiB without NUL bytes");
+            goto done;
+        }
+        arguments[length] = '\0';
+    } else strcpy(arguments, "[]");
+    project_root = zsharp_project_find_root(argv[2], error, sizeof(error));
+    if (project_root == NULL) goto done;
+    {
+        size_t length = strlen(project_root) + strlen(ZSHARP_SETTINGS_FILE) + 2;
+        char *settings_path = (char *)malloc(length);
+        if (settings_path == NULL) { snprintf(error, sizeof(error), "out of memory"); goto done; }
+        snprintf(settings_path, length, "%s/%s", project_root, ZSHARP_SETTINGS_FILE);
+        response_safe = !call_same_file(result_path, settings_path);
+        free(settings_path);
+        if (!response_safe) { snprintf(error, sizeof(error), "result file must not overwrite project.zsettings"); goto done; }
+    }
+    if (!prepare_run_dependencies(project_root, provider_argc, provider_argv, 0, error, sizeof(error))) goto done;
+    if (has_source_extension(argv[2])) {
+        if (!zsharp_project_parse_file(argv[2], &program, &diagnostic, error, sizeof(error))) {
+            if (diagnostic.message[0]) snprintf(error, sizeof(error), "%s:%u:%u: %s",
+                argv[2], diagnostic.line, diagnostic.column, diagnostic.message);
+            goto done;
+        }
+    } else if (!zsharp_bytecode_read(argv[2], &program, error, sizeof(error))) goto done;
+    if (!load_settings_or_report(project_root, &settings)) {
+        snprintf(error, sizeof(error), "%s", command_failure); goto done;
+    }
+    settings_loaded = 1;
+    if (has_source_extension(argv[2])) {
+        program.project_id = zsharp_copy_text(settings.project_id, strlen(settings.project_id));
+        if (program.project_id == NULL) { snprintf(error, sizeof(error), "out of memory"); goto done; }
+    } else if (program.project_id == NULL || strcmp(program.project_id, settings.project_id) != 0) {
+        snprintf(error, sizeof(error), "bytecode project PID does not match project.zsettings"); goto done;
+    }
+    if (!zsharp_project_validate(&program, &settings, project_root, error, sizeof(error))) goto done;
+    if (!load_providers(provider_argc, provider_argv, 0, &loaded, &bindings,
+                         &provider_count, error, sizeof(error))) goto done;
+    ok = zsharp_vm_call_with_providers(&program, project_root, bindings,
+        provider_count, room, function_name, arguments, &result, error, sizeof(error));
+    finish_audio_for_run();
+done:
+    if (result_path != NULL) {
+        /* Also guard failed option/target parses, before project loading. */
+        char ignored[256] = {0};
+        char *root = zsharp_project_find_root(argv[2], ignored, sizeof(ignored));
+        const char *basename = strrchr(result_path, '/');
+        const char *backslash = strrchr(result_path, '\\');
+        if (backslash != NULL && (basename == NULL || backslash > basename)) basename = backslash;
+        basename = basename == NULL ? result_path : basename + 1;
+        if (strcmp(basename, ZSHARP_SETTINGS_FILE) == 0) response_safe = 0;
+        if (root != NULL) {
+            size_t length = strlen(root) + strlen(ZSHARP_SETTINGS_FILE) + 2;
+            char *path = (char *)malloc(length);
+            if (path == NULL) response_safe = 0;
+            else {
+                snprintf(path, length, "%s/%s", root, ZSHARP_SETTINGS_FILE);
+                if (call_same_file(result_path, path)) response_safe = 0;
+                free(path);
+            }
+        }
+        free(root);
+        if (!response_safe) {
+            ok = 0;
+            snprintf(error, sizeof(error), "result file must not overwrite project source, settings or arguments");
+        }
+    }
+    if (call_same_file(result_path, argv[2]) || call_same_file(result_path, args_path)) {
+        response_safe = 0; ok = 0;
+        snprintf(error, sizeof(error), "result file must not overwrite source or argument files");
+    }
+    if (!ok && error[0] == '\0') snprintf(error, sizeof(error), "Z# function call failed");
+    if (result_path != NULL && response_safe &&
+        !write_call_response(result_path, ok ? result : NULL, error)) {
+        fprintf(stderr, "call error: could not write response '%s'\n", result_path);
+        ok = 0;
+    }
+    if (!ok) fprintf(stderr, "call error: %s\n", error);
+    unload_providers(loaded, provider_count);
+    free(bindings);
+    if (settings_loaded) zsharp_settings_free(&settings);
+    zsharp_program_free(&program);
+    free(provider_argv); free(project_root); free(arguments); free(result); free(room);
+    return ok ? 0 : exit_code;
+}
+
+static void register_application_icon(const ZSharpSettings *settings,
+                                      const char *project_root,
+                                      const char *entry_path, int entry_kind,
+                                      const ZSharpProgram *program,
+                                      const char *legacy_icon) {
+    char *icon;
+    char icon_error[512] = {0};
+    size_t index, property_index;
+    if (getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") != NULL) return;
+    if (program != NULL) {
+        for (index = 0; index < program->window.element_count; index++) {
+            const ZSharpUIElement *element = &program->window.elements[index];
+            if (element->type != ZUI_DESIGN) continue;
+            for (property_index = 0; property_index < element->property_count;
+                 property_index++) {
+                const ZSharpUIProperty *property =
+                    &element->properties[property_index];
+                if (strcmp(property->name, "icon") == 0)
+                    legacy_icon = property->text_value;
+            }
+        }
+    }
+    icon = zsharp_app_icon_for_window(project_root, settings->project_id,
+                                      legacy_icon, icon_error,
+                                      sizeof(icon_error));
+    if (icon == NULL || !zsharp_desktop_register_application(
+            settings->project_name, settings->project_id, entry_path,
+            entry_kind, icon, icon_error, sizeof(icon_error)))
+        fprintf(stderr, "launcher warning: %s\n",
+                icon_error[0] ? icon_error : "could not prepare the application icon");
+    free(icon);
+}
+
 static int run_source_command(const char *source_path, int argc, char **argv,
                               int first_option, int force_game) {
     ZSharpProgram program = {0};
@@ -696,6 +986,11 @@ static int run_source_command(const char *source_path, int argc, char **argv,
     }
     if (package_launch_depth == 0) {
         char startup_error[512] = {0};
+        if (program.script_type == ZSCRIPT_WINDOW ||
+            program.script_type == ZSCRIPT_GAME ||
+            program.script_type == ZSCRIPT_LEGACY_GAME)
+            register_application_icon(&settings, project_root, source_path,
+                                        ZDESKTOP_APP_SOURCE, &program, NULL);
         if (!zsharp_desktop_apply_startup(&settings, source_path, 0,
                                            startup_error, sizeof(startup_error)))
             fprintf(stderr, "startup warning: %s\n", startup_error);
@@ -783,6 +1078,11 @@ static int run_bytecode_command(const char *bytecode_path, int argc,
     }
     if (package_launch_depth == 0) {
         char startup_error[512] = {0};
+        if (program.script_type == ZSCRIPT_WINDOW ||
+            program.script_type == ZSCRIPT_GAME ||
+            program.script_type == ZSCRIPT_LEGACY_GAME)
+            register_application_icon(&settings, project_root, bytecode_path,
+                                        ZDESKTOP_APP_BYTECODE, &program, NULL);
         if (!zsharp_desktop_apply_startup(&settings, bytecode_path,
                                           ZDESKTOP_ENTRY_BYTECODE,
                                           startup_error, sizeof(startup_error)))
@@ -1197,6 +1497,11 @@ static int open_package_command(const char *package_path, int argc,
             fprintf(stderr, "Hub warning: %s\n", registry_error);
     }
     if (getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") == NULL) {
+        char *legacy_icon = !native_startup && settings.icon == NULL
+            ? startup_window_icon(startup) : NULL;
+        register_application_icon(&settings, root, package_path,
+                                    ZDESKTOP_APP_PACKAGE, NULL, legacy_icon);
+        free(legacy_icon);
         if (new_install) {
             char association_error[512] = {0};
             if (getenv("ZSHARP_SKIP_ASSOCIATION_INSTALL") == NULL &&
@@ -1386,6 +1691,7 @@ int main(int argc, char **argv) {
 #endif
     if (!(argc > 1 && (strcmp(argv[1], "associate") == 0 ||
                        strcmp(argv[1], "update") == 0 ||
+                       strcmp(argv[1], "call") == 0 ||
                        strcmp(argv[1], "update-agent") == 0)))
         zsharp_update_check_start();
     if (argc > 1 && strcmp(argv[1], "update-agent") == 0)
@@ -1555,6 +1861,7 @@ int main(int argc, char **argv) {
         }
         return check_bytecode_command(argv[2]);
     }
+    if (strcmp(argv[1], "call") == 0) return call_command(argc, argv);
     if (strcmp(argv[1], "run") == 0) {
         if (argc < 3) {
             fputs("error: use 'zsharp run <file.zsharp|file.zapp|file.zgame>'\n",

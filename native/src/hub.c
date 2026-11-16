@@ -1,6 +1,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "hub.h"
+#include "app_icon.h"
+#include "desktop.h"
 
 #include "bytecode.h"
 #include "package.h"
@@ -20,7 +22,6 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <winhttp.h>
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -37,9 +38,6 @@ typedef struct HubState {
     ZSharpUpdatePreferences update_preferences;
 } HubState;
 
-#define ZSHARP_DEFAULT_ICON_URL \
-    "https://zsharp.zombieos.com/zsharp.png"
-
 static int set_error(char *error, size_t error_size, const char *message) {
     if (error != NULL && error_size != 0)
         snprintf(error, error_size, "%s", message);
@@ -48,201 +46,6 @@ static int set_error(char *error, size_t error_size, const char *message) {
 
 static char *hub_copy(const char *value) {
     return value == NULL ? NULL : zsharp_copy_text(value, strlen(value));
-}
-
-static char *hub_join_path(const char *left, const char *right) {
-    size_t a = strlen(left);
-    size_t b = strlen(right);
-    int separator = a != 0 && left[a - 1] != '/' && left[a - 1] != '\\';
-    char *result = (char *)malloc(a + (size_t)separator + b + 1);
-    if (result == NULL) return NULL;
-    memcpy(result, left, a);
-    if (separator) {
-#ifdef _WIN32
-        result[a++] = '\\';
-#else
-        result[a++] = '/';
-#endif
-    }
-    memcpy(result + a, right, b + 1);
-    return result;
-}
-
-static int hub_path_is_file(const char *path) {
-#ifdef _WIN32
-    DWORD attributes = GetFileAttributesA(path);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
-#else
-    struct stat status;
-    return stat(path, &status) == 0 && S_ISREG(status.st_mode);
-#endif
-}
-
-static int hub_make_directory(const char *path) {
-#ifdef _WIN32
-    return CreateDirectoryA(path, NULL) ||
-           GetLastError() == ERROR_ALREADY_EXISTS;
-#else
-    return mkdir(path, 0700) == 0 || errno == EEXIST;
-#endif
-}
-
-static int hub_make_directories(const char *path) {
-    char *copy = hub_copy(path);
-    char *cursor;
-    if (copy == NULL) return 0;
-    for (cursor = copy + 1; *cursor != '\0'; cursor++) {
-        if (*cursor == '/' || *cursor == '\\') {
-#ifdef _WIN32
-            if (cursor == copy + 2 && copy[1] == ':') continue;
-#endif
-            *cursor = '\0';
-            if (copy[0] != '\0' && !hub_make_directory(copy)) {
-                free(copy);
-                return 0;
-            }
-#ifdef _WIN32
-            *cursor = '\\';
-#else
-            *cursor = '/';
-#endif
-        }
-    }
-    if (!hub_make_directory(copy)) {
-        free(copy);
-        return 0;
-    }
-    free(copy);
-    return 1;
-}
-
-static int valid_png_file(const char *path) {
-    static const unsigned char signature[8] = {
-        0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A
-    };
-    unsigned char actual[8];
-    FILE *file = fopen(path, "rb");
-    int valid = file != NULL && fread(actual, 1, sizeof(actual), file) ==
-                sizeof(actual) && memcmp(actual, signature, sizeof(actual)) == 0;
-    if (file != NULL) fclose(file);
-    return valid;
-}
-
-static char *default_icon_cache_path(void) {
-    const char *override = getenv("ZSHARP_HUB_DEFAULT_ICON");
-    const char *base;
-    char *directory;
-    char *path;
-    if (override != NULL && override[0] != '\0')
-        return hub_path_is_file(override) ? hub_copy(override) : NULL;
-#ifdef _WIN32
-    base = getenv("LOCALAPPDATA");
-    if (base == NULL || base[0] == '\0') return NULL;
-    directory = hub_join_path(base, "ZombieOS\\ZSharp\\hub");
-#elif defined(__APPLE__)
-    base = getenv("HOME");
-    if (base == NULL || base[0] == '\0') return NULL;
-    directory = hub_join_path(base,
-                              "Library/Application Support/ZombieOS/ZSharp/hub");
-#else
-    base = getenv("XDG_DATA_HOME");
-    if (base != NULL && base[0] != '\0')
-        directory = hub_join_path(base, "zsharp/hub");
-    else {
-        base = getenv("HOME");
-        if (base == NULL || base[0] == '\0') return NULL;
-        directory = hub_join_path(base, ".local/share/zsharp/hub");
-    }
-#endif
-    if (directory == NULL || !hub_make_directories(directory)) {
-        free(directory);
-        return NULL;
-    }
-    path = hub_join_path(directory, "zsharp.png");
-    free(directory);
-    return path;
-}
-
-#ifdef _WIN32
-static int download_default_icon(const char *destination) {
-    HINTERNET session = NULL;
-    HINTERNET connection = NULL;
-    HINTERNET request = NULL;
-    FILE *output = NULL;
-    unsigned char buffer[16384];
-    DWORD status = 0;
-    DWORD status_size = sizeof(status);
-    DWORD read = 0;
-    size_t total = 0;
-    int ok = 0;
-    session = WinHttpOpen(L"ZSharp-Hub/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (session == NULL) goto done;
-    connection = WinHttpConnect(session, L"zsharp.zombieos.com",
-                                INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (connection == NULL) goto done;
-    request = WinHttpOpenRequest(connection, L"GET", L"/zsharp.png", NULL,
-                                 WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                 WINHTTP_FLAG_SECURE);
-    if (request == NULL || !WinHttpSendRequest(
-            request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-        !WinHttpReceiveResponse(request, NULL) ||
-        !WinHttpQueryHeaders(request,
-             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-             WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size,
-             WINHTTP_NO_HEADER_INDEX) || status != 200) goto done;
-    output = fopen(destination, "wb");
-    if (output == NULL) goto done;
-    do {
-        if (!WinHttpReadData(request, buffer, sizeof(buffer), &read)) goto done;
-        total += read;
-        if (total > 8u * 1024u * 1024u ||
-            (read != 0 && fwrite(buffer, 1, read, output) != read)) goto done;
-    } while (read != 0);
-    if (fclose(output) != 0) {
-        output = NULL;
-        goto done;
-    }
-    output = NULL;
-    ok = valid_png_file(destination);
-done:
-    if (output != NULL) fclose(output);
-    if (!ok) remove(destination);
-    if (request != NULL) WinHttpCloseHandle(request);
-    if (connection != NULL) WinHttpCloseHandle(connection);
-    if (session != NULL) WinHttpCloseHandle(session);
-    return ok;
-}
-#else
-static int download_default_icon(const char *destination) {
-    pid_t child = fork();
-    int status = 0;
-    if (child < 0) return 0;
-    if (child == 0) {
-        execl("/usr/bin/curl", "curl", "-fsSL", "--proto", "=https",
-              "--tlsv1.2", "--max-filesize", "8388608", "-o", destination,
-              ZSHARP_DEFAULT_ICON_URL, (char *)NULL);
-        _exit(127);
-    }
-    if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) ||
-        WEXITSTATUS(status) != 0 || !valid_png_file(destination)) {
-        remove(destination);
-        return 0;
-    }
-    return 1;
-}
-#endif
-
-static char *default_icon_path(void) {
-    char *path = default_icon_cache_path();
-    if (path == NULL) return NULL;
-    if (!valid_png_file(path) && !download_default_icon(path)) {
-        free(path);
-        return NULL;
-    }
-    return path;
 }
 
 static void prepare_package_icons(ZSharpInstalledPackageList *packages) {
@@ -265,11 +68,8 @@ static void prepare_package_icons(ZSharpInstalledPackageList *packages) {
             zsharp_settings_load(root, &settings, &diagnostic, local_error,
                                  sizeof(local_error)) &&
             settings.icon != NULL) {
-            char *candidate = hub_join_path(root, settings.icon);
-            if (candidate != NULL && hub_path_is_file(candidate))
-                item->icon_path = candidate;
-            else
-                free(candidate);
+            item->icon_path = zsharp_app_icon_resolve(root, settings.icon,
+                                                       local_error, sizeof(local_error));
         }
         if (settings.project_name != NULL)
             memcpy(item->zsharp_version, settings.zsharp_version,
@@ -281,7 +81,7 @@ static void prepare_package_icons(ZSharpInstalledPackageList *packages) {
     }
     for (index = 0; index < packages->count; index++) {
         if (packages->items[index].icon_path != NULL) continue;
-        if (fallback == NULL) fallback = default_icon_path();
+        if (fallback == NULL) fallback = zsharp_app_icon_default_path(NULL, 0);
         if (fallback != NULL)
             packages->items[index].icon_path = hub_copy(fallback);
     }
@@ -424,10 +224,21 @@ static int build_hub_program(ZSharpProgram *program,
     program->script_type = ZSCRIPT_WINDOW;
     program->has_window = 1;
     program->source_name = zsharp_copy_text("ZSharpHub", 9);
+    program->project_id = hub_copy("zsharp-hub");
     program->window.name = zsharp_copy_text("Hub", 3);
-    if (program->source_name == NULL || program->window.name == NULL)
+    if (program->source_name == NULL || program->window.name == NULL ||
+        program->project_id == NULL)
         return set_error(error, error_size, "out of memory");
     design = add_element(program, ZUI_DESIGN, "Design");
+    {
+        char *icon = zsharp_app_icon_default_path(NULL, 0);
+        if (icon != NULL) {
+            int assigned = design != NULL &&
+                add_property(design, "icon", ZUI_PROPERTY_TEXT, icon, 0, ZUI_UNIT_NONE);
+            free(icon);
+            if (!assigned) return set_error(error, error_size, "out of memory");
+        }
+    }
     if (design == NULL ||
         !add_property(design, "title", ZUI_PROPERTY_TEXT, "Z# Hub", 0,
                       ZUI_UNIT_NONE) ||
@@ -981,6 +792,20 @@ int zsharp_hub_show(char *error, size_t error_size) {
         zsharp_registry_package_list_free(&state.packages);
         zsharp_program_free(&program);
         return 0;
+    }
+    if (getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") == NULL) {
+        char registration_error[512] = {0};
+        char *icon = zsharp_app_icon_default_path(registration_error,
+                                                   sizeof(registration_error));
+        int registered = icon != NULL &&
+            zsharp_desktop_register_application("Z# Hub", "zsharp-hub", NULL, 3,
+                                                 icon, registration_error,
+                                                 sizeof(registration_error));
+        free(icon);
+        if (!registered)
+            fprintf(stderr, "desktop warning: %s\n",
+                     registration_error[0] != '\0' ? registration_error :
+                     "could not register the Z# Hub launcher");
     }
     result = zsharp_window_run(&program, ".", hub_callback, &state,
                                error, error_size);

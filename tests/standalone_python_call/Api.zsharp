@@ -1,0 +1,55 @@
+zsharp = type.script
+
+noticed room Counter[] (
+ noticed number Value = 0:
+ noticed Counter[number Seed] (
+  number.set:Value = Seed:
+  Print("CALL_CONSTRUCTOR_RAN"):
+ )
+)
+
+noticed room Api[] (
+ import standalone_python_call_regression.modules.Helpers():
+ noticed Counter State = new Counter[41]:
+ noticed Counter() LiveArray = [new Counter[5]]:
+ noticed number() Numbers = [1, 9007199254740993, 0.25]:
+ noticed text() Words = ["alpha", "beta"]:
+ noticed text() Empty = []:
+
+ noticed brain Start[] (Print("CALL_START_MUST_NOT_RUN"):)
+ noticed brain Shutdown[] (Print("CALL_SHUTDOWN_MUST_NOT_RUN"):)
+ noticed number Add[number Left, number Right] (feed(Left + Right):)
+ noticed number EchoNumber[number Value] (feed(Value):)
+ noticed brain EchoObject[object Value] (if(Result)[alive] (feed(Value):))
+ noticed brain EchoStatus[status Value] (if(Result)[alive] (feed(Value):))
+ noticed text EchoText[text Value] (feed(Value):)
+ noticed brain NullValue[] (if(Result)[alive] (feed(null):))
+ noticed brain NoFeed[] (Print("CALL_TARGET_RAN"):)
+ noticed brain NumberArray[] (if(Result)[alive] (feed(Numbers):))
+ noticed brain TextArray[] (if(Result)[alive] (feed(Words):))
+ noticed brain EmptyArray[] (if(Result)[alive] (feed(Empty):))
+ noticed brain LiveObject[] (if(Result)[alive] (feed(State):))
+ noticed brain LiveObjects[] (if(Result)[alive] (feed(LiveArray):))
+ noticed number Initialized[] (feed(State.Value):)
+ noticed number Increment[] (
+  number.set:State.Value = State.Value + 1:
+  feed(State.Value):
+ )
+ noticed number Imported[number Value] (
+  feed(Function.call(Helpers:Support:Triple [Value])):
+ )
+ noticed number ImportedTwice[] (
+  number First = Function.call(Helpers:Support:Next []):
+  feed(Function.call(Helpers:Support:Next [])):
+ )
+ noticed brain RequiresCounter[Counter Value] (if(Result)[alive] (feed(1):))
+ silent brain Hidden[] (if(Result)[alive] (feed("private"):))
+)
+
+silent room Secret[] (
+ noticed brain VisibleMember[] (if(Result)[alive] (feed("private room"):))
+)
+
+room FileOnly[] (
+ noticed brain VisibleMember[] (if(Result)[alive] (feed("file-only room"):))
+)

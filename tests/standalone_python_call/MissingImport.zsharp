@@ -1,0 +1,5 @@
+zsharp = type.script
+
+noticed room MissingImport[] (
+ noticed brain Run[] (if(Result)[alive] (feed(Function.call(Helpers:Support:Triple [1])):))
+)

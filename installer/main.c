@@ -59,6 +59,7 @@ static char installer_desktop_error[512];
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
+#include "path.h"
 #endif
 
 #define INSTALLER_MANIFEST_LIMIT (1024u * 1024u)
@@ -1507,6 +1508,9 @@ static int installer_core_main(int argc, char **argv) {
     char *installer_backup = NULL;
     char *installer_temporary = NULL;
     char *self = NULL;
+#ifndef _WIN32
+    int persistent_path_configured = 0;
+#endif
     ReleaseInfo release;
     unsigned char digest[ZSHARP_SHA256_SIZE];
     char digest_hex[ZSHARP_SHA256_SIZE * 2 + 1];
@@ -1861,12 +1865,24 @@ static int installer_core_main(int argc, char **argv) {
                       "Z# runtime", error, sizeof(error)))
         goto done;
     if (getenv("ZSHARP_INSTALLER_SKIP_INTEGRATION") == NULL) {
-#ifdef _WIN32
         char integration_error[512] = {0};
+#ifdef _WIN32
         if (!check_mode && !add_to_user_path(
                 install_directory, integration_error,
                 sizeof(integration_error)))
             fprintf(stderr, "PATH warning: %s\n", integration_error);
+#else
+        if (!check_mode) {
+            char *absolute_directory = realpath(install_directory, NULL);
+            if (absolute_directory != NULL && installer_configure_user_path(
+                    getenv("HOME"), absolute_directory, integration_error,
+                    sizeof(integration_error)))
+                persistent_path_configured = 1;
+            else
+                fprintf(stderr, "PATH warning: %s\n", integration_error[0]
+                    ? integration_error : "could not resolve the installation directory");
+            free(absolute_directory);
+        }
 #endif
         if (!run_associate(runtime))
             fputs("association warning: run 'zsharp associate' later\n", stderr);
@@ -1885,13 +1901,8 @@ static int installer_core_main(int argc, char **argv) {
         show_result_notification("Z#", message);
     }
 #ifndef _WIN32
-    {
-        const char *path = getenv("PATH");
-        if (path == NULL || strstr(path, install_directory) == NULL)
-            if (!quiet)
-                printf("Add %s to PATH to use 'zsharp' in new terminals.\n",
-                       install_directory);
-    }
+    if (!quiet && persistent_path_configured)
+        puts("Command-line setup saved. Open a new terminal to use 'zsharp'.");
 #else
     if (!quiet) puts("Open a new terminal before using the 'zsharp' command.");
 #endif

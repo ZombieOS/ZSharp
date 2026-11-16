@@ -1,4 +1,5 @@
 #include "window.h"
+#include "app_icon.h"
 
 #include "paint.h"
 #include "window_runtime.h"
@@ -1744,15 +1745,27 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     }
     layout_controls(&state);
     value = property(design, "icon");
-    if (value != NULL) {
-        char *path = path_join(project_root, value->text_value);
+    {
+        char *path = zsharp_app_icon_for_window(
+            project_root, program->project_id,
+            value == NULL ? NULL : value->text_value, error, error_size);
         if (path != NULL) {
             MacId image = send_id_id(api, send_id(api,
                 (MacId)api->get_class("NSImage"), "alloc"),
                 "initWithContentsOfFile:", ns_string(api, path));
-            if (image != NULL)
+            if (image == NULL) {
+                char *fallback = zsharp_app_icon_default_path(NULL, 0);
+                if (fallback != NULL)
+                    image = send_id_id(api, send_id(api,
+                        (MacId)api->get_class("NSImage"), "alloc"),
+                        "initWithContentsOfFile:", ns_string(api, fallback));
+                free(fallback);
+            }
+            if (image != NULL) {
                 send_void_id(api, state.application, "setApplicationIconImage:",
                              image);
+                send_void(api, image, "release");
+            }
             free(path);
         }
     }

@@ -1,0 +1,7 @@
+zsharp = type.script
+
+noticed room Failures[] (
+ noticed number WrongReturn[] (feed("wrong type"):)
+ noticed number MissingReturn[] (Print("CALL_MISSING_RETURN_RAN"):)
+ noticed number DivideByZero[] (feed(1 / 0):)
+)

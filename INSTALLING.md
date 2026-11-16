@@ -110,7 +110,26 @@ macOS:   ~/.local/bin/zsharp
 
 On Windows, the installer adds its bin folder to the current user's `PATH`.
 The user must open a new terminal before the `zsharp` command becomes visible.
-Linux and macOS print a reminder if `~/.local/bin` is not already in `PATH`.
+Starting with the 1.4.1.1 installer, Linux and macOS also save persistent
+per-user PATH settings. Bash uses `.bashrc` and the applicable login profile;
+existing or selected Zsh configurations and Fish configurations are supported
+too. The installer maintains one marked block, preserves other settings, and
+does not add duplicate PATH entries when a new terminal starts. Custom install
+directories are supported as well.
+
+Open a new terminal once after installation. An installer process cannot
+change the environment of an already-open parent shell. After that, new
+terminals load the saved PATH automatically; no repeated `export PATH` or
+refresh command is needed.
+
+For an existing installation made by an older installer, rerun the new
+installer once to apply its PATH setup. An older installed updater does not
+acquire new installer features just by downloading a newer ZVM. Automatic
+background update checks leave shell profiles unchanged.
+
+If a profile cannot be updated, installation still succeeds and prints a
+`PATH warning` identifying the problem. The managed blocks start with
+`# >>> Z# installer PATH >>>` and end with `# <<< Z# installer PATH <<<`.
 
 After installation, the new ZVM runs `zsharp associate`. This registers
 `.zapp` and `.zgame` for the current user. On Windows it also registers and

@@ -1060,7 +1060,7 @@ The settings file begins with:
 zsharp = type.settings
 ```
 
-Project metadata may include an optional Hub icon:
+Project metadata may include an optional application icon:
 
 ```zsharp
 Project: "My App":
@@ -1072,11 +1072,12 @@ Icon: "assets/icon.png":
 ZSharp: [1.0.2.1]:
 ```
 
-`Icon` accepts a project-relative PNG. Paths use `/`
-and cannot leave the project. If `Icon` is omitted, the Hub downloads and
-caches the official Z# logo from `https://zsharp.zombieos.com/zsharp.png`.
-The same project icon is used for Desktop shortcuts created by Z#; a window's
-design icon remains the fallback for older projects without `Icon`.
+`Icon` accepts a project-relative PNG. Paths use `/` and cannot leave the
+project. The icon is used for the running application's window, its desktop
+launcher and its entry in the Hub. An older project's window design icon
+remains a fallback when `Icon` is omitted. With neither icon provided, Z# uses
+its bundled official logo, including on the first launch without a network
+connection. The Hub's own window and desktop launcher use that same Z# logo.
 
 ## Project settings
 
@@ -4456,6 +4457,53 @@ Python cleanup before terminating a worker that remains alive. On Windows,
 the worker is also owned by a kill-on-close job to prevent orphaned workers.
 Restart the ZVM to reload edited Python modules. User Python output is forwarded
 to standard error so it cannot corrupt the worker's result protocol.
+
+### Calling Z# from ordinary Python (1.4.1.1)
+
+The installable package in `python/` works in a normal Python interpreter with
+ZVM 1.4.1.1 or later. It calls a noticed brain or typed function in a noticed
+room, using the existing `File:Room:Function` naming convention:
+
+```python
+from zsharp import call
+
+answer = call("Math:Calculator:Add", 20, 22, project="/path/to/project")
+```
+
+For example, `Math.zsharp` contains:
+
+```zsharp
+zsharp = type.script
+
+noticed room Calculator[] (
+ noticed number Add[number Left, number Right] (
+  feed(Left + Right):
+ )
+)
+```
+
+The project still needs its normal `project.zsettings`. The file portion of
+the target is relative to `project`, which defaults to Python's current
+directory. Normal noticed functions do not require `horde`. Room initializers
+and constructors run, but `Start` and `Shutdown` do not run automatically.
+Each Python call starts a fresh VM; returned live objects and persistent VM
+state are unavailable. This is separate from synchronous callbacks in Python
+modules that ZVM itself loads.
+
+The equivalent CLI uses tagged interop JSON in an arguments file and writes a
+separate response file, leaving `Print` output on standard output:
+
+```sh
+zsharp call Math.zsharp Calculator:Add --args-file arguments.json --result-file result.json
+```
+
+`arguments.json` is a JSON array such as
+`[{"$number":"20"},{"$number":"22"}]`. Omitting `--args-file` supplies no
+arguments. Successful responses contain `{"ok":true,"value":{"$number":"42"}}`;
+failures contain `{"ok":false,"error":"diagnostic"}` and return a nonzero exit
+status. The CLI also accepts `.zbc` files and existing `--provider` bindings.
+The Python package handles this protocol, value conversion, runtime discovery
+and timeouts; see [its guide](python/README.md).
 
 ## JavaScript
 

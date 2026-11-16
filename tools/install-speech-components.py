@@ -156,7 +156,7 @@ def download(home: Path, document: dict, url: str, filename: str, token: str | N
         print("Verified cached " + filename, flush=True)
         return destination
     part = cache / (".download-" + uuid.uuid4().hex + ".tmp")
-    headers = {"User-Agent": "ZSharp-LocalSpeechSetup/1.4.1.0"}
+    headers = {"User-Agent": "ZSharp-LocalSpeechSetup/1.4.1.1"}
     if token and parsed.hostname == "huggingface.co":
         headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(url, headers=headers)
@@ -224,7 +224,7 @@ def official_voice_identity(reference: str) -> tuple[int, str, str]:
         raise RuntimeError("Local voice weights must match the genuine kyutai/pocket-tts model reference.")
     metadata_url = f"https://huggingface.co/api/models/{repository}/revision/{revision}?blobs=true"
     request = urllib.request.Request(metadata_url, headers={
-        "User-Agent": "ZSharp-LocalSpeechSetup/1.4.1.0", "Accept": "application/json"})
+        "User-Agent": "ZSharp-LocalSpeechSetup/1.4.1.1", "Accept": "application/json"})
     opener = urllib.request.build_opener(ModelRedirect())
     with opener.open(request, timeout=30) as response:
         payload = response.read(4 * 1024 * 1024 + 1)

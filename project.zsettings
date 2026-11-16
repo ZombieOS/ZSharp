@@ -2,7 +2,7 @@ zsharp = type.settings
 
 Project: "Z#":
 PID: "zsharp":
-Version: [1.4.1.0]:
+Version: [1.4.1.1]:
 Authors: ["ZombieOS"]:
 Description: "The Z# programming language and bytecode toolchain.":
 ZSharp: [1.4.0.0]:

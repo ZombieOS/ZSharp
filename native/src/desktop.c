@@ -1,9 +1,12 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "desktop.h"
+#include "app_icon.h"
+#include "settings.h"
 
 #include <errno.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +18,7 @@
 #include <objbase.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <wincodec.h>
 #else
 #if defined(__APPLE__)
 #include <dirent.h>
@@ -46,6 +50,7 @@ static char *copy_text(const char *text) {
 }
 #endif
 
+#ifndef _WIN32
 static char *join_path(const char *left, const char *right) {
     size_t a = strlen(left), b = strlen(right);
     int separator = a != 0 && left[a - 1] != '/' && left[a - 1] != '\\';
@@ -62,6 +67,7 @@ static char *join_path(const char *left, const char *right) {
     memcpy(result + a, right, b + 1);
     return result;
 }
+#endif
 
 static char *safe_name(const char *display_name) {
     size_t length = strlen(display_name);
@@ -84,6 +90,27 @@ static char *safe_name(const char *display_name) {
         output = 10;
     }
     result[output] = '\0';
+    return result;
+}
+
+/* Keep project metadata ahead of the legacy window-design icon for shortcuts. */
+static char *project_icon_path(const char *project_root, const char *legacy_icon,
+                               char **desktop_id, char *error, size_t error_size) {
+    ZSharpSettings settings;
+    ZSharpDiagnostic diagnostic;
+    char ignored[512] = {0};
+    const char *selected = legacy_icon;
+    char *result;
+    zsharp_settings_init(&settings);
+    if (project_root != NULL &&
+        zsharp_settings_load(project_root, &settings, &diagnostic,
+                              ignored, sizeof(ignored)) &&
+        settings.icon != NULL)
+        selected = settings.icon;
+    if (desktop_id != NULL)
+        *desktop_id = zsharp_app_desktop_id(settings.project_id);
+    result = zsharp_app_icon_resolve(project_root, selected, error, error_size);
+    zsharp_settings_free(&settings);
     return result;
 }
 
@@ -150,51 +177,113 @@ static void put_u32(unsigned char *bytes, unsigned long value) {
 }
 
 static int png_icon_file(const char *png_path, const char *ico_path) {
-    unsigned char signature[24];
-    unsigned char header[22] = {0};
-    unsigned long width;
-    unsigned long height;
-    FILE *input = fopen(png_path, "rb");
-    FILE *output;
-    long size;
-    unsigned char buffer[64 * 1024];
-    size_t count;
-    if (input == NULL || fread(signature, 1, sizeof(signature), input) !=
-                             sizeof(signature) ||
-        memcmp(signature, "\x89PNG\r\n\x1a\n", 8) != 0 ||
-        fseek(input, 0, SEEK_END) != 0 || (size = ftell(input)) <= 0 ||
-        (unsigned long)size > 0xfffffffful || fseek(input, 0, SEEK_SET) != 0) {
-        if (input != NULL) fclose(input);
-        return 0;
-    }
-    width = ((unsigned long)signature[16] << 24) |
-            ((unsigned long)signature[17] << 16) |
-            ((unsigned long)signature[18] << 8) | signature[19];
-    height = ((unsigned long)signature[20] << 24) |
-             ((unsigned long)signature[21] << 16) |
-             ((unsigned long)signature[22] << 8) | signature[23];
-    if (width == 0 || height == 0) { fclose(input); return 0; }
-    put_u16(header + 2, 1);
-    put_u16(header + 4, 1);
-    header[6] = width >= 256 ? 0 : (unsigned char)width;
-    header[7] = height >= 256 ? 0 : (unsigned char)height;
-    put_u16(header + 10, 1);
-    put_u16(header + 12, 32);
-    put_u32(header + 14, (unsigned long)size);
-    put_u32(header + 18, 22);
+    enum { ICON_SIZE = 256, PIXEL_STRIDE = ICON_SIZE * 4,
+           MASK_STRIDE = ICON_SIZE / 8 };
+    IWICImagingFactory *factory = NULL;
+    IWICBitmapDecoder *decoder = NULL;
+    IWICBitmapFrameDecode *frame = NULL;
+    IWICBitmapScaler *scaler = NULL;
+    IWICFormatConverter *converter = NULL;
+    WCHAR *wide_path = wide_text(png_path);
+    unsigned char header[22] = {0}, bitmap[40] = {0};
+    unsigned char mask[MASK_STRIDE];
+    unsigned char *pixels = NULL, *canvas = NULL;
+    UINT width = 0, height = 0, draw_width = 0, draw_height = 0, row;
+    HRESULT initialized = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    HRESULT result = E_FAIL;
+    FILE *output = NULL;
+    int ok = 0;
+    if (wide_path == NULL || (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE))
+        goto done;
+    result = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                                &IID_IWICImagingFactory, (void **)&factory);
+    if (SUCCEEDED(result)) result = IWICImagingFactory_CreateDecoderFromFilename(
+        factory, wide_path, NULL, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder);
+    if (SUCCEEDED(result)) result = IWICBitmapDecoder_GetFrame(decoder, 0, &frame);
+    if (SUCCEEDED(result)) result = IWICBitmapFrameDecode_GetSize(frame, &width, &height);
+    if (FAILED(result) || width == 0 || height == 0) goto done;
+    draw_width = width >= height ? ICON_SIZE : (UINT)((uint64_t)width * ICON_SIZE / height);
+    draw_height = height >= width ? ICON_SIZE : (UINT)((uint64_t)height * ICON_SIZE / width);
+    if (draw_width == 0) draw_width = 1;
+    if (draw_height == 0) draw_height = 1;
+    result = IWICImagingFactory_CreateBitmapScaler(factory, &scaler);
+    if (SUCCEEDED(result)) result = IWICBitmapScaler_Initialize(scaler,
+        (IWICBitmapSource *)frame, draw_width, draw_height, WICBitmapInterpolationModeFant);
+    if (SUCCEEDED(result)) result = IWICImagingFactory_CreateFormatConverter(factory, &converter);
+    if (SUCCEEDED(result)) result = IWICFormatConverter_Initialize(converter,
+        (IWICBitmapSource *)scaler, &GUID_WICPixelFormat32bppBGRA,
+        WICBitmapDitherTypeNone, NULL, 0, WICBitmapPaletteTypeCustom);
+    if (FAILED(result)) goto done;
+    pixels = (unsigned char *)malloc((size_t)draw_width * draw_height * 4);
+    canvas = (unsigned char *)calloc(ICON_SIZE, PIXEL_STRIDE);
+    if (pixels == NULL || canvas == NULL) goto done;
+    result = IWICFormatConverter_CopyPixels(converter, NULL, draw_width * 4,
+        draw_width * draw_height * 4, pixels);
+    if (FAILED(result)) goto done;
+    for (row = 0; row < draw_height; row++)
+        memcpy(canvas + ((ICON_SIZE - draw_height) / 2 + row) * PIXEL_STRIDE +
+                       (ICON_SIZE - draw_width) / 2 * 4,
+               pixels + row * draw_width * 4, draw_width * 4);
+    put_u16(header + 2, 1); put_u16(header + 4, 1);
+    put_u16(header + 10, 1); put_u16(header + 12, 32);
+    put_u32(header + 14, sizeof(bitmap) + ICON_SIZE * (PIXEL_STRIDE + MASK_STRIDE));
+    put_u32(header + 18, sizeof(header));
+    put_u32(bitmap, sizeof(bitmap)); put_u32(bitmap + 4, ICON_SIZE);
+    put_u32(bitmap + 8, ICON_SIZE * 2); put_u16(bitmap + 12, 1);
+    put_u16(bitmap + 14, 32); put_u32(bitmap + 20, ICON_SIZE * PIXEL_STRIDE);
     output = fopen(ico_path, "wb");
-    if (output == NULL || fwrite(header, 1, sizeof(header), output) !=
-                              sizeof(header)) {
-        fclose(input);
-        if (output != NULL) fclose(output);
-        return 0;
+    if (output == NULL || fwrite(header, 1, sizeof(header), output) != sizeof(header) ||
+        fwrite(bitmap, 1, sizeof(bitmap), output) != sizeof(bitmap)) goto done;
+    /* ICO DIBs contain bottom-up BGRA pixels followed by a 1-bit AND mask. */
+    for (row = ICON_SIZE; row > 0; row--)
+        if (fwrite(canvas + (row - 1) * PIXEL_STRIDE, 1, PIXEL_STRIDE, output) != PIXEL_STRIDE)
+            goto done;
+    for (row = ICON_SIZE; row > 0; row--) {
+        UINT column;
+        memset(mask, 0, sizeof(mask));
+        for (column = 0; column < ICON_SIZE; column++)
+            if (canvas[(row - 1) * PIXEL_STRIDE + column * 4 + 3] < 128)
+                mask[column / 8] |= (unsigned char)(0x80u >> (column % 8));
+        if (fwrite(mask, 1, sizeof(mask), output) != sizeof(mask)) goto done;
     }
-    while ((count = fread(buffer, 1, sizeof(buffer), input)) != 0)
-        if (fwrite(buffer, 1, count, output) != count) {
-            fclose(input); fclose(output); return 0;
+    ok = 1;
+done:
+    if (output != NULL && fclose(output) != 0) ok = 0;
+    if (!ok) remove(ico_path);
+    free(canvas); free(pixels); free(wide_path);
+    if (converter != NULL) IWICFormatConverter_Release(converter);
+    if (scaler != NULL) IWICBitmapScaler_Release(scaler);
+    if (frame != NULL) IWICBitmapFrameDecode_Release(frame);
+    if (decoder != NULL) IWICBitmapDecoder_Release(decoder);
+    if (factory != NULL) IWICImagingFactory_Release(factory);
+    if (SUCCEEDED(initialized)) CoUninitialize();
+    return ok;
+}
+
+static char *windows_shortcut_icon(const char *project_root,
+                                   const char *legacy_icon,
+                                   char *error, size_t error_size) {
+    char *identity = NULL;
+    char *png = project_root == NULL
+        ? zsharp_app_icon_default_path(error, error_size)
+        : project_icon_path(project_root, legacy_icon, &identity, error, error_size);
+    char *cache = zsharp_app_icon_default_path(error, error_size);
+    char *ico = NULL;
+    if (identity == NULL) identity = zsharp_app_desktop_id("zsharp-hub");
+    if (png != NULL && cache != NULL && identity != NULL) {
+        size_t size = strlen(cache) + strlen(identity) + 6;
+        ico = (char *)malloc(size);
+        if (ico != NULL) {
+            snprintf(ico, size, "%s.%s.ico", cache, identity);
+            if (!png_icon_file(png, ico)) { free(ico); ico = NULL; }
         }
-    if (ferror(input) || fclose(input) != 0 || fclose(output) != 0) return 0;
-    return 1;
+    }
+    if (ico == NULL)
+        desktop_error(error, error_size, "could not prepare the Z# shortcut icon");
+    free(identity);
+    free(cache);
+    free(png);
+    return ico;
 }
 
 int zsharp_desktop_install_associations(char *error, size_t error_size) {
@@ -242,6 +331,8 @@ int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
     IPersistFile *persist = NULL;
     HRESULT initialized;
     HRESULT result;
+    char *icon_path = NULL;
+    WCHAR *wide_icon = NULL;
     int ok = 0;
     if (!windows_desktop(desktop,
                          (DWORD)(sizeof(desktop) / sizeof(desktop[0]))) ||
@@ -254,9 +345,14 @@ int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
     swprintf(shortcut_path,
              sizeof(shortcut_path) / sizeof(shortcut_path[0]),
              L"%ls\\Z# Hub.lnk", desktop);
+    icon_path = windows_shortcut_icon(NULL, NULL, error, error_size);
+    wide_icon = icon_path == NULL ? NULL : wide_text(icon_path);
+    if (wide_icon == NULL) { free(icon_path); return 0; }
     initialized = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) {
         desktop_error(error, error_size, "could not initialize shortcut support");
+        free(wide_icon);
+        free(icon_path);
         return 0;
     }
     result = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
@@ -267,7 +363,7 @@ int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
         result = IShellLinkW_SetDescription(
             link, L"Open the Z# Hub for installed apps and games");
     if (SUCCEEDED(result))
-        result = IShellLinkW_SetIconLocation(link, executable, 0);
+        result = IShellLinkW_SetIconLocation(link, wide_icon, 0);
     if (SUCCEEDED(result))
         result = IShellLinkW_QueryInterface(link, &IID_IPersistFile,
                                             (void **)&persist);
@@ -276,6 +372,8 @@ int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
     if (persist != NULL) IPersistFile_Release(persist);
     if (link != NULL) IShellLinkW_Release(link);
     if (SUCCEEDED(initialized)) CoUninitialize();
+    free(wide_icon);
+    free(icon_path);
     if (FAILED(result)) {
         desktop_error(error, error_size,
                       "could not create the Z# Hub desktop shortcut");
@@ -337,23 +435,12 @@ int zsharp_desktop_create_shortcut(const char *display_name,
     if (SUCCEEDED(result)) result = IShellLinkW_SetPath(link, executable);
     if (SUCCEEDED(result)) result = IShellLinkW_SetArguments(link, arguments);
     if (SUCCEEDED(result)) result = IShellLinkW_SetDescription(link, wide_name);
-    if (icon_relative != NULL && strlen(icon_relative) > 4 &&
-        _stricmp(icon_relative + strlen(icon_relative) - 4, ".ico") == 0) {
-        icon_path = join_path(project_root, icon_relative);
-        wide_icon = icon_path == NULL ? NULL : wide_text(icon_path);
-    } else if (icon_relative != NULL && strlen(icon_relative) > 4 &&
-               _stricmp(icon_relative + strlen(icon_relative) - 4,
-                        ".png") == 0) {
-        char *png_path = join_path(project_root, icon_relative);
-        icon_path = join_path(project_root, ".zsharp-shortcut.ico");
-        if (png_path != NULL && icon_path != NULL &&
-            png_icon_file(png_path, icon_path))
-            wide_icon = wide_text(icon_path);
-        free(png_path);
-    }
+    icon_path = windows_shortcut_icon(project_root, icon_relative, error, error_size);
+    wide_icon = icon_path == NULL ? NULL : wide_text(icon_path);
+    if (wide_icon == NULL && SUCCEEDED(result)) result = E_FAIL;
     if (SUCCEEDED(result))
         result = IShellLinkW_SetIconLocation(
-            link, wide_icon == NULL ? executable : wide_icon, 0);
+            link, wide_icon, 0);
     if (SUCCEEDED(result))
         result = IShellLinkW_QueryInterface(link, &IID_IPersistFile,
                                             (void **)&persist);
@@ -496,6 +583,8 @@ static char *executable_path(char *error, size_t error_size) {
 }
 
 #if defined(__linux__)
+static char *desktop_string_escape(const char *text);
+
 static char *desktop_exec_quote(const char *text) {
     size_t length = 3;
     const char *cursor;
@@ -503,17 +592,44 @@ static char *desktop_exec_quote(const char *text) {
     char *output;
     for (cursor = text; *cursor != '\0'; cursor++)
         length += (*cursor == '\\' || *cursor == '\"' ||
-                   *cursor == '`' || *cursor == '$') ? 2 : 1;
+                   *cursor == '`' || *cursor == '$' || *cursor == '%') ? 2 : 1;
     result = (char *)malloc(length);
     if (result == NULL) return NULL;
     output = result;
     *output++ = '\"';
     for (cursor = text; *cursor != '\0'; cursor++) {
-        if (*cursor == '\\' || *cursor == '\"' ||
+        if (*cursor == '%') *output++ = '%';
+        else if (*cursor == '\\' || *cursor == '\"' ||
             *cursor == '`' || *cursor == '$') *output++ = '\\';
         *output++ = *cursor;
     }
     *output++ = '\"';
+    *output = '\0';
+    /* Desktop string escapes are decoded before Exec argument quoting. */
+    {
+        char *escaped = desktop_string_escape(result);
+        free(result);
+        return escaped;
+    }
+}
+
+static char *desktop_string_escape(const char *text) {
+    const unsigned char *cursor;
+    char *result, *output;
+    size_t size = 1;
+    for (cursor = (const unsigned char *)text; *cursor != 0; cursor++)
+        size += *cursor == '\\' || *cursor == '\n' ||
+                *cursor == '\r' || *cursor == '\t' ? 2 : 1;
+    result = (char *)malloc(size);
+    if (result == NULL) return NULL;
+    output = result;
+    for (cursor = (const unsigned char *)text; *cursor != 0; cursor++) {
+        if (*cursor == '\\' || *cursor == '\n' || *cursor == '\r' || *cursor == '\t') {
+            *output++ = '\\';
+            *output++ = *cursor == '\n' ? 'n' : *cursor == '\r' ? 'r' :
+                        *cursor == '\t' ? 't' : '\\';
+        } else *output++ = (char)*cursor;
+    }
     *output = '\0';
     return result;
 }
@@ -553,8 +669,99 @@ static int run_process(const char *executable, char *const arguments[]) {
 
 #if defined(__linux__)
 
+static char *linux_applications_directory(void) {
+    const char *base = getenv("XDG_DATA_HOME");
+    char *data, *applications;
+    if (base != NULL && base[0] == '/')
+        return join_path(base, "applications");
+    base = getenv("HOME");
+    if (base == NULL || base[0] == '\0') return NULL;
+    data = join_path(base, ".local/share");
+    applications = data == NULL ? NULL : join_path(data, "applications");
+    free(data);
+    return applications;
+}
+
+static void trust_desktop_shortcut(const char *path) {
+    pid_t child = fork();
+    int status;
+    if (child == 0) {
+        /* GNOME otherwise displays a generated launcher as an untrusted text
+         * document. Other desktops may not support this optional metadata. */
+        (void)freopen("/dev/null", "w", stdout);
+        (void)freopen("/dev/null", "w", stderr);
+        execl("/usr/bin/gio", "gio", "set", path, "metadata::trusted", "true",
+              (char *)NULL);
+        _exit(127);
+    }
+    if (child > 0)
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+}
+
+int zsharp_desktop_register_application(const char *display_name,
+                                        const char *project_id,
+                                        const char *entry_path, int entry_kind,
+                                        const char *icon_path,
+                                        char *error, size_t error_size) {
+    static const char *const actions[] = {"run", "run-bytecode", "open-desktop", "hub"};
+    char *applications = NULL, *identity = NULL, *filename = NULL, *path = NULL;
+    char *executable = NULL, *quoted_executable = NULL, *entry = NULL, *quoted_entry = NULL;
+    char *icon = NULL, *escaped_icon = NULL, *escaped_name = NULL, *contents = NULL;
+    size_t size;
+    int ok = 0;
+    if (entry_kind < 0 || entry_kind > 3 ||
+        (entry_kind != 3 && (entry_path == NULL || entry_path[0] == '\0'))) {
+        desktop_error(error, error_size, "invalid Z# application launcher entry");
+        return 0;
+    }
+    applications = linux_applications_directory();
+    identity = zsharp_app_desktop_id(entry_kind == 3 ? "zsharp-hub" : project_id);
+    executable = executable_path(error, error_size);
+    quoted_executable = executable == NULL ? NULL : desktop_exec_quote(executable);
+    if (entry_kind != 3) {
+        entry = realpath(entry_path, NULL);
+        quoted_entry = entry == NULL ? NULL : desktop_exec_quote(entry);
+    }
+    icon = zsharp_app_icon_resolve(NULL, icon_path, error, error_size);
+    escaped_icon = icon == NULL ? NULL : desktop_string_escape(icon);
+    escaped_name = desktop_string_escape(display_name == NULL ? "Z# Application" : display_name);
+    filename = identity == NULL ? NULL : (char *)malloc(strlen(identity) + 9);
+    if (filename != NULL) sprintf(filename, "%s.desktop", identity);
+    path = applications == NULL || filename == NULL ? NULL : join_path(applications, filename);
+    if (applications == NULL || identity == NULL || executable == NULL ||
+        quoted_executable == NULL || escaped_icon == NULL || escaped_name == NULL ||
+        path == NULL || (entry_kind != 3 && quoted_entry == NULL) ||
+        !make_directories(applications)) {
+        desktop_error(error, error_size, "could not prepare the Z# application launcher");
+        goto done;
+    }
+    size = strlen(escaped_name) + strlen(quoted_executable) + strlen(escaped_icon) +
+           strlen(identity) + (quoted_entry == NULL ? 0 : strlen(quoted_entry)) + 320;
+    contents = (char *)malloc(size);
+    if (contents == NULL) {
+        desktop_error(error, error_size, "out of memory");
+        goto done;
+    }
+    snprintf(contents, size,
+        "[Desktop Entry]\nType=Application\nName=%s\nExec=%s %s%s%s\n"
+        "Terminal=false\nIcon=%s\nStartupWMClass=%s\nStartupNotify=true\nNoDisplay=%s\n"
+        "Categories=%s\n",
+        escaped_name, quoted_executable, actions[entry_kind],
+        quoted_entry == NULL ? "" : " ", quoted_entry == NULL ? "" : quoted_entry,
+        escaped_icon, identity, entry_kind == 3 ? "false" : "true",
+        entry_kind == 3 ? "Development;Utility;" : "Utility;");
+    ok = write_file(path, contents, 1, error, error_size);
+done:
+    free(contents); free(path); free(filename); free(identity); free(applications);
+    free(escaped_name); free(escaped_icon); free(icon);
+    free(quoted_entry); free(entry); free(quoted_executable); free(executable);
+    return ok;
+}
+
 int zsharp_desktop_install_associations(char *error, size_t error_size) {
     const char *home = getenv("HOME");
+    const char *data_home = getenv("XDG_DATA_HOME");
+    char *data_root = NULL;
     char *executable = NULL;
     char *applications = NULL;
     char *mime_packages = NULL;
@@ -562,6 +769,8 @@ int zsharp_desktop_install_associations(char *error, size_t error_size) {
     char *mime_file = NULL;
     char *quoted_executable = NULL;
     char *launcher = NULL;
+    char *icon = NULL;
+    char *escaped_icon = NULL;
     const char *mime =
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n"
@@ -569,31 +778,37 @@ int zsharp_desktop_install_associations(char *error, size_t error_size) {
         " <mime-type type=\"application/x-zsharp-game\"><comment>Z# Game</comment><glob pattern=\"*.zgame\"/></mime-type>\n"
         "</mime-info>\n";
     int ok = 0;
-    if (home == NULL || home[0] == '\0') {
+    if ((data_home == NULL || data_home[0] != '/') &&
+        (home == NULL || home[0] == '\0')) {
         desktop_error(error, error_size, "HOME is not available");
         return 0;
     }
     executable = executable_path(error, error_size);
-    applications = join_path(home, ".local/share/applications");
-    mime_packages = join_path(home, ".local/share/mime/packages");
+    data_root = data_home != NULL && data_home[0] == '/'
+        ? copy_text(data_home) : join_path(home, ".local/share");
+    applications = data_root == NULL ? NULL : join_path(data_root, "applications");
+    mime_packages = data_root == NULL ? NULL : join_path(data_root, "mime/packages");
     desktop_file = applications == NULL ? NULL
         : join_path(applications, "zsharp-package.desktop");
     mime_file = mime_packages == NULL ? NULL
         : join_path(mime_packages, "zsharp-package.xml");
     quoted_executable = executable == NULL ? NULL : desktop_exec_quote(executable);
+    icon = zsharp_app_icon_default_path(error, error_size);
+    escaped_icon = icon == NULL ? NULL : desktop_string_escape(icon);
     if (executable == NULL || applications == NULL || mime_packages == NULL ||
         desktop_file == NULL || mime_file == NULL || quoted_executable == NULL ||
+        escaped_icon == NULL ||
         !make_directories(applications) || !make_directories(mime_packages)) {
         desktop_error(error, error_size, "could not prepare the user application directories");
         goto done;
     }
-    launcher = (char *)malloc(strlen(quoted_executable) + 256);
+    launcher = (char *)malloc(strlen(quoted_executable) + strlen(escaped_icon) + 288);
     if (launcher == NULL) goto done;
     sprintf(launcher,
         "[Desktop Entry]\nType=Application\nName=Z# Package Launcher\n"
-        "Exec=%s open %%f\nTerminal=false\nNoDisplay=true\n"
+        "Exec=%s open %%f\nTerminal=false\nNoDisplay=true\nIcon=%s\n"
         "MimeType=application/x-zsharp-app;application/x-zsharp-game;\n",
-        quoted_executable);
+        quoted_executable, escaped_icon);
     if (!write_file(desktop_file, launcher, 1, error, error_size) ||
         !write_file(mime_file, mime, 0, error, error_size)) goto done;
     {
@@ -611,6 +826,9 @@ int zsharp_desktop_install_associations(char *error, size_t error_size) {
     ok = 1;
 done:
     free(launcher);
+    free(escaped_icon);
+    free(icon);
+    free(data_root);
     free(quoted_executable);
     free(mime_file);
     free(desktop_file);
@@ -628,6 +846,9 @@ int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
     char *executable = NULL;
     char *quoted_executable = NULL;
     char *contents = NULL;
+    char *icon = NULL;
+    char *escaped_icon = NULL;
+    char *identity = NULL;
     int ok = 0;
     if ((desktop_override == NULL || desktop_override[0] == '\0') &&
         (home == NULL || home[0] == '\0')) {
@@ -640,13 +861,20 @@ int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
     executable = executable_path(error, error_size);
     quoted_executable = executable == NULL
         ? NULL : desktop_exec_quote(executable);
+    icon = zsharp_app_icon_default_path(error, error_size);
+    escaped_icon = icon == NULL ? NULL : desktop_string_escape(icon);
+    identity = zsharp_app_desktop_id("zsharp-hub");
     if (desktop == NULL || path == NULL || executable == NULL ||
-        quoted_executable == NULL || !make_directories(desktop)) {
+        quoted_executable == NULL || escaped_icon == NULL || identity == NULL ||
+        !make_directories(desktop)) {
         desktop_error(error, error_size,
                       "could not prepare the Z# Hub desktop shortcut");
         goto done;
     }
-    contents = (char *)malloc(strlen(quoted_executable) + 256);
+    if (!zsharp_desktop_register_application("Z# Hub", "zsharp-hub", NULL, 3,
+                                             icon, error, error_size)) goto done;
+    contents = (char *)malloc(strlen(quoted_executable) + strlen(escaped_icon) +
+                               strlen(identity) + 288);
     if (contents == NULL) {
         desktop_error(error, error_size, "out of memory");
         goto done;
@@ -654,11 +882,15 @@ int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
     sprintf(contents,
         "[Desktop Entry]\nType=Application\nName=Z# Hub\n"
         "Comment=Open installed Z# apps and games\nExec=%s hub\n"
-        "Terminal=false\nIcon=zsharp\nCategories=Development;Utility;\n"
-        "StartupNotify=true\n",
-        quoted_executable);
+        "Terminal=false\nIcon=%s\nCategories=Development;Utility;\n"
+        "StartupWMClass=%s\nStartupNotify=true\n",
+        quoted_executable, escaped_icon, identity);
     ok = write_file(path, contents, 1, error, error_size);
+    if (ok) trust_desktop_shortcut(path);
 done:
+    free(identity);
+    free(escaped_icon);
+    free(icon);
     free(contents);
     free(quoted_executable);
     free(executable);
@@ -683,9 +915,12 @@ int zsharp_desktop_create_shortcut(const char *display_name,
     char *quoted_executable = NULL;
     char *quoted_package = NULL;
     char *icon = NULL;
+    char *escaped_icon = NULL;
+    char *identity = NULL;
     char *contents = NULL;
     int ok = 0;
-    if (home == NULL || home[0] == '\0') {
+    if ((desktop_override == NULL || desktop_override[0] == '\0') &&
+        (home == NULL || home[0] == '\0')) {
         desktop_error(error, error_size, "HOME is not available");
         return 0;
     }
@@ -699,24 +934,29 @@ int zsharp_desktop_create_shortcut(const char *display_name,
     package_absolute = realpath(package_path, NULL);
     quoted_executable = executable == NULL ? NULL : desktop_exec_quote(executable);
     quoted_package = package_absolute == NULL ? NULL : desktop_exec_quote(package_absolute);
-    icon = icon_relative == NULL ? NULL : join_path(project_root, icon_relative);
+    icon = project_icon_path(project_root, icon_relative, &identity, error, error_size);
+    escaped_icon = icon == NULL ? NULL : desktop_string_escape(icon);
     if (desktop == NULL || name == NULL || path == NULL || executable == NULL ||
         package_absolute == NULL || quoted_executable == NULL ||
-        quoted_package == NULL || !make_directories(desktop)) {
+        quoted_package == NULL || escaped_icon == NULL || identity == NULL ||
+        !make_directories(desktop)) {
         desktop_error(error, error_size, "could not prepare the desktop shortcut");
         goto done;
     }
     contents = (char *)malloc(strlen(name) + strlen(quoted_executable) +
                               strlen(quoted_package) +
-                              (icon == NULL ? 0 : strlen(icon)) + 256);
+                              strlen(escaped_icon) + strlen(identity) + 288);
     if (contents == NULL) goto done;
     sprintf(contents,
         "[Desktop Entry]\nType=Application\nName=%s\nExec=%s open %s\n"
-        "Terminal=false\nIcon=%s\nCategories=Utility;\n",
-        name, quoted_executable, quoted_package, icon == NULL ? "zsharp" : icon);
+        "Terminal=false\nIcon=%s\nStartupWMClass=%s\nStartupNotify=true\nCategories=Utility;\n",
+        name, quoted_executable, quoted_package, escaped_icon, identity);
     ok = write_file(path, contents, 1, error, error_size);
+    if (ok) trust_desktop_shortcut(path);
 done:
     free(contents);
+    free(identity);
+    free(escaped_icon);
     free(icon);
     free(quoted_package);
     free(quoted_executable);
@@ -873,6 +1113,34 @@ done:
 
 static int remove_applet_tree(const char *path);
 
+static int apply_applet_icon(const char *app, const char *project_root,
+                             const char *legacy_icon,
+                             char *error, size_t error_size) {
+    char *source = project_root == NULL
+        ? zsharp_app_icon_default_path(error, error_size)
+        : project_icon_path(project_root, legacy_icon, NULL, error, error_size);
+    char *target = join_path(app, "Contents/Resources/applet.icns");
+    char *normalized = join_path(app, "Contents/Resources/.zsharp-icon-512.png");
+    int ok = 0;
+    if (source != NULL && target != NULL && normalized != NULL) {
+        char *resize[] = {"sips", "-s", "format", "png",
+                          "--resampleHeightWidth", "512", "512",
+                          source, "--out", normalized, NULL};
+        char *convert[] = {"sips", "-s", "format", "icns",
+                           normalized, "--out", target, NULL};
+        /* ICNS requires supported square dimensions; project PNGs and the
+         * original official image need not already have those dimensions. */
+        ok = run_process("/usr/bin/sips", resize) &&
+             run_process("/usr/bin/sips", convert);
+    }
+    if (normalized != NULL) remove(normalized);
+    if (!ok) desktop_error(error, error_size, "could not prepare the macOS shortcut icon");
+    free(normalized);
+    free(target);
+    free(source);
+    return ok;
+}
+
 int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
     const char *home = getenv("HOME");
     const char *desktop_override = getenv("ZSHARP_DESKTOP_DIRECTORY");
@@ -914,7 +1182,8 @@ int zsharp_desktop_create_hub_shortcut(char *error, size_t error_size) {
                       "could not replace the Z# Hub desktop shortcut");
         goto done;
     }
-    ok = compile_applet(app, script, error, error_size);
+    ok = compile_applet(app, script, error, error_size) &&
+         apply_applet_icon(app, NULL, NULL, error, error_size);
 done:
     free(script);
     free(quoted_executable);
@@ -943,7 +1212,8 @@ int zsharp_desktop_install_associations(char *error, size_t error_size) {
     script = executable == NULL ? NULL : apple_script_text(executable, NULL);
     if (applications == NULL || app == NULL || executable == NULL ||
         script == NULL || !make_directories(applications) ||
-        !compile_applet(app, script, error, error_size)) goto done;
+        !compile_applet(app, script, error, error_size) ||
+        !apply_applet_icon(app, NULL, NULL, error, error_size)) goto done;
     info = join_path(app, "Contents/Info.plist");
     if (info == NULL) goto done;
     {
@@ -994,8 +1264,6 @@ int zsharp_desktop_create_shortcut(const char *display_name,
     char *executable = NULL;
     char *package_absolute = NULL;
     char *script = NULL;
-    char *icon_source = NULL;
-    char *icon_target = NULL;
     int ok = 0;
     if (home == NULL || home[0] == '\0') {
         desktop_error(error, error_size, "HOME is not available");
@@ -1017,19 +1285,9 @@ int zsharp_desktop_create_shortcut(const char *display_name,
         desktop_error(error, error_size, "could not prepare the macOS desktop shortcut");
         goto done;
     }
-    ok = compile_applet(app, script, error, error_size);
-    if (ok && icon_relative != NULL) {
-        icon_source = join_path(project_root, icon_relative);
-        icon_target = join_path(app, "Contents/Resources/applet.icns");
-        if (icon_source != NULL && icon_target != NULL) {
-            char *arguments[] = {"sips", "-s", "format", "icns",
-                                 icon_source, "--out", icon_target, NULL};
-            run_process("/usr/bin/sips", arguments);
-        }
-    }
+    ok = compile_applet(app, script, error, error_size) &&
+         apply_applet_icon(app, project_root, icon_relative, error, error_size);
 done:
-    free(icon_target);
-    free(icon_source);
     free(script);
     free(package_absolute);
     free(executable);
@@ -1131,4 +1389,16 @@ int zsharp_desktop_remove_shortcut(const char *display_name,
 }
 
 #endif
+#endif
+
+#if !defined(__linux__)
+int zsharp_desktop_register_application(const char *display_name,
+                                        const char *project_id,
+                                        const char *entry_path, int entry_kind,
+                                        const char *icon_path,
+                                        char *error, size_t error_size) {
+    (void)display_name; (void)project_id; (void)entry_path; (void)entry_kind;
+    (void)icon_path; (void)error; (void)error_size;
+    return 1;
+}
 #endif

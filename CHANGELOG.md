@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.4.1.1 - 2026-11-16
+
+- Add an installable standalone Python package with `from zsharp import call`
+  and a reusable `ZSharp` project configuration. Call a noticed function in a
+  specific source file, return exact numbers and plain values, and report Z#
+  diagnostics as Python exceptions. Find default ZVM installations without
+  requiring the terminal PATH to be refreshed.
+- Add `zsharp call` for direct source/bytecode function invocation with a
+  separate JSON result. Initialize room state without automatic `Start`,
+  `Shutdown`, app windows or desktop registration; each call uses a fresh VM.
+- Save per-user shell PATH configuration during Linux/macOS installation so
+  `zsharp` is available in new terminals. Preserve user configuration and
+  update one managed block instead of adding duplicates on reinstall.
+- Use the optional `project.zsettings` icon for native app windows and Linux
+  dock entries as well as shortcuts and Hub listings. Preserve window design
+  icons as a fallback for older projects.
+- Bundle the official Z# logo for apps without an icon and for the Hub, so
+  the default icon works offline. Repair Linux Hub launcher icons and register
+  matching application identities for window grouping.
+
 ## 1.4.1.0 - 2026-11-16
 
 - Added native game spring bones for skinned FBX manes, tails, hair and

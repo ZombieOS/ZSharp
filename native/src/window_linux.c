@@ -3,6 +3,7 @@
 #include "paint.h"
 #include "window_runtime.h"
 #include "window_layout.h"
+#include "app_icon.h"
 
 #if defined(__linux__)
 
@@ -46,6 +47,10 @@ typedef struct GtkApi {
     void (*window_set_position)(void *, int);
     void (*window_present)(void *);
     int (*window_set_icon_from_file)(void *, const char *, void **);
+    void (*set_prgname)(const char *);
+    void (*set_application_name)(const char *);
+    const char *(*get_application_name)(void);
+    void (*set_program_class)(const char *);
     GtkWidget *(*fixed_new)(void);
     GtkWidget *(*event_box_new)(void);
     GtkWidget *(*scrolled_window_new)(void *, void *);
@@ -160,6 +165,7 @@ typedef struct LinuxWindowState {
     GtkApi api;
     ZSharpProgram *program;
     const char *project_root;
+    char *icon_path;
     ZSharpWindowCallback callback;
     void *callback_data;
     GtkWidget *window;
@@ -348,6 +354,14 @@ static int gtk_api_load(GtkApi *api, char *error, size_t error_size) {
     GTK_REQUIRED(api, g_free, api->glib, "g_free");
     *(void **)(&api->window_set_icon_from_file) =
         load_symbol(api->gtk, "gtk_window_set_icon_from_file");
+    *(void **)(&api->set_prgname) =
+        load_symbol(api->glib, "g_set_prgname");
+    *(void **)(&api->set_application_name) =
+        load_symbol(api->glib, "g_set_application_name");
+    *(void **)(&api->get_application_name) =
+        load_symbol(api->glib, "g_get_application_name");
+    *(void **)(&api->set_program_class) =
+        load_symbol(api->gtk, "gdk_set_program_class");
     *(void **)(&api->widget_override_background_color) =
         load_symbol(api->gtk, "gtk_widget_override_background_color");
     *(void **)(&api->widget_override_color) =
@@ -399,6 +413,73 @@ static void gtk_api_close(GtkApi *api) {
     if (api->gobject != NULL) dlclose(api->gobject);
     if (api->gtk != NULL) dlclose(api->gtk);
     memset(api, 0, sizeof(*api));
+}
+
+static void gtk_application_identity(GtkApi *api, const char *project_id,
+                                      const char *title) {
+    static int application_name_chosen;
+    char *id = zsharp_app_desktop_id(project_id);
+    if (id == NULL) return;
+    /* These must precede GTK initialization/window creation. GTK uses the
+     * program name for non-GtkApplication Wayland app IDs; X11 uses the GDK
+     * program class. Both match the registered .desktop entry. */
+    if (api->set_prgname != NULL) api->set_prgname(id);
+    if (api->set_program_class != NULL) api->set_program_class(id);
+    if (!application_name_chosen && api->set_application_name != NULL) {
+        const char *current = api->get_application_name == NULL ? NULL
+            : api->get_application_name();
+        if (current == NULL || strcmp(current, id) == 0) {
+            api->set_application_name(title == NULL || title[0] == '\0'
+                ? "Z# application" : title);
+            application_name_chosen = 1;
+        }
+    }
+    free(id);
+}
+
+static void gtk_application_window_class(GtkApi *api, const char *project_id) {
+    char *id;
+    if (api->set_program_class == NULL) return;
+    id = zsharp_app_desktop_id(project_id);
+    if (id != NULL) {
+        /* GTK initialization may capitalize the program class. Restore the
+         * exact desktop ID before creating the first native window. */
+        api->set_program_class(id);
+        free(id);
+    }
+}
+
+static char *gtk_application_icon(GtkApi *api, GtkWidget *window,
+                                  const char *project_root,
+                                  const char *project_id,
+                                  const char *legacy_icon) {
+    char ignored[512] = {0};
+    char *path = zsharp_app_icon_for_window(project_root, project_id,
+                                            legacy_icon, ignored,
+                                            sizeof(ignored));
+    if (path != NULL && api->window_set_icon_from_file != NULL &&
+        !api->window_set_icon_from_file(window, path, NULL)) {
+        free(path);
+        path = zsharp_app_icon_default_path(ignored, sizeof(ignored));
+        if (path != NULL)
+            api->window_set_icon_from_file(window, path, NULL);
+    }
+    return path;
+}
+
+static void linux_tray_update_icon(LinuxWindowState *state) {
+    GtkApi *api = &state->api;
+    GdkPixbuf *image;
+    if (state->tray_icon == NULL || state->icon_path == NULL ||
+        api->status_icon_set_from_pixbuf == NULL ||
+        api->pixbuf_new_from_file_at_scale == NULL ||
+        api->object_unref == NULL) return;
+    image = api->pixbuf_new_from_file_at_scale(state->icon_path,
+                                               24, 24, 1, NULL);
+    if (image != NULL) {
+        api->status_icon_set_from_pixbuf(state->tray_icon, image);
+        api->object_unref(image);
+    }
 }
 
 static ZSharpUIProperty *property(ZSharpUIElement *element, const char *name) {
@@ -1368,12 +1449,15 @@ static int set_window_property_ui(void *data, const char *path,
             char *icon = path_join(state->project_root, changed->text_value);
             int loaded = icon != NULL && state->api.window_set_icon_from_file(
                 state->window, icon, NULL);
-            free(icon);
             if (!loaded) {
+                free(icon);
                 snprintf(error, error_size, "could not load window icon '%s'",
                          changed->text_value);
                 return 0;
             }
+            free(state->icon_path);
+            state->icon_path = icon;
+            linux_tray_update_icon(state);
         }
     } else {
         control = control_for_element(state, element);
@@ -1605,20 +1689,8 @@ static int linux_tray_create(LinuxWindowState *state, char *error,
         api->status_icon_set_title(state->tray_icon, title);
     if (api->status_icon_set_tooltip_text != NULL)
         api->status_icon_set_tooltip_text(state->tray_icon, title);
-    api->status_icon_set_from_icon_name(state->tray_icon,
-                                       "application-x-executable");
-    value = design == NULL ? NULL : property(design, "icon");
-    if (value != NULL && api->status_icon_set_from_pixbuf != NULL &&
-        api->pixbuf_new_from_file_at_scale != NULL) {
-        char *path = path_join(state->project_root, value->text_value);
-        GdkPixbuf *image = path == NULL ? NULL :
-            api->pixbuf_new_from_file_at_scale(path, 24, 24, 1, NULL);
-        if (image != NULL) {
-            api->status_icon_set_from_pixbuf(state->tray_icon, image);
-            api->object_unref(image);
-        }
-        free(path);
-    }
+    api->status_icon_set_from_icon_name(state->tray_icon, "zsharp");
+    linux_tray_update_icon(state);
     api->widget_show_all(state->tray_menu);
     api->status_icon_set_visible(state->tray_icon, 1);
     return 1;
@@ -2217,13 +2289,22 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
         snprintf(error, error_size, "forced window launch failure");
         return 0;
     }
+    design = design_element(&program->window);
+    if (design == NULL) {
+        snprintf(error, error_size, "window bytecode has no design");
+        return 0;
+    }
     if (!gtk_api_load(&state.api, error, error_size)) return 0;
+    value = property(design, "title");
+    gtk_application_identity(&state.api, program->project_id,
+        value == NULL ? program->window.name : value->text_value);
     if (!state.api.init_check(NULL, NULL)) {
         gtk_api_close(&state.api);
         snprintf(error, error_size,
                  "GTK 3 is installed, but no Linux desktop display is available");
         return 0;
     }
+    gtk_application_window_class(&state.api, program->project_id);
     state.program = program;
     state.project_root = project_root;
     state.callback = callback;
@@ -2237,12 +2318,6 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.runtime.request_quit = linux_window_request_quit;
     state.screen_width = width * 4;
     state.screen_height = height * 4;
-    design = design_element(&program->window);
-    if (design == NULL) {
-        gtk_api_close(&state.api);
-        snprintf(error, error_size, "window bytecode has no design");
-        return 0;
-    }
     state.window = state.api.window_new(0);
     if (state.window == NULL) {
         gtk_api_close(&state.api);
@@ -2280,17 +2355,14 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
     state.api.window_set_position(state.window, 1);
     position_window_from_design(&state);
     value = property(design, "icon");
-    if (value != NULL && state.api.window_set_icon_from_file != NULL) {
-        char *icon = path_join(project_root, value->text_value);
-        if (icon != NULL) {
-            state.api.window_set_icon_from_file(state.window, icon, NULL);
-            free(icon);
-        }
-    }
+    state.icon_path = gtk_application_icon(&state.api, state.window,
+        project_root, program->project_id,
+        value == NULL ? NULL : value->text_value);
     state.scrolled = state.api.scrolled_window_new(NULL, NULL);
     state.fixed = state.api.fixed_new();
     if (state.scrolled == NULL || state.fixed == NULL) {
         state.api.widget_destroy(state.window);
+        free(state.icon_path);
         gtk_api_close(&state.api);
         snprintf(error, error_size,
                  "could not create the responsive window layout");
@@ -2307,6 +2379,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
                                     value->text_value,
                                     error, error_size)) {
         state.api.widget_destroy(state.window);
+        free(state.icon_path);
         gtk_api_close(&state.api);
         return 0;
     }
@@ -2318,6 +2391,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
         state.api.widget_destroy(state.window);
         while (state.api.events_pending()) state.api.main_iteration_do(0);
         free(state.controls);
+        free(state.icon_path);
         gtk_api_close(&state.api);
         return 0;
     }
@@ -2334,6 +2408,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
         state.api.widget_destroy(state.window);
         while (state.api.events_pending()) state.api.main_iteration_do(0);
         free(state.controls);
+        free(state.icon_path);
         gtk_api_close(&state.api);
         return 0;
     }
@@ -2363,6 +2438,7 @@ int zsharp_window_run(ZSharpProgram *program, const char *project_root,
         }
     }
     free(state.controls);
+    free(state.icon_path);
     gtk_api_close(&state.api);
     return result;
 }
@@ -2375,11 +2451,13 @@ int zsharp_window_show_hub(const char *headline, const char *reason,
     size_t a = strlen(headline == NULL ? "Z# Hub" : headline);
     size_t b = strlen(reason == NULL ? "" : reason);
     if (!gtk_api_load(&api, error, error_size)) return 0;
+    gtk_application_identity(&api, "zsharp-hub", "Z# Hub");
     if (!api.init_check(NULL, NULL)) {
         gtk_api_close(&api);
         snprintf(error, error_size, "no Linux desktop display is available");
         return 0;
     }
+    gtk_application_window_class(&api, "zsharp-hub");
     message = (char *)malloc(a + b + 4);
     if (message == NULL) {
         gtk_api_close(&api);
@@ -2397,6 +2475,11 @@ int zsharp_window_show_hub(const char *headline, const char *reason,
         return 0;
     }
     api.window_set_title(dialog, "Z# Hub");
+    {
+        char *icon = gtk_application_icon(&api, dialog, NULL,
+                                           "zsharp-hub", NULL);
+        free(icon);
+    }
     api.dialog_run(dialog);
     api.widget_destroy(dialog);
     gtk_api_close(&api);

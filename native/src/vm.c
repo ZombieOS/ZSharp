@@ -7250,3 +7250,229 @@ int zsharp_vm_run(ZSharpProgram *program, const char *project_root,
     return zsharp_vm_run_with_providers(program, project_root, NULL, 0, error,
                                         error_size);
 }
+
+/* Standalone calls deliberately share the existing interop value codec, but
+ * cannot accept process-local capabilities or return live VM objects. */
+static int standalone_wire_value(JSContext *js, JSValueConst wire,
+                                 unsigned depth, char *error, size_t size) {
+    JSValue record = JS_UNDEFINED, tag = JS_UNDEFINED;
+    JSPropertyEnum *properties = NULL;
+    uint32_t count = 0, index;
+    int ok = 0;
+    if (depth > 32) {
+        snprintf(error, size, "standalone call values exceed maximum depth 32");
+        return 0;
+    }
+    if (!JS_IsObject(wire)) return 1; /* Scalar checks belong to the codec. */
+    if (JS_IsArray(wire)) {
+        JSValue length = JS_GetPropertyStr(js, wire, "length");
+        JS_ToUint32(js, &count, length);
+        JS_FreeValue(js, length);
+        if (count > 65536) goto invalid;
+        for (index = 0; index < count; index++) {
+            JSValue item = JS_GetPropertyUint32(js, wire, index);
+            ok = standalone_wire_value(js, item, depth + 1, error, size);
+            JS_FreeValue(js, item);
+            if (!ok) return 0;
+        }
+        return 1;
+    }
+    tag = JS_GetPropertyStr(js, wire, "$ref");
+    if (!JS_IsUndefined(tag)) goto handle;
+    JS_FreeValue(js, tag);
+    tag = JS_GetPropertyStr(js, wire, "$zref");
+    if (!JS_IsUndefined(tag)) goto handle;
+    JS_FreeValue(js, tag); tag = JS_UNDEFINED;
+    if (JS_GetOwnPropertyNames(js, &properties, &count, wire,
+                              JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0 || count != 1)
+        goto invalid;
+    JS_FreePropertyEnum(js, properties, count); properties = NULL; count = 0;
+    tag = JS_GetPropertyStr(js, wire, "$number");
+    if (JS_IsString(tag)) { ok = 1; goto done; }
+    JS_FreeValue(js, tag); tag = JS_UNDEFINED;
+    record = JS_GetPropertyStr(js, wire, "$record");
+    if (!JS_IsObject(record) || JS_IsArray(record) ||
+        JS_GetOwnPropertyNames(js, &properties, &count, record,
+                              JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0 || count > 65536)
+        goto invalid;
+    for (index = 0; index < count; index++) {
+        JSValue key = JS_AtomToString(js, properties[index].atom);
+        size_t length = 0;
+        const char *name = JS_ToCStringLen(js, &length, key);
+        JSValue item = JS_GetProperty(js, record, properties[index].atom);
+        int valid_name = name && !memchr(name, 0, length);
+        if (name) JS_FreeCString(js, name);
+        JS_FreeValue(js, key);
+        ok = valid_name && standalone_wire_value(js, item, depth + 1, error, size);
+        JS_FreeValue(js, item);
+        if (!ok) {
+            if (!valid_name) snprintf(error, size, "standalone record keys cannot contain NUL bytes");
+            goto done;
+        }
+    }
+    ok = 1;
+    goto done;
+handle:
+    snprintf(error, size, "standalone calls cannot accept live $ref or $zref object handles");
+    goto done;
+invalid:
+    snprintf(error, size, "standalone values require exact $number/$record tags and bounded arrays/records");
+done:
+    if (properties) JS_FreePropertyEnum(js, properties, count);
+    JS_FreeValue(js, tag); JS_FreeValue(js, record);
+    return ok;
+}
+
+static int standalone_result_value(const RuntimeValue *value, unsigned depth,
+                                   char *error, size_t size) {
+    size_t index;
+    if (depth > 32) {
+        snprintf(error, size, "standalone result exceeds maximum depth 32 or contains a cycle");
+        return 0;
+    }
+    if (value->type == ZVALUE_OBJECT && value->object) {
+        RuntimeObject *object = value->object;
+        if (object->room || object->foreign_language) {
+            snprintf(error, size,
+                     "standalone calls cannot return live Z# or foreign objects; return a scalar, array or record instead");
+            return 0;
+        }
+        if (object->field_count > 65536) {
+            snprintf(error, size, "standalone result records accept at most 65536 fields");
+            return 0;
+        }
+        for (index = 0; index < object->field_count; index++) {
+            RuntimeValue field = runtime_field_value(&object->fields[index]);
+            if (!standalone_result_value(&field, depth + 1, error, size)) return 0;
+        }
+    } else if ((value->type == ZVALUE_OBJECT_ARRAY || value->type == ZVALUE_TEXT_ARRAY ||
+                value->type == ZVALUE_NUMBER_ARRAY) && value->array) {
+        size_t count = value->type == ZVALUE_OBJECT_ARRAY ? value->array->object_item_count :
+            value->type == ZVALUE_TEXT_ARRAY ? value->array->text_item_count : value->array->number_item_count;
+        if (count > 65536) {
+            snprintf(error, size, "standalone result arrays accept at most 65536 elements");
+            return 0;
+        }
+        if (value->type != ZVALUE_OBJECT_ARRAY) return 1;
+        for (index = 0; index < value->array->object_item_count; index++) {
+            RuntimeValue item = {0};
+            item.type = ZVALUE_OBJECT;
+            item.object = value->array->object_items[index].runtime_object;
+            if (!standalone_result_value(&item, depth + 1, error, size)) return 0;
+        }
+    }
+    return 1;
+}
+
+int zsharp_vm_call_with_providers(
+    ZSharpProgram *program, const char *project_root,
+    const ZSharpProviderBinding *providers, size_t provider_count,
+    const char *room_name, const char *function_name, const char *args_json,
+    char **result_json, char *error, size_t error_size) {
+    RuntimeHeap heap = {0};
+    RuntimeModuleCache cache = {0};
+    InteropVMFrame frame = {0};
+    InteropDispatch dispatch = {0};
+    RuntimeValue *arguments = NULL, result = {0};
+    JSRuntime *runtime = NULL;
+    JSContext *js = NULL;
+    JSValue wire = JS_UNDEFINED, returned = JS_UNDEFINED;
+    ZSharpRoom *room;
+    ZSharpFunction *function;
+    uint32_t count = 0, index;
+    char fallback_error[512] = {0};
+    int ok = 0, did_return = 0, initialized = 0;
+    if (!error || !error_size) { error = fallback_error; error_size = sizeof(fallback_error); }
+    error[0] = '\0';
+    if (result_json) *result_json = NULL;
+    if (!program || !room_name || !*room_name || !function_name || !*function_name ||
+        !args_json || !result_json || (provider_count && !providers)) {
+        snprintf(error, error_size, "standalone call requires a program, room, function and JSON arguments");
+        return 0;
+    }
+    room = find_room(program, room_name);
+    function = room ? find_function(room, function_name) : NULL;
+    if (!room || !function) {
+        snprintf(error, error_size, "standalone call could not resolve '%s:%s'", room_name, function_name);
+        return 0;
+    }
+    if (room->visibility != ZVISIBILITY_NOTICED || !function->is_public) {
+        snprintf(error, error_size, "standalone call requires a noticed room and a noticed brain/function");
+        return 0;
+    }
+    if (strlen(args_json) > 1024u * 1024u) {
+        snprintf(error, error_size, "standalone call arguments exceed 1 MiB");
+        return 0;
+    }
+    if (!project_root || !*project_root) project_root = ".";
+    {
+        ZSharpSettings settings;
+        ZSharpDiagnostic diagnostic;
+        char ignored[512] = {0};
+        if (zsharp_settings_load(project_root, &settings, &diagnostic, ignored, sizeof(ignored))) {
+            int allowed = zsharp_settings_host_allowed(&settings, error, error_size);
+            zsharp_settings_free(&settings);
+            if (!allowed) return 0;
+        }
+    }
+    runtime = JS_NewRuntime();
+    if (!runtime) { snprintf(error, error_size, "out of memory"); goto done; }
+    JS_SetMemoryLimit(runtime, 32u * 1024u * 1024u);
+    JS_SetMaxStackSize(runtime, 1024u * 1024u);
+    js = JS_NewContext(runtime);
+    if (!js) { snprintf(error, error_size, "out of memory"); goto done; }
+    wire = JS_ParseJSON(js, args_json, strlen(args_json), "<standalone call arguments>");
+    if (!JS_IsArray(wire)) {
+        snprintf(error, error_size, "standalone call arguments must be a valid JSON array"); goto done;
+    }
+    {
+        JSValue length = JS_GetPropertyStr(js, wire, "length");
+        JS_ToUint32(js, &count, length); JS_FreeValue(js, length);
+    }
+    if (count > 1024) { snprintf(error, error_size, "standalone calls accept at most 1024 arguments"); goto done; }
+    if (count != function->parameter_count) {
+        snprintf(error, error_size, "function '%s' expects %zu argument(s), but received %u",
+                 function->name, function->parameter_count, count); goto done;
+    }
+    arguments = (RuntimeValue *)calloc(count ? count : 1, sizeof(*arguments));
+    if (!arguments) { snprintf(error, error_size, "out of memory"); goto done; }
+    frame.program = program; frame.room = room; frame.heap = &heap;
+    frame.root = project_root; frame.providers = providers; frame.provider_count = provider_count;
+    frame.cache = &cache; frame.depth = 1;
+    dispatch.frame = &frame; dispatch.language = "standalone"; dispatch.module = "<one-shot>";
+    dispatch.state = interop_state(&cache, error, error_size);
+    if (!dispatch.state) goto done;
+    for (index = 0; index < count; index++) {
+        JSValue item = JS_GetPropertyUint32(js, wire, index);
+        int decoded = standalone_wire_value(js, item, 0, error, error_size) &&
+            interop_from_wire(js, &dispatch, item, &arguments[index], 0, error, error_size);
+        JS_FreeValue(js, item);
+        if (!decoded) goto done;
+    }
+    initialized = 1;
+    if (!initialize_program_objects(program, &heap, project_root, providers,
+                                    provider_count, &cache, 1, error, error_size)) goto done;
+    if (!execute_function(program, room, function, NULL, &heap, project_root,
+                           providers, provider_count, &cache, 1, arguments, count,
+                           NULL, &result, &did_return, error, error_size)) goto done;
+    if (!did_return) result.type = ZVALUE_NULL;
+    if (!standalone_result_value(&result, 0, error, error_size)) goto done;
+    returned = interop_to_wire(js, &dispatch, &result, 0, error, error_size);
+    if (JS_IsException(returned) || JS_HasException(js)) goto done;
+    *result_json = interop_json_string(js, returned);
+    if (!*result_json) { snprintf(error, error_size, "could not encode standalone call result"); goto done; }
+    if (strlen(*result_json) > 1024u * 1024u) {
+        snprintf(error, error_size, "standalone call result exceeds 1 MiB");
+        free(*result_json); *result_json = NULL; goto done;
+    }
+    ok = 1;
+done:
+    free(arguments);
+    if (js) { JS_FreeValue(js, wire); JS_FreeValue(js, returned); JS_FreeContext(js); }
+    if (runtime) JS_FreeRuntime(runtime);
+    cleanup_module_cache(&cache);
+    if (initialized) cleanup_program_objects(program);
+    heap_free(&heap);
+    if (!ok && !error[0]) snprintf(error, error_size, "standalone call failed to decode or allocate a value");
+    return ok;
+}

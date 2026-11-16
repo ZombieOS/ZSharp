@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zombieos-zsharp"
+version = "1.4.1.1"
+description = "Call public Z# functions from standalone Python"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{name = "ZombieOS"}]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.urls]
+Homepage = "https://zsharp.zombieos.com"
+
+[tool.setuptools.packages.find]
+where = ["src"]

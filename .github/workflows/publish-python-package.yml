@@ -1,0 +1,120 @@
+name: Publish Python package
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload to PyPI (release the matching ZVM first)
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }} tests
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Test standalone package
+        run: python -m unittest discover -s python/tests -v
+
+  build:
+    name: Build Python distributions
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Check Python and ZVM versions match
+        run: |
+          python - <<'PY'
+          import ast
+          import pathlib
+          import re
+          import tomllib
+
+          package = tomllib.loads(pathlib.Path("python/pyproject.toml").read_text())
+          version = package["project"]["version"]
+          header = pathlib.Path("native/include/zsharp.h").read_text()
+          runtime = ".".join(re.search(r"^#define ZSHARP_VERSION_" + part + r"\s+(\d+)\s*$", header, re.M)[1]
+                             for part in ("MAJOR", "MINOR", "PATCH", "REVISION"))
+          module = ast.parse(pathlib.Path("python/src/zsharp/__init__.py").read_text())
+          sdk = next(ast.literal_eval(node.value) for node in module.body
+                     if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets))
+          if version != runtime or version != sdk:
+              raise SystemExit(f"Version mismatch: package={version}, Python SDK={sdk}, ZVM={runtime}")
+          print(f"Building zombieos-zsharp {version}")
+          PY
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade build twine
+
+      - name: Build source archive and wheel
+        run: python -m build python --outdir dist
+
+      - name: Validate distributions
+        run: python -m twine check --strict dist/*
+
+      - name: Check installed wheel
+        run: |
+          python -m pip install --no-deps dist/*.whl
+          python -I - <<'PY'
+          import importlib.metadata
+          import zsharp
+
+          version = importlib.metadata.version("zombieos-zsharp")
+          assert zsharp.__version__ == version
+          assert callable(zsharp.call)
+          assert callable(zsharp.ZSharp)
+          print(f"Installed zombieos-zsharp {version}: {zsharp.__file__}")
+          PY
+
+      - name: Save Python distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: zsharp-python-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Upload to PyPI
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/zombieos-zsharp/
+    permissions:
+      id-token: write
+    steps:
+      - name: Retrieve Python distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: zsharp-python-distributions
+          path: dist/
+
+      - name: Publish using PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
