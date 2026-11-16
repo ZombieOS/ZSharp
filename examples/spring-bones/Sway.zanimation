@@ -1,0 +1,28 @@
+{
+  "clips": {
+    "Sway": {
+      "models": [
+        "Mane.zmodel"
+      ],
+      "fps": 30,
+      "type": "tween",
+      "loop": true,
+      "parts": {
+        "ManeRoot": [
+          {
+            "frame": 0,
+            "rotZ": 0
+          },
+          {
+            "frame": 30,
+            "rotZ": 25
+          },
+          {
+            "frame": 60,
+            "rotZ": 0
+          }
+        ]
+      }
+    }
+  }
+}

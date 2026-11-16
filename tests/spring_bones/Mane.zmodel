@@ -1,0 +1,10 @@
+zsharp = type.script:model
+noticed model Mane[] (
+ parent: "Chain.fbx":
+ collider: none:
+ body: static:
+ springBones[JSON] (
+  [{"name":"Mane","bones":["ManeRoot","ManeMid","ManeTip"],"stiffness":20,"damping":4,"gravity":{"x":0,"y":-9.8,"z":0},"radius":0.02,"maxAngle":60}]
+ )
+ springBonesEnabled: alive:
+)

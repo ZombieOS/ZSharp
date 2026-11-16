@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.4.0.1 LANGUAGES C)
+project(zsharp VERSION 1.4.1.0 LANGUAGES C)
 if(MSVC)
     # The bootstrap installs one native executable, not a machine-wide VC++
     # redistributable. Keep the C and C++ runtimes inside that executable.
@@ -99,6 +99,7 @@ add_executable(zsharp
     native/src/hub.c
     native/src/game_runtime.c
     native/src/game_animation.c
+    native/src/game_spring.c
     native/src/game_navigation.c
     native/src/game_model.c
     native/src/game_instances.c
@@ -145,6 +146,7 @@ if(ANDROID)
         native/src/hub.c
         native/src/game_runtime.c
         native/src/game_animation.c
+        native/src/game_spring.c
         native/src/game_navigation.c
         native/src/game_model.c
         native/src/game_instances.c
@@ -856,7 +858,26 @@ if(BUILD_TESTING)
         native/src/game_projection.c
     )
     add_executable(zsharp_test_game_skinning tests/game-skinning-tests.c)
-    add_executable(zsharp_test_game_collision tests/game-collision-tests.c)
+    add_executable(zsharp_test_game_spring tests/game-spring-tests.c
+        native/src/game_spring.c)
+    target_include_directories(zsharp_test_game_spring PRIVATE native/include native/src)
+    target_compile_features(zsharp_test_game_spring PRIVATE c_std_17)
+    target_link_libraries(zsharp_test_game_spring PRIVATE zsharp_ufbx)
+    if(NOT WIN32)
+        target_link_libraries(zsharp_test_game_spring PRIVATE m)
+    endif()
+    add_test(NAME zsharp_game_spring COMMAND zsharp_test_game_spring
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/spring_bones/Chain.fbx")
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME zsharp_game_spring_parser
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/spring_bones/parser-tests.py"
+                "$<TARGET_FILE:zsharp>")
+        set_tests_properties(zsharp_game_spring_parser PROPERTIES TIMEOUT 120)
+    endif()
+    add_executable(zsharp_test_game_collision tests/game-collision-tests.c
+        native/src/game_spring.c)
+    target_link_libraries(zsharp_test_game_collision PRIVATE zsharp_ufbx)
     add_executable(zsharp_test_game_input tests/game-input-tests.c)
     target_include_directories(zsharp_test_game_input PRIVATE native/src)
     target_compile_features(zsharp_test_game_input PRIVATE c_std_17)

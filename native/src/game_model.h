@@ -4,6 +4,7 @@
 #include "game_vulkan.h"
 #include "game_animation.h"
 #include "game_navigation.h"
+#include "game_spring.h"
 #include "window.h"
 #include "style_transition.h"
 
@@ -146,6 +147,9 @@ typedef struct ZSharpGameObject {
     size_t material_count;
     ZSharpGamePartPose *part_poses;
     size_t part_pose_count;
+    ZSharpSpringConfig *spring_config;
+    ZSharpGameSpringState *spring_state;
+    int spring_bones_enabled;
     int is_ai;
     char **nav_aliases;
     char **nav_ids;
@@ -202,6 +206,7 @@ typedef struct ZSharpGameModel {
     size_t object_count;
     size_t object_capacity; /* Amortized scene construction, trimmed after load. */
     struct ZSharpGameInstanceIndex *instance_index;
+    ZSharpGameSpringSystem *spring_system;
     int validation_mode; /* project checks may see aliases in inactive scenes */
     ZSharpGameObject *definitions;
     size_t definition_count;

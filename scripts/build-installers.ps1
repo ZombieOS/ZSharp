@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.4.0.1",
+    [string] $Version = "1.4.1.0",
 
     # The archive may stay on the previous host for a migration release.
     [string] $BaseUrl = "https://zsharp.zombieos.com",

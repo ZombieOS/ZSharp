@@ -1,0 +1,33 @@
+zsharp = type.script
+noticed room Main[] (
+ import spring_bones_demo.Sway():
+ noticed status SpaceWasDown = dead:
+ noticed brain Start[] (
+  Sway.playClip.Sway:
+  Print("A/D moves the blue model. Q/E rotates it. Space toggles its spring simulation."):
+  Print("Both placements play the same authored bone animation, with independent secondary motion."):
+  loop (
+   if[input.key.a == alive] (
+    number.set:Demo.Left.positionX = Demo.Left.positionX - Game.delta:
+   ) else ()
+   if[input.key.d == alive] (
+    number.set:Demo.Left.positionX = Demo.Left.positionX + Game.delta:
+   ) else ()
+   if[input.key.q == alive] (
+    number.set:Demo.Left.rotationZ = Demo.Left.rotationZ + Game.delta * 45:
+   ) else ()
+   if[input.key.e == alive] (
+    number.set:Demo.Left.rotationZ = Demo.Left.rotationZ - Game.delta * 45:
+   ) else ()
+   if[input.key.space == alive and not SpaceWasDown] (
+    if[Demo.Left.springBonesEnabled == alive] (
+     Demo.Left.springBonesEnabled.set: dead:
+    ) else (
+     Demo.Left.springBonesEnabled.set: alive:
+    )
+   ) else ()
+   SpaceWasDown = input.key.space:
+   wait(16ms):
+  )
+ )
+)

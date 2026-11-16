@@ -5,6 +5,20 @@ Official website and downloads: <https://zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
+## Version 1.4.1.0
+
+Native games support spring bones for moving manes, tails, hair and accessories
+on skinned FBX models. Define named bone chains in a model's `springBones[JSON]`
+block, then adjust stiffness, damping, gravity, radius and the maximum bend.
+Optional bone-attached sphere and capsule colliders help keep the chains clear
+of the character. Each placed model or AI has its own simulation, layered onto
+its current `.zanimation` bone pose in desktop and PCVR rendering.
+
+See [the spring-bone syntax](SYNTAX.md#spring-bones-1410) and the runnable
+[`examples/spring-bones`](examples/spring-bones) project. Export the weighted
+skeleton from Blender as FBX and configure the chains in Z#; Blender add-on
+physics settings are not imported automatically.
+
 ## Version 1.4.0.1
 
 This patch moves official installer and update requests to
@@ -30,7 +44,7 @@ and the SDKs under `native/interop` for export rules, examples and limitations.
 
 Upgrade note: installers from older Z# releases do not understand the new
 language-helper archive. If an older installer or auto-updater upgrades the
-executable without those support files, rerun the current **1.4.0.1 installer**
+executable without those support files, rerun the current **1.4.1.0 installer**
 once before using the new bridges. Fresh development builds already copy the
 helpers beside their executable. Java/.NET/Ruby runtime installation is still
 separate; this helper archive does not bundle those third-party runtimes.

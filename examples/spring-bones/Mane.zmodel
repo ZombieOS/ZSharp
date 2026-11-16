@@ -1,0 +1,24 @@
+zsharp = type.script:model
+noticed model Mane[] (
+ parent: "Assets/Chain.fbx":
+ collider: none:
+ body: static:
+ springBones[JSON] (
+  [{
+   "name":"Mane",
+   "bones":["ManeRoot","ManeMid","ManeTip"],
+   "stiffness":20,
+   "damping":4,
+   "gravity":{"x":0,"y":-9.8,"z":0},
+   "radius":0.02,
+   "maxAngle":60
+  }]
+ )
+ springColliders[JSON] (
+  [
+   {"name":"BodySphere","bone":"ManeRoot","offset":{"x":0.8,"y":-0.5,"z":0},"radius":0.2},
+   {"name":"BodyCapsule","bone":"ManeRoot","offset":{"x":1.3,"y":-0.6,"z":-0.2},"tail":{"x":1.3,"y":-0.6,"z":0.2},"radius":0.15}
+  ]
+ )
+ springBonesEnabled: alive:
+)

@@ -1130,7 +1130,8 @@ static ufbx_scene *evaluate_bone_pose(const ZSharpMeshCache *mesh,
     ufbx_scene *evaluated;
     ufbx_error detail;
     size_t node_index, count = 0;
-    if (object->part_pose_count == 0) return NULL;
+    if (object->part_pose_count == 0 && object->spring_pose_count == 0)
+        return NULL;
     overrides = (ufbx_transform_override *)calloc(mesh->scene->nodes.count,
                                                    sizeof(*overrides));
     if (overrides == NULL) {
@@ -1140,7 +1141,10 @@ static ufbx_scene *evaluate_bone_pose(const ZSharpMeshCache *mesh,
     for (node_index = 0; node_index < mesh->scene->nodes.count; node_index++) {
         const ufbx_node *node = mesh->scene->nodes.data[node_index];
         size_t pose_index;
+        ufbx_transform transform;
+        int changed = 0;
         if (node->bone == NULL) continue;
+        transform = node->local_transform;
         for (pose_index = 0; pose_index < object->part_pose_count; pose_index++) {
             const ZSharpGamePartPose *pose = &object->part_poses[pose_index];
             ufbx_vec3 angles;
@@ -1149,19 +1153,47 @@ static ufbx_scene *evaluate_bone_pose(const ZSharpMeshCache *mesh,
                 strlen(pose->name) != node->name.length ||
                 memcmp(pose->name, node->name.data, node->name.length) != 0)
                 continue;
-            overrides[count].node_id = node->typed_id;
-            overrides[count].transform = node->local_transform;
-            overrides[count].transform.translation.x += pose->position[0];
-            overrides[count].transform.translation.y += pose->position[1];
-            overrides[count].transform.translation.z += pose->position[2];
+            transform.translation.x += pose->position[0];
+            transform.translation.y += pose->position[1];
+            transform.translation.z += pose->position[2];
             angles.x = pose->rotation[0];
             angles.y = pose->rotation[1];
             angles.z = pose->rotation[2];
             offset = ufbx_euler_to_quat(angles, node->rotation_order);
-            overrides[count].transform.rotation = ufbx_quat_mul(
-                node->local_transform.rotation, offset);
-            count++;
+            transform.rotation = ufbx_quat_mul(transform.rotation, offset);
+            changed = 1;
             break;
+        }
+        for (pose_index = 0; pose_index < object->spring_pose_count; pose_index++) {
+            const ZSharpSpringBonePose *pose = &object->spring_poses[pose_index];
+            ufbx_quat delta;
+            double length;
+            if (pose->name == NULL || strlen(pose->name) != node->name.length ||
+                memcmp(pose->name, node->name.data, node->name.length) != 0)
+                continue;
+            length = sqrt((double)pose->rotation[0] * pose->rotation[0] +
+                          (double)pose->rotation[1] * pose->rotation[1] +
+                          (double)pose->rotation[2] * pose->rotation[2] +
+                          (double)pose->rotation[3] * pose->rotation[3]);
+            if (!isfinite(length) || length < 1e-12) {
+                free(overrides);
+                renderer_error(error, error_size, "invalid spring bone rotation");
+                return NULL;
+            }
+            delta.x = pose->rotation[0] / length;
+            delta.y = pose->rotation[1] / length;
+            delta.z = pose->rotation[2] / length;
+            delta.w = pose->rotation[3] / length;
+            /* Spring motion follows the current authored pose in bone-local
+             * space; it never replaces the animation's translation/rotation. */
+            transform.rotation = ufbx_quat_mul(transform.rotation, delta);
+            changed = 1;
+            break;
+        }
+        if (changed) {
+            overrides[count].node_id = node->typed_id;
+            overrides[count].transform = transform;
+            count++;
         }
     }
     if (count == 0) { free(overrides); return NULL; }
@@ -1737,16 +1769,38 @@ static int world_regression(ZSharpGameVulkan *renderer,const char *assets,char *
     if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || probe.count!=12 || fabsf(probe.high[0]-6)>.001f || fabsf(probe.low[2]+2)>.001f)goto failed;
     if(assets && strcmp(assets,"1")) {
         ZSharpMeshCache *mesh;ZSharpGamePartPose pose={0};size_t n;double before;
+        int bone_pose = 0;
         objects[0].shape=ZGAME_SHAPE_MESH;objects[0].mesh_path="model.fbx";objects[0].asset_path="checker.png";
         frame.object_count=1;memset(&probe,0,sizeof(probe));
         if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || !probe.count || probe.count!=probe.textured)goto failed;
         before=probe.sum[0]+probe.sum[1]+probe.sum[2];mesh=load_mesh(renderer,&frame,"model.fbx",error,capacity);
         if(!mesh)goto failed;
-        for(n=0;n<mesh->scene->nodes.count;n++)if(mesh->scene->nodes.data[n]->bone){pose.name=mesh->scene->nodes.data[n]->name.data;break;}
+        for(n=0;n<mesh->scene->nodes.count;n++)if(mesh->scene->nodes.data[n]->bone){pose.name=mesh->scene->nodes.data[n]->name.data;bone_pose=1;break;}
         if(!pose.name)for(n=0;n<mesh->scene->nodes.count;n++)if(mesh->scene->nodes.data[n]->mesh){pose.name=mesh->scene->nodes.data[n]->name.data;break;}
         if(!pose.name)goto failed;pose.position[0]=5;pose.rotation[2]=30;
         objects[0].part_pose_count=1;objects[0].part_poses=&pose;memset(&probe,0,sizeof(probe));
         if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) || fabs(probe.sum[0]+probe.sum[1]+probe.sum[2]-before)<.001)goto failed;
+        if (bone_pose) {
+            ZSharpSpringBonePose spring={0};
+            double authored=probe.sum[0]+probe.sum[1]+probe.sum[2], combined;
+            spring.name=pose.name;
+            spring.rotation[2]=sinf(25.0f*ZGAME_PI/360.0f);
+            spring.rotation[3]=cosf(25.0f*ZGAME_PI/360.0f);
+            objects[0].spring_poses=&spring;objects[0].spring_pose_count=1;
+            memset(&probe,0,sizeof(probe));
+            if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity))goto failed;
+            combined=probe.sum[0]+probe.sum[1]+probe.sum[2];
+            if(fabs(combined-authored)<.001)goto failed;
+            /* Exporting another eye/pass must reuse, rather than advance, the
+             * already simulated pose. Authored animation also remains active. */
+            memset(&probe,0,sizeof(probe));
+            if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) ||
+               fabs(probe.sum[0]+probe.sum[1]+probe.sum[2]-combined)>.00001)goto failed;
+            objects[0].part_pose_count=0;memset(&probe,0,sizeof(probe));
+            if(!zsharp_game_vulkan_world(renderer,&frame,probe_world,&probe,error,capacity) ||
+               fabs(probe.sum[0]+probe.sum[1]+probe.sum[2]-combined)<.001)goto failed;
+            objects[0].spring_poses=NULL;objects[0].spring_pose_count=0;
+        }
     }
     fprintf(stderr,"PASS: XR shared world transforms, FBX/material stream, lights and moving shadow state\n");
     return 1;

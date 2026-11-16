@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.1.0 - 2026-11-16
+
+- Added native game spring bones for skinned FBX manes, tails, hair and
+  accessories. Model files declare ordered bone chains with stiffness,
+  damping, world-space gravity, a collision radius and a maximum bend angle.
+- Added bone-attached sphere and capsule spring colliders, independent
+  simulation for each placed model or AI, and the live `springBonesEnabled`
+  status property. Scene changes and large teleports reset spring history.
+- Layered spring rotations onto authored `.zanimation` bone poses in the
+  shared desktop/PCVR skinning path. Rendering either eye or another pass does
+  not advance physics. Added a skinned sample project and regression coverage
+  for loading, motion, collisions, reset behavior and mesh deformation.
+- Spring configuration requires `ZSharp: [1.4.1.0]:` or newer. Blender/VRM
+  add-on physics settings are not imported automatically; export the weighted
+  skeleton as FBX and name its chains in the `.zmodel` file.
+- Fixed invalid AI model references dereferencing incomplete model data, and
+  avoided sorting a null file list in projects with no files of a given type.
+
 ## 1.4.0.1 - 2026-11-15
 
 - Moved the official website, installer manifests, Hub logo and runtime

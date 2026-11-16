@@ -3897,6 +3897,101 @@ Clips are exclusive per placed instance: starting a different clip stops the
 previous clip on that instance. Animation blending and direct playback of an
 FBX's embedded animation stacks are not yet supported.
 
+## Spring bones (1.4.1.0)
+
+Native games can simulate bone chains on a skinned FBX model for manes, tails,
+hair and accessories. Set the project's minimum to `ZSharp: [1.4.1.0]:` and
+declare the chains inside its `.zmodel` definition:
+
+```zsharp
+zsharp = type.script:model
+noticed model Pony[] (
+ parent: "Models/Pony.fbx":
+ springBones[JSON] (
+  [
+   {
+    "name": "Mane",
+    "bones": ["ManeRoot", "ManeMid", "ManeTip"],
+    "stiffness": 20,
+    "damping": 4,
+    "gravity": {"x": 0, "y": -9.8, "z": 0},
+    "radius": 0.02,
+    "maxAngle": 60
+   }
+  ]
+ )
+ springColliders[JSON] (
+  [
+   {
+    "name": "Head",
+    "bone": "Head",
+    "offset": {"x": 0, "y": 0.1, "z": 0},
+    "radius": 0.25
+   },
+   {
+    "name": "Body",
+    "bone": "Spine",
+    "offset": {"x": 0, "y": 0, "z": 0},
+    "tail": {"x": 0, "y": 0.6, "z": 0},
+    "radius": 0.3
+   }
+  ]
+ )
+ springBonesEnabled: alive:
+)
+```
+
+Bone names must match the FBX exactly, and every listed bone must be the direct
+child of the preceding bone. Include a final tip bone: a three-bone chain
+simulates two rotating segments. Chains cannot share bones. Blender's bone
+endpoints alone are not named FBX nodes, so add/export a tip bone when needed.
+Export the weighted skeleton; Blender or VRM add-on spring settings are not
+imported automatically.
+
+Only `name` and `bones` are required for a chain. The other fields default to
+the values shown above. `stiffness` restores the animated pose (0..10000 per
+second squared), `damping` removes velocity (0..1000 per second), and `gravity`
+is a world-space acceleration in game units per second squared (each component
+within -10000..10000). `maxAngle` limits each segment's local bend from its
+animated pose to 0..180 degrees. `radius` is the simulated tip's collision
+radius in game units before instance scale (0..1000).
+
+Colliders are optional and require a spring chain. A collider needs `name`
+and `bone`; its `radius` defaults to 0.25 and must be positive (at most 1000).
+`offset` defaults to zero. Adding `tail` makes a capsule; both endpoints are
+positions in the anchor bone's local FBX coordinates. A sphere has only
+`offset`. Collider anchors follow the authored bone animation. Collider radii
+scale with the largest absolute instance scale; model dimensions also affect
+the imported skeleton. Contacts constrain simulated tips, so use several
+colliders and suitably spaced bones for a dense mane. These colliders affect
+spring chains only, not the game's rigid-body contacts.
+Leave room for the configured bend and bone lengths: conflicting constraints
+can still leave a tip intersecting a collider.
+
+Each model supports up to 32 chains, 64 bones per chain, 256 listed bones in
+total and 64 colliders. Names must be nonempty and at most 255 UTF-8 bytes.
+Unknown fields, duplicate fields/names, overlapping chains, missing bones and
+invalid numeric values are errors. Every provided vector requires `x`, `y`
+and `z`. An AI inherits its model's spring configuration, and every placed
+instance maintains its own motion history.
+
+Spring rotations layer onto the current `.zanimation` bone pose at a fixed
+120 Hz simulation step. Desktop and PCVR rendering use the same result;
+rendering does not advance simulation. Scene changes, large teleports and scale
+changes reset motion history. You can disable or enable springs at runtime:
+
+```zsharp
+Pony.springBonesEnabled.set: dead:
+Pony.springBonesEnabled.set: alive:
+if[Pony.springBonesEnabled == alive] (
+ Print("Mane physics enabled"):
+) else ()
+```
+
+Disabling springs restores authored bone poses. Re-enabling after a disabled
+simulation step starts from the current pose. This feature is for native
+games; it does not add model rendering to the browser VM.
+
 ## Imported models and AI
 
 An imported model uses a project-relative FBX source. Scene placements can

@@ -2,6 +2,7 @@
 #define ZSHARP_GAME_VULKAN_H
 
 #include <stddef.h>
+#include "game_spring.h"
 
 typedef enum ZSharpGameShape {
     ZGAME_SHAPE_RECTANGLE = 1,
@@ -62,6 +63,8 @@ typedef struct ZSharpGameRenderObject {
     size_t material_count;
     const ZSharpGamePartPose *part_poses;
     size_t part_pose_count;
+    const ZSharpSpringBonePose *spring_poses;
+    size_t spring_pose_count;
 } ZSharpGameRenderObject;
 
 typedef struct ZSharpGameRenderFrame {

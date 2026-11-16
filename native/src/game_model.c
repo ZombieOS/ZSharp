@@ -49,6 +49,7 @@ typedef struct ModelParser {
     const char *source_name;
     ZSharpGameModel *model;
     int definition_mode;
+    int springs_allowed;
     char *error;
     size_t error_size;
     int failed;
@@ -405,6 +406,7 @@ static ZSharpGameObject *add_object(ModelParser *parser, char *name) {
     object->opacity = 1.0f;
     object->roughness = 1.0f;
     object->visible = 1;
+    object->spring_bones_enabled = 1;
     object->audio_volume = 1.0f;
     object->audio_pitch = 1.0f;
     object->tone_duration = 0.12f;
@@ -838,6 +840,8 @@ static ZSharpGameObject *place_object(ModelParser *parser,
     object->material_count = 0;
     object->part_poses = NULL;
     object->part_pose_count = 0;
+    object->spring_config = NULL;
+    object->spring_state = NULL;
     object->nav_aliases = object->nav_ids = NULL;
     object->nav_count = 0;
     object->nav_target = NULL;
@@ -857,6 +861,9 @@ static ZSharpGameObject *place_object(ModelParser *parser,
         !copy_optional(&object->asset_path, definition->asset_path) ||
         !copy_optional(&object->mesh_path, definition->mesh_path) ||
         !copy_optional(&object->audio_path, definition->audio_path))
+        goto memory_error;
+    if (!zsharp_game_spring_config_copy(&object->spring_config,
+                                         definition->spring_config))
         goto memory_error;
     if (definition->material_count != 0) {
         object->material_names = (char **)calloc(definition->material_count,
@@ -1368,8 +1375,332 @@ static int parse_model_textures(ModelParser *parser, ZSharpGameObject *model) {
                               "expected ')' after model textures");
 }
 
+/* Spring JSON is deliberately bounded independently of the general model
+ * fields: model/bone names are at most 255 UTF-8 bytes after JSON unescaping. */
+static int spring_hex4(const char **cursor, const char *end, unsigned *value) {
+    unsigned result = 0;
+    size_t index;
+    for (index = 0; index < 4; index++) {
+        unsigned char c;
+        unsigned digit;
+        if (*cursor == end) return 0;
+        c = (unsigned char)*(*cursor)++;
+        if (c >= '0' && c <= '9') digit = c - '0';
+        else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+        else return 0;
+        result = result * 16 + digit;
+    }
+    *value = result;
+    return 1;
+}
+
+static char *spring_json_text(ModelParser *parser) {
+    ZSharpToken token = parser->current;
+    const char *cursor, *end;
+    char buffer[256];
+    size_t length = 0;
+    char *result;
+    if (token.type != ZTOKEN_STRING) {
+        parser_fail(parser, &token, "spring fields and names require quoted JSON text");
+        return NULL;
+    }
+    cursor = token.start + 1;
+    end = token.start + token.length - 1;
+    while (cursor < end) {
+        unsigned code = (unsigned char)*cursor++;
+        int unicode_escape = 0;
+        if (code == '\\') {
+            unsigned low;
+            if (cursor == end) goto invalid;
+            code = (unsigned char)*cursor++;
+            if (code == 'u') {
+                unicode_escape = 1;
+                if (!spring_hex4(&cursor, end, &code)) goto invalid;
+                if (code >= 0xd800 && code <= 0xdbff) {
+                    if (end - cursor < 6 || cursor[0] != '\\' ||
+                        cursor[1] != 'u') goto invalid;
+                    cursor += 2;
+                    if (!spring_hex4(&cursor, end, &low) ||
+                        low < 0xdc00 || low > 0xdfff) goto invalid;
+                    code = 0x10000 + ((code - 0xd800) << 10) + low - 0xdc00;
+                } else if (code >= 0xdc00 && code <= 0xdfff) goto invalid;
+            } else if (code != '"' && code != '\\' && code != '/') {
+                /* JSON control escapes cannot identify a usable FBX bone. */
+                goto invalid;
+            }
+        }
+        if (code < 0x20 || code == 0x7f) goto invalid;
+        if (code < 0x80 || (!unicode_escape && code < 0x100)) {
+            if (length + 1 >= sizeof(buffer)) goto invalid;
+            buffer[length++] = (char)code;
+        } else {
+            size_t bytes = code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+            if (length + bytes >= sizeof(buffer)) goto invalid;
+            if (bytes == 2) buffer[length++] = (char)(0xc0 | (code >> 6));
+            else if (bytes == 3) {
+                buffer[length++] = (char)(0xe0 | (code >> 12));
+                buffer[length++] = (char)(0x80 | ((code >> 6) & 63));
+            } else {
+                buffer[length++] = (char)(0xf0 | (code >> 18));
+                buffer[length++] = (char)(0x80 | ((code >> 12) & 63));
+                buffer[length++] = (char)(0x80 | ((code >> 6) & 63));
+            }
+            buffer[length++] = (char)(0x80 | (code & 63));
+        }
+    }
+    if (length == 0) goto invalid;
+    result = zsharp_copy_text(buffer, length);
+    if (result == NULL) parser_fail(parser, &token, "out of memory");
+    parser_advance(parser);
+    return result;
+invalid:
+    parser_fail(parser, &token,
+                "spring names must contain 1..255 bytes without control characters");
+    return NULL;
+}
+
+static int spring_json_field(ModelParser *parser, const char *const *fields,
+                              size_t count, unsigned *seen) {
+    char *field = spring_json_text(parser);
+    size_t index;
+    if (field == NULL) return -1;
+    for (index = 0; index < count; index++)
+        if (strcmp(field, fields[index]) == 0) break;
+    free(field);
+    if (index == count) {
+        parser_fail(parser, &parser->current, "unknown spring JSON field");
+        return -1;
+    }
+    if ((*seen & (1u << index)) != 0) {
+        parser_fail(parser, &parser->current, "duplicate spring JSON field");
+        return -1;
+    }
+    *seen |= 1u << index;
+    return parser_expect_type(parser, ZTOKEN_COLON,
+                              "expected ':' after spring JSON field")
+        ? (int)index : -1;
+}
+
+static int spring_json_number(ModelParser *parser, float *target,
+                               float minimum, float maximum) {
+    ModelValue value;
+    int ok;
+    if (!parse_value(parser, &value)) return 0;
+    ok = value_number(parser, &value, target);
+    free(value.text);
+    if (ok && (*target < minimum || *target > maximum)) {
+        parser_fail(parser, &parser->current, "spring number is outside its supported range");
+        ok = 0;
+    }
+    return ok;
+}
+
+static int spring_json_vector(ModelParser *parser, float vector[3], float limit) {
+    static const char *const fields[] = {"x", "y", "z"};
+    unsigned seen = 0;
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
+                            "expected a spring vector with x, y, z")) return 0;
+    for (;;) {
+        int field = spring_json_field(parser, fields, 3, &seen);
+        if (field < 0 || !spring_json_number(parser, &vector[field], -limit, limit))
+            return 0;
+        if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
+    }
+    if (seen != 7) {
+        parser_fail(parser, &parser->current, "spring vectors require x, y, z once each");
+        return 0;
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                              "expected '}' after spring vector");
+}
+
+static int spring_chain_bones(ModelParser *parser, ZSharpSpringConfig *config,
+                               ZSharpSpringChain *chain) {
+    size_t total = 0, index;
+    for (index = 0; index < config->chain_count; index++)
+        total += config->chains[index].bone_count;
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACKET,
+                            "expected an ordered spring bone-name array")) return 0;
+    for (;;) {
+        char *bone;
+        char **resized;
+        size_t other_chain, other_bone;
+        if (chain->bone_count >= ZSHARP_SPRING_MAX_BONES ||
+            total >= ZSHARP_SPRING_MAX_TOTAL_BONES) {
+            parser_fail(parser, &parser->current, "spring bone count exceeds its supported limit");
+            return 0;
+        }
+        bone = spring_json_text(parser);
+        if (bone == NULL) return 0;
+        for (other_chain = 0; other_chain < config->chain_count; other_chain++)
+            for (other_bone = 0; other_bone < config->chains[other_chain].bone_count; other_bone++)
+                if (strcmp(bone, config->chains[other_chain].bones[other_bone]) == 0) {
+                    free(bone);
+                    parser_fail(parser, &parser->current,
+                                "spring bone names must be unique across chains");
+                    return 0;
+                }
+        resized = (char **)realloc(chain->bones,
+                                    (chain->bone_count + 1) * sizeof(*resized));
+        if (resized == NULL) {
+            free(bone);
+            parser_fail(parser, &parser->current, "out of memory");
+            return 0;
+        }
+        chain->bones = resized;
+        chain->bones[chain->bone_count++] = bone;
+        total++;
+        if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
+    }
+    if (chain->bone_count < 2) {
+        parser_fail(parser, &parser->current,
+                    "spring chains require at least two bones including a tip marker");
+        return 0;
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET,
+                              "expected ']' after spring bones");
+}
+
+static int spring_chain_json(ModelParser *parser, ZSharpSpringConfig *config) {
+    static const char *const fields[] = {
+        "name", "bones", "stiffness", "damping", "gravity", "radius", "maxAngle"
+    };
+    ZSharpSpringChain *resized, *chain;
+    unsigned seen = 0;
+    size_t index;
+    if (config->chain_count >= ZSHARP_SPRING_MAX_CHAINS) {
+        parser_fail(parser, &parser->current, "too many spring chains");
+        return 0;
+    }
+    resized = (ZSharpSpringChain *)realloc(config->chains,
+                      (config->chain_count + 1) * sizeof(*resized));
+    if (resized == NULL) {
+        parser_fail(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    config->chains = resized;
+    chain = &config->chains[config->chain_count++];
+    memset(chain, 0, sizeof(*chain));
+    chain->stiffness = 20.0f;
+    chain->damping = 4.0f;
+    chain->gravity[1] = -9.8f;
+    chain->radius = 0.02f;
+    chain->max_angle = 60.0f;
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
+                            "expected '{' before spring chain")) return 0;
+    for (;;) {
+        int field = spring_json_field(parser, fields, 7, &seen);
+        int ok = 0;
+        if (field < 0) return 0;
+        if (field == 0) ok = (chain->name = spring_json_text(parser)) != NULL;
+        else if (field == 1) ok = spring_chain_bones(parser, config, chain);
+        else if (field == 2) ok = spring_json_number(parser, &chain->stiffness, 0, ZSHARP_SPRING_MAX_STIFFNESS);
+        else if (field == 3) ok = spring_json_number(parser, &chain->damping, 0, ZSHARP_SPRING_MAX_DAMPING);
+        else if (field == 4) ok = spring_json_vector(parser, chain->gravity, ZSHARP_SPRING_MAX_GRAVITY);
+        else if (field == 5) ok = spring_json_number(parser, &chain->radius, 0, ZSHARP_SPRING_MAX_RADIUS);
+        else if (field == 6) ok = spring_json_number(parser, &chain->max_angle, 0, 180);
+        if (!ok) return 0;
+        if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
+    }
+    if ((seen & 3) != 3) {
+        parser_fail(parser, &parser->current, "spring chains require name and bones");
+        return 0;
+    }
+    for (index = 0; index + 1 < config->chain_count; index++)
+        if (strcmp(chain->name, config->chains[index].name) == 0) {
+            parser_fail(parser, &parser->current, "duplicate spring chain name");
+            return 0;
+        }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                              "expected '}' after spring chain");
+}
+
+static int spring_collider_json(ModelParser *parser, ZSharpSpringConfig *config) {
+    static const char *const fields[] = {"name", "bone", "offset", "tail", "radius"};
+    ZSharpSpringCollider *resized, *collider;
+    unsigned seen = 0;
+    size_t index;
+    if (config->collider_count >= ZSHARP_SPRING_MAX_COLLIDERS) {
+        parser_fail(parser, &parser->current, "too many spring colliders");
+        return 0;
+    }
+    resized = (ZSharpSpringCollider *)realloc(config->colliders,
+                       (config->collider_count + 1) * sizeof(*resized));
+    if (resized == NULL) {
+        parser_fail(parser, &parser->current, "out of memory");
+        return 0;
+    }
+    config->colliders = resized;
+    collider = &config->colliders[config->collider_count++];
+    memset(collider, 0, sizeof(*collider));
+    collider->radius = 0.25f;
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACE,
+                            "expected '{' before spring collider")) return 0;
+    for (;;) {
+        int field = spring_json_field(parser, fields, 5, &seen);
+        int ok = 0;
+        if (field < 0) return 0;
+        if (field == 0) ok = (collider->name = spring_json_text(parser)) != NULL;
+        else if (field == 1) ok = (collider->bone = spring_json_text(parser)) != NULL;
+        else if (field == 2) ok = spring_json_vector(parser, collider->offset, ZSHARP_SPRING_MAX_OFFSET);
+        else if (field == 3) {
+            collider->capsule = 1;
+            ok = spring_json_vector(parser, collider->tail, ZSHARP_SPRING_MAX_OFFSET);
+        } else if (field == 4) ok = spring_json_number(parser, &collider->radius, 0, ZSHARP_SPRING_MAX_RADIUS);
+        if (!ok) return 0;
+        if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
+    }
+    if ((seen & 3) != 3 || collider->radius <= 0) {
+        parser_fail(parser, &parser->current,
+                    "spring colliders require name, bone, and a positive radius");
+        return 0;
+    }
+    for (index = 0; index + 1 < config->collider_count; index++)
+        if (strcmp(collider->name, config->colliders[index].name) == 0) {
+            parser_fail(parser, &parser->current, "duplicate spring collider name");
+            return 0;
+        }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_BRACE,
+                              "expected '}' after spring collider");
+}
+
+static int parse_model_springs(ModelParser *parser, ZSharpGameObject *model,
+                               int colliders) {
+    if (!parser->springs_allowed) {
+        parser_fail(parser, &parser->current,
+                    "spring bones require ZSharp: [1.4.1.0]: or newer");
+        return 0;
+    }
+    if (model->spring_config == NULL) {
+        model->spring_config = (ZSharpSpringConfig *)calloc(1, sizeof(*model->spring_config));
+        if (model->spring_config == NULL) {
+            parser_fail(parser, &parser->current, "out of memory");
+            return 0;
+        }
+    }
+    if (!parser_expect_type(parser, ZTOKEN_LEFT_BRACKET, "expected '[' after spring block") ||
+        !parser_expect_word(parser, "JSON") ||
+        !parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET, "expected ']' after JSON") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_PAREN, "expected '(' before spring array") ||
+        !parser_expect_type(parser, ZTOKEN_LEFT_BRACKET, "expected '[' before spring array"))
+        return 0;
+    if (parser->current.type == ZTOKEN_RIGHT_BRACKET) {
+        parser_fail(parser, &parser->current, "spring blocks must not be empty");
+        return 0;
+    }
+    for (;;) {
+        if (!(colliders ? spring_collider_json(parser, model->spring_config)
+                        : spring_chain_json(parser, model->spring_config))) return 0;
+        if (!parser_match_type(parser, ZTOKEN_COMMA)) break;
+    }
+    return parser_expect_type(parser, ZTOKEN_RIGHT_BRACKET, "expected ']' after spring array") &&
+           parser_expect_type(parser, ZTOKEN_RIGHT_PAREN, "expected ')' after spring block");
+}
+
 static int parse_model_declaration(ModelParser *parser, char *name) {
     ZSharpGameObject *model;
+    unsigned spring_blocks = 0;
     parser->definition_mode = 1;
     model = add_object(parser, name);
     if (model == NULL ||
@@ -1392,6 +1723,18 @@ static int parse_model_declaration(ModelParser *parser, char *name) {
             if (!parse_model_textures(parser, model)) return 0;
             continue;
         }
+        if (strcmp(field, "springBones") == 0 || strcmp(field, "springColliders") == 0) {
+            int colliders = strcmp(field, "springColliders") == 0;
+            unsigned mask = colliders ? 2u : 1u;
+            free(field);
+            if ((spring_blocks & mask) != 0) {
+                parser_fail(parser, &parser->current, "duplicate spring configuration block");
+                return 0;
+            }
+            spring_blocks |= mask;
+            if (!parse_model_springs(parser, model, colliders)) return 0;
+            continue;
+        }
         if (!parser_expect_type(parser, ZTOKEN_COLON,
                                 "expected ':' after model field") ||
             !parse_value(parser, &value) ||
@@ -1400,7 +1743,18 @@ static int parse_model_declaration(ModelParser *parser, char *name) {
             free(field);
             return 0;
         }
-        if (strcmp(field, "parent") == 0) {
+        if (strcmp(field, "springBonesEnabled") == 0) {
+            if (!parser->springs_allowed)
+                parser_fail(parser, &parser->current,
+                            "spring bones require ZSharp: [1.4.1.0]: or newer");
+            else if ((spring_blocks & 4u) != 0)
+                parser_fail(parser, &parser->current, "duplicate springBonesEnabled field");
+            else if (value.type != MODEL_IDENTIFIER ||
+                     (strcmp(value.text, "alive") != 0 && strcmp(value.text, "dead") != 0))
+                parser_fail(parser, &parser->current, "springBonesEnabled requires alive or dead");
+            else model->spring_bones_enabled = strcmp(value.text, "alive") == 0;
+            spring_blocks |= 4u;
+        } else if (strcmp(field, "parent") == 0) {
             if (value.type != MODEL_TEXT || !safe_relative_asset(value.text) ||
                 !replace_text(&model->mesh_path, value.text))
                 parser_fail(parser, &parser->current,
@@ -1417,6 +1771,9 @@ static int parse_model_declaration(ModelParser *parser, char *name) {
     if (model->mesh_path == NULL && !parser->failed)
         parser_fail(parser, &parser->current,
                     "model definitions require parent: \"Model.fbx\":");
+    if (model->spring_config != NULL && model->spring_config->chain_count == 0 &&
+        !parser->failed)
+        parser_fail(parser, &parser->current, "springColliders require springBones chains");
     return parser_expect_type(parser, ZTOKEN_RIGHT_PAREN,
                               "expected ')' after model fields");
 }
@@ -1463,6 +1820,7 @@ static int parse_ai_navigation(ModelParser *parser, ZSharpGameObject *ai) {
 
 static int parse_ai_declaration(ModelParser *parser, char *name) {
     ZSharpGameObject *ai;
+    int model_seen = 0;
     parser->definition_mode = 1;
     ai = add_object(parser, name);
     if (ai == NULL ||
@@ -1501,7 +1859,9 @@ static int parse_ai_declaration(ModelParser *parser, char *name) {
             ZSharpGameObject *source;
             char name_buffer[256];
             size_t length;
-            if (value.type != MODEL_TEXT || !safe_relative_asset(value.text)) {
+            if (model_seen) {
+                parser_fail(parser, &parser->current, "duplicate AI model field");
+            } else if (value.type != MODEL_TEXT || !safe_relative_asset(value.text)) {
                 parser_fail(parser, &parser->current,
                             "AI model requires a quoted .zmodel path");
             } else {
@@ -1516,11 +1876,20 @@ static int parse_ai_declaration(ModelParser *parser, char *name) {
                     name_buffer[length] = '\0';
                     source = find_definition(parser->model, name_buffer);
                     if (source == NULL || source->shape != ZGAME_SHAPE_MESH ||
+                        source->is_ai || source->mesh_path == NULL ||
                         !replace_text(&ai->mesh_path, source->mesh_path)) {
                         parser_fail(parser, &parser->current,
                                     "AI model must reference a loaded .zmodel");
                     } else {
                         size_t slot;
+                        ai->spring_bones_enabled = source->spring_bones_enabled;
+                        if (!zsharp_game_spring_config_copy(&ai->spring_config,
+                                                             source->spring_config)) {
+                            parser_fail(parser, &parser->current, "out of memory");
+                            free(value.text);
+                            free(field);
+                            return 0;
+                        }
                         ai->material_names = (char **)calloc(source->material_count,
                                                                sizeof(char *));
                         ai->material_textures = (char **)calloc(source->material_count,
@@ -1545,6 +1914,7 @@ static int parse_ai_declaration(ModelParser *parser, char *name) {
                     }
                 }
             }
+            model_seen = 1;
         } else {
             apply_object_field(parser, ai, field, &value);
         }
@@ -1658,6 +2028,7 @@ static int parse_scene_declaration(ModelParser *parser, char *outer_name) {
 
 static int parse_model_file(const char *path, const char *source,
                             ZSharpGameModel *model, ModelFileKind kind,
+                            const ZSharpSettings *settings,
                             char *error, size_t error_size) {
     ModelParser parser;
     const char *file_name = path;
@@ -1669,6 +2040,16 @@ static int parse_model_file(const char *path, const char *source,
     parser.model = model;
     parser.error = error;
     parser.error_size = error_size;
+    {
+        static const uint32_t required[] = {1, 4, 1, 0};
+        size_t part;
+        parser.springs_allowed = 1;
+        for (part = 0; part < 4; part++) {
+            if (settings->zsharp_version[part] == required[part]) continue;
+            parser.springs_allowed = settings->zsharp_version[part] > required[part];
+            break;
+        }
+    }
     for (cursor = path; *cursor != '\0'; cursor++)
         if (*cursor == '/' || *cursor == '\\') file_name = cursor + 1;
     extension = strrchr(file_name, '.');
@@ -2061,6 +2442,43 @@ static int project_asset_exists(const char *root, const char *relative) {
     return 1;
 }
 
+static int validate_definition_springs(const char *project_root,
+                                       const ZSharpGameObject *object,
+                                       char *error, size_t error_size) {
+    char *path;
+    size_t size;
+    ufbx_scene *imported;
+    int valid;
+    if (object->spring_config == NULL) return 1;
+    if (!safe_relative_asset(object->mesh_path) ||
+        !project_asset_exists(project_root, object->mesh_path)) {
+        if (error != NULL && error_size != 0)
+            snprintf(error, error_size, "spring model '%s' requires an existing parent FBX asset",
+                     object->name);
+        return 0;
+    }
+    size = strlen(project_root) + strlen(object->mesh_path) + 2;
+    path = (char *)malloc(size);
+    if (path == NULL) {
+        model_error(error, error_size, "out of memory");
+        return 0;
+    }
+    snprintf(path, size, "%s/%s", project_root, object->mesh_path);
+    imported = ufbx_load_file(path, NULL, NULL);
+    free(path);
+    if (imported == NULL || imported->meshes.count == 0) {
+        if (error != NULL && error_size != 0)
+            snprintf(error, error_size, "spring model '%s' requires a valid renderable FBX mesh",
+                     object->name);
+        if (imported != NULL) ufbx_free_scene(imported);
+        return 0;
+    }
+    valid = zsharp_game_spring_validate(object->spring_config, imported,
+                                         error, error_size);
+    ufbx_free_scene(imported);
+    return valid;
+}
+
 int zsharp_game_model_load(const char *project_root,
                            ZSharpGameModel *model, char *error,
                            size_t error_size) {
@@ -2090,7 +2508,7 @@ int zsharp_game_model_load(const char *project_root,
         char *source = NULL;
         if (!read_file(files.items[index], &source, error, error_size) ||
             !parse_model_file(files.items[index], source, model,
-                              MODEL_FILE_OBJECT,
+                              MODEL_FILE_OBJECT, &settings,
                               error, error_size)) {
             free(source);
             zsharp_project_source_list_free(&files);
@@ -2105,7 +2523,7 @@ int zsharp_game_model_load(const char *project_root,
         char *source = NULL;
         if (!read_file(files.items[index], &source, error, error_size) ||
             !parse_model_file(files.items[index], source, model,
-                              MODEL_FILE_MODEL, error, error_size)) {
+                              MODEL_FILE_MODEL, &settings, error, error_size)) {
             free(source);
             zsharp_project_source_list_free(&files);
             goto failed;
@@ -2119,7 +2537,7 @@ int zsharp_game_model_load(const char *project_root,
         char *source = NULL;
         if (!read_file(files.items[index], &source, error, error_size) ||
             !parse_model_file(files.items[index], source, model,
-                              MODEL_FILE_AI, error, error_size)) {
+                              MODEL_FILE_AI, &settings, error, error_size)) {
             free(source);
             zsharp_project_source_list_free(&files);
             goto failed;
@@ -2133,7 +2551,7 @@ int zsharp_game_model_load(const char *project_root,
         char *source = NULL;
         if (!read_file(files.items[index], &source, error, error_size) ||
             !parse_model_file(files.items[index], source, model,
-                              MODEL_FILE_AUDIO,
+                              MODEL_FILE_AUDIO, &settings,
                               error, error_size)) {
             free(source);
             zsharp_project_source_list_free(&files);
@@ -2148,7 +2566,7 @@ int zsharp_game_model_load(const char *project_root,
         char *source = NULL;
         if (!read_file(files.items[index], &source, error, error_size) ||
             !parse_model_file(files.items[index], source, model,
-                              MODEL_FILE_SCENE,
+                              MODEL_FILE_SCENE, &settings,
                               error, error_size)) {
             free(source);
             zsharp_project_source_list_free(&files);
@@ -2233,6 +2651,10 @@ int zsharp_game_model_load(const char *project_root,
     }
     zsharp_settings_free(&settings);
     if (model->active_scene == NULL) goto out_of_memory;
+    /* Unplaced definitions must receive the same bone/FBX validation as instances. */
+    for (index = 0; index < model->definition_count; index++)
+        if (!validate_definition_springs(project_root, &model->definitions[index],
+                                          error, error_size)) goto failed;
     for (index = 0; index < model->object_count; index++) {
         ZSharpGameObject *object = &model->objects[index];
         if (object->scene == NULL) {
@@ -2332,6 +2754,12 @@ int zsharp_game_model_load(const char *project_root,
                              object->name);
                 goto failed;
             }
+            if (object->spring_config != NULL &&
+                !zsharp_game_spring_validate(object->spring_config, imported,
+                                               error, error_size)) {
+                ufbx_free_scene(imported);
+                goto failed;
+            }
             ufbx_free_scene(imported);
         }
         if (object->is_audio_source && !wav_asset(object->audio_path)) {
@@ -2353,6 +2781,7 @@ int zsharp_game_model_load(const char *project_root,
         }
     }
     if (!zsharp_game_instances_build(model, error, error_size)) goto failed;
+    if (!zsharp_game_springs_prepare(model, error, error_size)) goto failed;
     return 1;
 out_of_memory:
     model_error(error, error_size, "out of memory");
@@ -2389,6 +2818,7 @@ static void free_game_object(ZSharpGameObject *object) {
     free(object->material_names);
     free(object->material_textures);
     free(object->part_poses);
+    zsharp_game_spring_config_free(object->spring_config);
     for (index = 0; index < object->nav_count; index++) {
         free(object->nav_aliases[index]);
         free(object->nav_ids[index]);
@@ -2408,6 +2838,7 @@ void zsharp_game_model_free(ZSharpGameModel *model) {
     size_t index;
     ZSharpMeshCollision *collision;
     if (model == NULL) return;
+    zsharp_game_springs_free(model);
     zsharp_game_instances_free(model);
     collision = model->mesh_collisions;
     while (collision != NULL) {
@@ -3202,6 +3633,11 @@ void zsharp_game_model_update(ZSharpGameModel *model, double delta_seconds) {
         }
     }
     free(next_moving);
+    /* Preserve invalid/paused-clock information for the spring reset path;
+     * the ordinary body/animation step above keeps its existing 50 ms clamp. */
+    zsharp_game_springs_update(model,
+        !isfinite(delta_seconds) || delta_seconds < 0 || delta_seconds > 0.25
+            ? delta_seconds : delta);
 }
 
 static int split_path(const char *path, char *storage, size_t storage_size,
@@ -3259,7 +3695,7 @@ static int valid_object_field(const char *field) {
         "velocityZ","mass","gravityScale","restitution","friction",
         "opacity","roughness","metallic","emissive",
         "lightType","lightIntensity","lightRange","lightAngle",
-        "castShadows",
+        "castShadows","springBonesEnabled",
         "audioVolume","tone","texture",
         "toneDuration","layer","color",
         "visible","trigger","grounded","colliding","text","scene",
@@ -3483,6 +3919,10 @@ int zsharp_game_model_get_property(const ZSharpGameModel *model,
                                   (object->nav_moving ? "moving" : "reachable") :
                                   "notReachable", text, error, error_size);
     }
+    if (strcmp(field, "springBonesEnabled") == 0) {
+        *type = ZWINDOW_READ_STATUS;
+        return status_property(object->spring_bones_enabled, text, error, error_size);
+    }
 #define GET_NUMBER(name, member)                                               \
     if (strcmp(field, name) == 0) {                                            \
         *type = ZWINDOW_READ_NUMBER;                                           \
@@ -3641,6 +4081,7 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
             if (scene_object->audio_autoplay)
                 scene_object->audio_started = 1;
         }
+        zsharp_game_springs_reset(model);
         return 1;
     }
     if (count == 3 && strcmp(parts[0], "input") == 0 &&
@@ -3730,6 +4171,7 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
         if (!replace_text(&object->scene, value)) return 0;
         /* Changing membership also changes the active-scene render ordinals. */
         invalidate_scene_ui(model);
+        zsharp_game_springs_reset(model);
         return 1;
     }
     if (strcmp(field, "color") == 0) {
@@ -3749,6 +4191,7 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
         strcmp(field, "audioAutoplay") == 0 ||
         strcmp(field, "audioOnCollision") == 0 ||
         strcmp(field, "castShadows") == 0 ||
+        strcmp(field, "springBonesEnabled") == 0 ||
         strcmp(field, "audioPlay") == 0) {
         if (strcmp(value, "alive") == 0) status = 1;
         else if (strcmp(value, "dead") == 0) status = 0;
@@ -3763,6 +4206,13 @@ int zsharp_game_model_set_property(ZSharpGameModel *model, const char *path,
             object->audio_autoplay = status;
         else if (strcmp(field, "audioOnCollision") == 0)
             object->audio_on_collision = status;
+        else if (strcmp(field, "springBonesEnabled") == 0) {
+            if (object->shape != ZGAME_SHAPE_MESH) {
+                model_error(error, error_size, "springBonesEnabled requires a model instance");
+                return 0;
+            }
+            object->spring_bones_enabled = status;
+        }
         else if (strcmp(field, "castShadows") == 0) {
             if (object->shape != ZGAME_SHAPE_LIGHT) {
                 model_error(error, error_size, "castShadows requires a light");
@@ -3969,6 +4419,9 @@ void zsharp_game_model_frame(const ZSharpGameModel *model,
         target->material_count = source->material_count;
         target->part_poses = source->part_poses;
         target->part_pose_count = source->part_pose_count;
+        if (source->spring_bones_enabled)
+            target->spring_poses = zsharp_game_spring_poses(source->spring_state,
+                                                           &target->spring_pose_count);
     }
     frame->is_3d = model->is_3d;
     frame->background = scene == NULL ? 0x08080bu : scene->background;

@@ -1,4 +1,4 @@
-/* Z# 1.4.0.1 browser prototype. JavaScript is host glue, not a Z# interpreter. */
+/* Z# 1.4.1.0 browser prototype. JavaScript is host glue, not a Z# interpreter. */
 (() => {
   "use strict";
   const loader = document.currentScript;

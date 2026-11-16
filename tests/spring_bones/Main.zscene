@@ -1,0 +1,17 @@
+zsharp = type.scene
+noticed scene Main[] (
+ scene Main (
+  title: "Spring Bone Regression":
+  background: #101522:
+  gravityY: 0:
+  cameraX: 0:
+  cameraY: 0.5:
+  cameraZ: 6:
+ )
+ objects[JSON] (
+  [
+   {"id":"Mane","name":"First","location":{"x":-2.5,"y":1,"z":0},"width":2,"height":0.2,"length":0.2,"color":"#65CDFF"},
+   {"id":"Mane","name":"Second","location":{"x":0.5,"y":1,"z":0},"width":2,"height":0.2,"length":0.2,"color":"#F6B768"}
+  ]
+ )
+)

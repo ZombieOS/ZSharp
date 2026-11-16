@@ -607,8 +607,9 @@ int zsharp_project_list_files(const char *project_root, const char *extension,
         zsharp_project_source_list_free(sources);
         return 0;
     }
-    qsort(sources->items, sources->count, sizeof(*sources->items),
-          compare_source_paths);
+    if (sources->count > 1)
+        qsort(sources->items, sources->count, sizeof(*sources->items),
+              compare_source_paths);
     return 1;
 }
 

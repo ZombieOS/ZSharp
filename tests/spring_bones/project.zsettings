@@ -1,0 +1,13 @@
+zsharp = type.settings
+Project: "Spring Bone Regression":
+PID: "spring_bone_regression":
+Version: [1.4.1.0]:
+Authors: ["Z# Tests"]:
+Description: "Small owned skinned FBX with two independent spring placements.":
+ZSharp: [1.4.1.0]:
+Dependencies (
+ zsharpgame:1.0.0.1
+):
+Window (
+ StartScene: "Main.zscene":
+):

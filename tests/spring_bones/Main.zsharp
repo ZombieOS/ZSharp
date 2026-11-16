@@ -1,0 +1,11 @@
+zsharp = type.script
+noticed room Main[] (
+ noticed brain Start[] (
+  Main.First.springBonesEnabled.set: dead:
+  Main.Second.springBonesEnabled.set: alive:
+  status FirstEnabled = Main.First.springBonesEnabled:
+  status SecondEnabled = Main.Second.springBonesEnabled:
+  Print(FirstEnabled):
+  Print(SecondEnabled):
+ )
+)
