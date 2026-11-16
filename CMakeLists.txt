@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.4.0.0 LANGUAGES C)
+project(zsharp VERSION 1.4.0.1 LANGUAGES C)
 if(MSVC)
     # The bootstrap installs one native executable, not a machine-wide VC++
     # redistributable. Keep the C and C++ runtimes inside that executable.
@@ -769,6 +769,19 @@ if(BUILD_TESTING)
     endif()
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        if(UNIX AND NOT ANDROID)
+            add_executable(zsharp_test_updater_manifest
+                tests/updater-manifest-driver.c native/src/updater.c)
+            target_include_directories(zsharp_test_updater_manifest
+                PRIVATE native/include native/src)
+            target_compile_features(zsharp_test_updater_manifest PRIVATE c_std_17)
+            add_test(NAME zsharp_updater_manifest
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/updater-manifest-tests.py"
+                    "$<TARGET_FILE:zsharp_test_updater_manifest>"
+                    "$<TARGET_FILE:zsharp_installer>")
+            set_tests_properties(zsharp_updater_manifest PROPERTIES TIMEOUT 45)
+        endif()
         add_test(NAME zsharp_interop_python_worker
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/python-interop-worker-tests.py")
         add_executable(zsharp_test_speech_stream_api tests/speech-stream-api-tests.c

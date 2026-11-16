@@ -38,7 +38,7 @@ typedef struct HubState {
 } HubState;
 
 #define ZSHARP_DEFAULT_ICON_URL \
-    "https://www.zsharp.zombieos.com/zsharp.png"
+    "https://zsharp.zombieos.com/zsharp.png"
 
 static int set_error(char *error, size_t error_size, const char *message) {
     if (error != NULL && error_size != 0)
@@ -179,7 +179,7 @@ static int download_default_icon(const char *destination) {
     session = WinHttpOpen(L"ZSharp-Hub/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (session == NULL) goto done;
-    connection = WinHttpConnect(session, L"www.zsharp.zombieos.com",
+    connection = WinHttpConnect(session, L"zsharp.zombieos.com",
                                 INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (connection == NULL) goto done;
     request = WinHttpOpenRequest(connection, L"GET", L"/zsharp.png", NULL,

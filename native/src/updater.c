@@ -126,6 +126,25 @@ static void current_version(char *version, size_t capacity) {
              ZSHARP_VERSION_PATCH, ZSHARP_VERSION_REVISION);
 }
 
+static const char *update_manifest_url(char *url, size_t capacity,
+                                       const char *version, int beta) {
+    const char *override = beta ? NULL
+        : getenv("ZSHARP_INSTALLER_MANIFEST_URL");
+#ifdef _WIN32
+    const char *operating_system = "windows";
+#elif defined(__APPLE__)
+    const char *operating_system = "macos";
+#else
+    const char *operating_system = "linux";
+#endif
+    if (override != NULL && override[0] != '\0') return override;
+    /* Older installed bootstrap binaries retain their original default URL.
+     * Always select the manifest here so a runtime update migrates them too. */
+    snprintf(url, capacity, "https://zsharp.zombieos.com/%s.js?v=%s-%s",
+             beta ? "beta" : "update", version, operating_system);
+    return url;
+}
+
 void zsharp_update_preferences_default(ZSharpUpdatePreferences *preferences) {
     if (preferences == NULL) return;
     preferences->automatic_updates = 1;
@@ -378,7 +397,7 @@ static int fetch_latest_version(char *version, size_t capacity, int beta) {
                           WINHTTP_NO_PROXY_BYPASS, 0);
     if (session == NULL) goto done;
     WinHttpSetTimeouts(session, 5000, 5000, 10000, 10000);
-    connection = WinHttpConnect(session, L"www.zsharp.zombieos.com",
+    connection = WinHttpConnect(session, L"zsharp.zombieos.com",
                                 INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (connection == NULL) goto done;
     request = WinHttpOpenRequest(connection, L"GET", path, NULL,
@@ -488,6 +507,8 @@ static void agent_begin_check(HWND window, int manual) {
 static int launch_installer_check(int beta) {
     char version[64];
     char process_id[32];
+    char manifest_buffer[256];
+    const char *manifest;
     char *runtime = executable_path();
     char *directory = runtime == NULL ? NULL : parent_directory(runtime);
     char *installer = directory == NULL ? NULL
@@ -502,19 +523,14 @@ static int launch_installer_check(int beta) {
     if (installer == NULL || wide_installer == NULL ||
         GetFileAttributesA(installer) == INVALID_FILE_ATTRIBUTES) goto done;
     current_version(version, sizeof(version));
+    manifest = update_manifest_url(manifest_buffer, sizeof(manifest_buffer),
+                                    version, beta);
     snprintf(process_id, sizeof(process_id), "%lu",
              (unsigned long)GetCurrentProcessId());
-    if (beta)
-        swprintf(command, sizeof(command) / sizeof(command[0]),
-                 L"\"%ls\" --check --quiet --current-version %hs "
-                 L"--notify-result --wait-pid %hs --manifest "
-                 L"\"https://www.zsharp.zombieos.com/beta.js?v=%hs-windows\"",
-                 wide_installer, version, process_id, version);
-    else
-        swprintf(command, sizeof(command) / sizeof(command[0]),
-                 L"\"%ls\" --check --quiet --current-version %hs "
-                 L"--notify-result --wait-pid %hs", wide_installer, version,
-                 process_id);
+    swprintf(command, sizeof(command) / sizeof(command[0]),
+             L"\"%ls\" --check --quiet --current-version %hs "
+             L"--notify-result --wait-pid %hs --manifest \"%hs\"",
+             wide_installer, version, process_id, manifest);
     memset(&startup, 0, sizeof(startup));
     memset(&process, 0, sizeof(process));
     startup.cb = sizeof(startup);
@@ -857,6 +873,8 @@ void zsharp_update_check_start(void) {
     ZSharpUpdatePreferences preferences;
     char version[64];
     char process_id[32];
+    char manifest_buffer[256];
+    const char *manifest;
     char *runtime;
     char *directory;
     char *installer;
@@ -876,6 +894,9 @@ void zsharp_update_check_start(void) {
     }
     snprintf(process_id, sizeof(process_id), "%lu", (unsigned long)getpid());
     current_version(version, sizeof(version));
+    manifest = update_manifest_url(manifest_buffer, sizeof(manifest_buffer),
+                                    version,
+                                    preferences.automatic_beta_updates);
     {
         pid_t child = fork();
         if (child == 0) {
@@ -892,15 +913,9 @@ void zsharp_update_check_start(void) {
                     if (null_file > STDERR_FILENO) close(null_file);
                 }
             }
-            if (preferences.automatic_beta_updates)
-                execl(installer, installer, "--check", "--quiet",
-                      "--current-version", version, "--wait-pid", process_id,
-                      "--manifest", "https://www.zsharp.zombieos.com/beta.js",
-                      (char *)NULL);
-            else
-                execl(installer, installer, "--check", "--quiet",
-                      "--current-version", version, "--wait-pid", process_id,
-                      (char *)NULL);
+            execl(installer, installer, "--check", "--quiet",
+                  "--current-version", version, "--wait-pid", process_id,
+                  "--manifest", manifest, (char *)NULL);
             _exit(127);
         }
         if (child > 0) waitpid(child, NULL, 0);
@@ -912,6 +927,8 @@ void zsharp_update_check_start(void) {
 int zsharp_update_now(char *error, size_t error_size) {
     char version[64];
     char process_id[32];
+    char manifest_buffer[256];
+    const char *manifest;
     ZSharpUpdatePreferences preferences;
     char *runtime = executable_path();
     char *directory = runtime == NULL ? NULL : parent_directory(runtime);
@@ -928,6 +945,8 @@ int zsharp_update_now(char *error, size_t error_size) {
     int started = 0;
     zsharp_update_preferences_load(&preferences, NULL, 0);
     current_version(version, sizeof(version));
+    manifest = update_manifest_url(manifest_buffer, sizeof(manifest_buffer),
+                                    version, preferences.beta_updates);
     snprintf(process_id, sizeof(process_id), "%lu",
              (unsigned long)GetCurrentProcessId());
     if (installer == NULL || wide_installer == NULL ||
@@ -936,17 +955,10 @@ int zsharp_update_now(char *error, size_t error_size) {
                  "zsharp-installer.exe was not found beside the ZVM");
         goto windows_done;
     }
-    if (preferences.beta_updates)
-        swprintf(command, sizeof(command) / sizeof(command[0]),
-                 L"\"%ls\" --check --quiet --notify-result "
-                 L"--current-version %hs --wait-pid %hs --manifest "
-                 L"\"https://www.zsharp.zombieos.com/beta.js?v=%hs-windows\"",
-                 wide_installer, version, process_id, version);
-    else
-        swprintf(command, sizeof(command) / sizeof(command[0]),
-                 L"\"%ls\" --check --quiet --notify-result "
-                 L"--current-version %hs --wait-pid %hs",
-                 wide_installer, version, process_id);
+    swprintf(command, sizeof(command) / sizeof(command[0]),
+             L"\"%ls\" --check --quiet --notify-result "
+             L"--current-version %hs --wait-pid %hs --manifest \"%hs\"",
+             wide_installer, version, process_id, manifest);
     memset(&startup, 0, sizeof(startup));
     memset(&process, 0, sizeof(process));
     startup.cb = sizeof(startup);
@@ -977,6 +989,8 @@ windows_done:
     pid_t child;
     zsharp_update_preferences_load(&preferences, NULL, 0);
     current_version(version, sizeof(version));
+    manifest = update_manifest_url(manifest_buffer, sizeof(manifest_buffer),
+                                    version, preferences.beta_updates);
     snprintf(process_id, sizeof(process_id), "%lu", (unsigned long)getpid());
     if (installer == NULL || access(installer, X_OK) != 0) {
         snprintf(error, error_size,
@@ -1008,16 +1022,10 @@ windows_done:
                 if (null_file > STDERR_FILENO) close(null_file);
             }
         }
-        if (preferences.beta_updates)
-            execl(installer, installer, "--check", "--quiet",
-                  "--notify-result", "--current-version", version,
-                  "--wait-pid", process_id, "--manifest",
-                  "https://www.zsharp.zombieos.com/beta.js",
-                  (char *)NULL);
-        else
-            execl(installer, installer, "--check", "--quiet",
-                  "--notify-result", "--current-version", version,
-                  "--wait-pid", process_id, (char *)NULL);
+        execl(installer, installer, "--check", "--quiet",
+              "--notify-result", "--current-version", version,
+              "--wait-pid", process_id, "--manifest", manifest,
+              (char *)NULL);
         _exit(127);
     }
     waitpid(child, NULL, 0);

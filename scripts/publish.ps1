@@ -111,9 +111,16 @@ Assert-VersionText -Path (Join-Path $ProjectRoot "java\build.gradle.kts") `
 Assert-VersionText -Path (Join-Path $ProjectRoot "project.zsettings") `
     -Pattern "Version:\s*\[$([regex]::Escape($version))\]:" `
     -Description "Z# project version"
-Assert-VersionText -Path (Join-Path $ProjectRoot "project.zsettings") `
-    -Pattern "ZSharp:\s*\[$([regex]::Escape($version))\]:" `
-    -Description "Z# language version"
+$projectSettings = Get-Content -LiteralPath `
+    (Join-Path $ProjectRoot "project.zsettings") -Raw
+$minimumLanguage = [regex]::Match($projectSettings,
+    '(?m)^\s*ZSharp:\s*\[([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\]:')
+if (-not $minimumLanguage.Success) {
+    throw "The Z# project must declare a four-part minimum language version"
+}
+if ([version]$minimumLanguage.Groups[1].Value -gt [version]$version) {
+    throw "The Z# project requires a language version newer than Z# $version"
+}
 
 $cmake = Find-Tool -Command "cmake" -FallbackPattern "cmake.exe"
 $ctest = Find-Tool -Command "ctest" -FallbackPattern "ctest.exe"

@@ -1,9 +1,18 @@
 # Z#
 
-Official website and downloads: <https://www.zsharp.zombieos.com>
+Official website and downloads: <https://zsharp.zombieos.com>
 
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
+
+## Version 1.4.0.1
+
+This patch moves official installer and update requests to
+`https://zsharp.zombieos.com`. The runtime explicitly selects the new stable or
+beta manifest even when it is paired with an older installed bootstrap, so an
+update delivered through the previous `www` host also migrates future checks.
+See [the server migration instructions](INSTALLING.md#1401-server-migration)
+before publishing this release on the previous host.
 
 ## Version 1.4.0.0
 
@@ -21,7 +30,7 @@ and the SDKs under `native/interop` for export rules, examples and limitations.
 
 Upgrade note: installers from older Z# releases do not understand the new
 language-helper archive. If an older installer or auto-updater upgrades the
-executable without those support files, rerun the current **1.4.0.0 installer**
+executable without those support files, rerun the current **1.4.0.1 installer**
 once before using the new bridges. Fresh development builds already copy the
 helpers beside their executable. Java/.NET/Ruby runtime installation is still
 separate; this helper archive does not bundle those third-party runtimes.
@@ -208,7 +217,7 @@ and `.zgame` are official extensions.
 
 End users can install the standalone ZVM with the small platform bootstrap in
 `%USERPROFILE%\Downloads\ZSharp Publishing\1.0.2.1`. It downloads the current runtime from
-`https://www.zsharp.zombieos.com/update.js?v=CURRENTVERSION-OS`, compares the
+`https://zsharp.zombieos.com/update.js?v=CURRENTVERSION-OS`, compares the
 installed version with the static GitHub Pages manifest, verifies
 `assets/download/ZVM-LATEST.zip` and the selected runtime, preserves the
 previous runtime, and configures the command and package associations for the

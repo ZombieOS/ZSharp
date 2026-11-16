@@ -1,6 +1,6 @@
 # Installing the Z# Virtual Machine
 
-Z# 1.2.0.0 provides small bootstrap installers for Windows, Linux, and macOS.
+Z# 1.4.0.1 provides small bootstrap installers for Windows, Linux, and macOS.
 The installer itself does not contain the ZVM. It asks the official update
 endpoint for the newest runtime for the current operating system and CPU,
 downloads `assets/download/ZVM-LATEST.zip` over HTTPS, verifies the archive,
@@ -19,22 +19,54 @@ The Z# Hub stores three per-user update preferences:
 Stable releases are published through `update.js`; beta releases are published
 through `beta.js`, so stable installations do not receive beta builds.
 
+## 1.4.0.1 server migration
+
+Version 1.4.0.1 moves official update requests from
+`https://www.zsharp.zombieos.com` to `https://zsharp.zombieos.com`.
+
+1. Build fresh 1.4.0.1 runtimes and installers. Stage the new website's
+   `update.js`, `beta.js`, downloads and checksums before distributing the patch.
+2. Restore DNS and HTTPS for the previous `www` hostname, and serve a stable
+   `update.js` advertising 1.4.0.1 there. Its download URL must point to a
+   reachable, verified 1.4.0.1 archive. The old server can host that archive too.
+   Also serve that migration release through the previous `beta.js` endpoint
+   for installations with beta updates enabled.
+3. Existing installations check the previous hostname and install 1.4.0.1.
+   The patched runtime then explicitly passes the new stable or beta manifest
+   to its installed updater, including an older bootstrap that retains the
+   previous default URL.
+4. Publish subsequent releases on the new hostname. Keep the previous HTTPS
+   update route available for users who have not received the migration patch.
+
+The installer builder's `-BaseUrl` controls generated archive URLs;
+`-InstallerBaseUrl` independently controls the future update and test-app URLs
+compiled into fresh installers. Both default to the new hostname. To host the
+migration archive on the previous server, pass
+`-BaseUrl https://www.zsharp.zombieos.com` while leaving `-InstallerBaseUrl`
+at its default. Compile fresh installers rather than using
+`-ReuseInstallersFrom` with previous binaries.
+
+Standalone copies of previous installers still use their original default;
+the runtime's explicit manifest handoff applies to runtime-managed updates.
+Older installers that do not understand language-helper archives still need
+the current installer once to install the 1.4 language bridges.
+
 ## Download to give users
 
 Most Windows computers use:
 
 ```text
-zsharp-installer-1.2.0.0-windows-x86_64.exe
+zsharp-installer-1.4.0.1-windows-x86_64.exe
 ```
 
 Other available downloads are:
 
 ```text
-zsharp-installer-1.2.0.0-windows-aarch64.exe
-zsharp-installer-1.2.0.0-linux-x86_64
-zsharp-installer-1.2.0.0-linux-aarch64
-zsharp-setup-1.2.0.0-macos-x86_64.app.zip
-zsharp-setup-1.2.0.0-macos-aarch64.app.zip
+zsharp-installer-1.4.0.1-windows-aarch64.exe
+zsharp-installer-1.4.0.1-linux-x86_64
+zsharp-installer-1.4.0.1-linux-aarch64
+zsharp-setup-1.4.0.1-macos-x86_64.app.zip
+zsharp-setup-1.4.0.1-macos-aarch64.app.zip
 ```
 
 Windows users can double-click the matching `.exe` to open Z# Setup. It shows
@@ -47,8 +79,8 @@ desktop supports executable launch and Zenity is installed; it then shows
 install, progress, and result dialogs. The terminal fallback is:
 
 ```text
-chmod +x zsharp-installer-1.2.0.0-PLATFORM
-./zsharp-installer-1.2.0.0-PLATFORM
+chmod +x zsharp-installer-1.4.0.1-PLATFORM
+./zsharp-installer-1.4.0.1-PLATFORM
 ```
 
 Linux requires `curl` for HTTPS downloads and Zenity for graphical dialogs.
@@ -145,26 +177,26 @@ zsharp-installer --install-dir "custom/location"
 The bootstrap request is:
 
 ```text
-https://www.zsharp.zombieos.com/update.js?v=0.0.0.0-windows
+https://zsharp.zombieos.com/update.js?v=0.0.0.0-windows
 ```
 
 `0.0.0.0` means that no ZVM is installed yet. The runtime auto-updater should
 send its installed four-part version instead, for example:
 
 ```text
-https://www.zsharp.zombieos.com/update.js?v=1.2.0.0-windows
+https://zsharp.zombieos.com/update.js?v=1.4.0.0-windows
 ```
 
-The query is retained for compatibility and cache separation, but GitHub Pages
-ignores it when selecting the static `update.js` file. The installer performs
-the version comparison locally. The manifest always contains the latest release:
+The query is retained for compatibility and cache separation. The server serves
+the same static `update.js` manifest for each installed version, and the installer
+performs the version comparison locally. The manifest contains the latest release:
 
 ```json
 {
   "schema": 1,
-  "latestVersion": "1.2.0.0",
+  "latestVersion": "1.4.0.1",
   "download": {
-    "url": "https://www.zsharp.zombieos.com/assets/download/ZVM-LATEST.zip",
+    "url": "https://zsharp.zombieos.com/assets/download/ZVM-LATEST.zip",
     "sha256": "archive-sha256",
     "size": 1234567
   },
@@ -233,27 +265,27 @@ By default, the command keeps generated publishing files outside the source
 repository and produces:
 
 ```text
-%USERPROFILE%\Downloads\ZSharp Publishing\1.2.0.0\zsharp-download-site-1.2.0.0.zip
-%USERPROFILE%\Downloads\ZSharp Publishing\1.2.0.0\zsharp-installer-1.2.0.0-PLATFORM
-%USERPROFILE%\Downloads\ZSharp Publishing\1.2.0.0\zsharp-installer-1.2.0.0-SHA256SUMS.txt
-%USERPROFILE%\Downloads\ZSharp Publishing\1.2.0.0\zsharp-update-1.2.0.0.js
+%USERPROFILE%\Downloads\ZSharp Publishing\1.4.0.1\zsharp-download-site-1.4.0.1.zip
+%USERPROFILE%\Downloads\ZSharp Publishing\1.4.0.1\zsharp-installer-1.4.0.1-PLATFORM
+%USERPROFILE%\Downloads\ZSharp Publishing\1.4.0.1\zsharp-installer-1.4.0.1-SHA256SUMS.txt
+%USERPROFILE%\Downloads\ZSharp Publishing\1.4.0.1\zsharp-update-1.4.0.1.js
 ```
 
 The download-site ZIP contains the static `update.js` manifest,
 `assets/download/ZVM-LATEST.zip`, the six installer downloads, and
 `assets/download/ZSharp-Test-App.zapp` when a test app package was supplied or
 found in the default Downloads project location. Extract its contents into the
-root of the GitHub Pages site. `zsharp-update-1.2.0.0.js` is a second copy of
+root of the download website. `zsharp-update-1.4.0.1.js` is a second copy of
 the same manifest for release records.
 
-After GitHub Pages publishes the files, test:
+After publishing the files, test:
 
 ```text
-https://www.zsharp.zombieos.com/update.js?v=1.2.0.0-windows
-https://www.zsharp.zombieos.com/update.js?v=1.2.0.0-linux
-https://www.zsharp.zombieos.com/update.js?v=1.2.0.0-macos
-https://www.zsharp.zombieos.com/update.js?v=1.0.0.1-windows
-https://www.zsharp.zombieos.com/assets/download/ZVM-LATEST.zip
+https://zsharp.zombieos.com/update.js?v=1.4.0.0-windows
+https://zsharp.zombieos.com/update.js?v=1.4.0.0-linux
+https://zsharp.zombieos.com/update.js?v=1.4.0.0-macos
+https://zsharp.zombieos.com/update.js?v=1.0.0.1-windows
+https://zsharp.zombieos.com/assets/download/ZVM-LATEST.zip
 ```
 
 All four update URLs should return the same valid JSON manifest, and the archive

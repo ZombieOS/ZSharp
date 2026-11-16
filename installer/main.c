@@ -66,10 +66,12 @@ static char installer_desktop_error[512];
 #define INSTALLER_ARCHIVE_LIMIT (512u * 1024u * 1024u)
 #ifndef INSTALLER_UPDATE_ENDPOINT
 #define INSTALLER_UPDATE_ENDPOINT \
-    "https://www.zsharp.zombieos.com/update.js?v="
+    "https://zsharp.zombieos.com/update.js?v="
 #endif
+#ifndef INSTALLER_TEST_APP_URL
 #define INSTALLER_TEST_APP_URL \
-    "https://www.zsharp.zombieos.com/assets/download/ZSharp-Test-App.zapp"
+    "https://zsharp.zombieos.com/assets/download/ZSharp-Test-App.zapp"
+#endif
 
 typedef struct ReleaseInfo {
     int update_available;

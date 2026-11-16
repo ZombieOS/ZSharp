@@ -333,7 +333,7 @@ static int bootstrap_python_archive(const char *directory,
     char actual[ZSHARP_SHA256_SIZE * 2 + 1];
     FILE *file;
     snprintf(base_url, sizeof(base_url),
-             "https://www.zsharp.zombieos.com/assets/download/installers/"
+             "https://zsharp.zombieos.com/assets/download/installers/"
              "%d.%d.%d.%d/%s", ZSHARP_VERSION_MAJOR,
              ZSHARP_VERSION_MINOR, ZSHARP_VERSION_PATCH,
              ZSHARP_VERSION_REVISION, python_platform_id());

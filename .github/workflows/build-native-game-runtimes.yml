@@ -4,6 +4,10 @@ on:
   workflow_call:
   workflow_dispatch:
   push:
+    branches:
+      - "main"
+    paths:
+      - "native/include/zsharp.h"
     tags:
       - "v*"
 

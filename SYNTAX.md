@@ -1074,7 +1074,7 @@ ZSharp: [1.0.2.1]:
 
 `Icon` accepts a project-relative PNG. Paths use `/`
 and cannot leave the project. If `Icon` is omitted, the Hub downloads and
-caches the official Z# logo from `https://www.zsharp.zombieos.com/zsharp.png`.
+caches the official Z# logo from `https://zsharp.zombieos.com/zsharp.png`.
 The same project icon is used for Desktop shortcuts created by Z#; a window's
 design icon remains the fallback for older projects without `Icon`.
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0.1 - 2026-11-15
+
+- Moved the official website, installer manifests, Hub logo and runtime
+  component downloads from `www.zsharp.zombieos.com` to `zsharp.zombieos.com`.
+- Made the runtime explicitly pass the new stable or beta manifest to its
+  installed updater. Existing installations that receive this patch from the
+  previous host use the new host on subsequent update checks, even if their
+  bootstrap executable still has the previous default URL.
+- Separated the installer build's future update host from its archive host,
+  allowing the previous server to distribute this migration release while
+  newly built installers default to the new server.
+
 ## 1.4.0.0 - 2026-10-22
 
 - Added desktop C#, Java, Go and Ruby language bridges, using `cs:`, `java:`,

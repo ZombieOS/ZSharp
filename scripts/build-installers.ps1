@@ -3,9 +3,13 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Zig,
 
-    [string] $Version = "1.2.0.0",
+    [string] $Version = "1.4.0.1",
 
-    [string] $BaseUrl = "https://www.zsharp.zombieos.com",
+    # The archive may stay on the previous host for a migration release.
+    [string] $BaseUrl = "https://zsharp.zombieos.com",
+
+    # Keep installed update checks independent of the release archive's host.
+    [string] $InstallerBaseUrl = "https://zsharp.zombieos.com",
 
     [string] $ArchiveUrl = "",
 
@@ -27,6 +31,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$BaseUrl = $BaseUrl.TrimEnd('/')
+$InstallerBaseUrl = $InstallerBaseUrl.TrimEnd('/')
+$installerManifest = if ($Beta) { "beta.js" } else { "update.js" }
+$installerUpdateEndpoint = "${InstallerBaseUrl}/${installerManifest}?v="
+$installerTestAppUrl = "$InstallerBaseUrl/assets/download/ZSharp-Test-App.zapp"
+$installerDefines = @(
+    "-DINSTALLER_UPDATE_ENDPOINT=`"$installerUpdateEndpoint`"",
+    "-DINSTALLER_TEST_APP_URL=`"$installerTestAppUrl`""
+)
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $zigPath = (Resolve-Path -LiteralPath $Zig).Path
@@ -145,12 +159,7 @@ foreach ($target in $targets) {
         "-o", $installerPath,
         $source,
         $hashSource
-    ) + $target.Libraries
-    if ($Beta) {
-        $arguments = @($arguments[0],
-            "-DINSTALLER_UPDATE_ENDPOINT=`"https://www.zsharp.zombieos.com/beta.js?v=`"") +
-            $arguments[1..($arguments.Count - 1)]
-    }
+    ) + $installerDefines + $target.Libraries
     if ([string]::IsNullOrWhiteSpace($ReuseInstallersFrom)) {
         if ($target.Id.StartsWith("windows-")) {
             # Compile the same verified installer as a real GUI-subsystem app.
@@ -159,10 +168,7 @@ foreach ($target in $targets) {
             $hashObject = (Join-Path $targetBuild "hash.obj").Replace('\', '/')
             $resourceFile = (Join-Path $targetBuild "windows.res").Replace('\', '/')
             $outputFile = $installerPath.Replace('\', '/')
-            $guiDefines = @("-DZSHARP_INSTALLER_GUI=1")
-            if ($Beta) {
-                $guiDefines += '-DINSTALLER_UPDATE_ENDPOINT="https://www.zsharp.zombieos.com/beta.js?v="'
-            }
+            $guiDefines = @("-DZSHARP_INSTALLER_GUI=1") + $installerDefines
             & $zigPath cc -target $target.Triple -std=gnu17 -O2 `
                 -Wall -Wextra -Wpedantic "-I$includeRoot" `
                 "-I$installerIncludeRoot" @guiDefines `
