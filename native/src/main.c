@@ -910,7 +910,6 @@ static void register_application_icon(const ZSharpSettings *settings,
     char *icon;
     char icon_error[512] = {0};
     size_t index, property_index;
-    if (getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") != NULL) return;
     if (program != NULL) {
         for (index = 0; index < program->window.element_count; index++) {
             const ZSharpUIElement *element = &program->window.elements[index];
@@ -927,9 +926,13 @@ static void register_application_icon(const ZSharpSettings *settings,
     icon = zsharp_app_icon_for_window(project_root, settings->project_id,
                                       legacy_icon, icon_error,
                                       sizeof(icon_error));
-    if (icon == NULL || !zsharp_desktop_register_application(
+    if (!zsharp_app_export_launch_metadata(settings->project_id,
+            settings->project_name, icon, icon_error, sizeof(icon_error)))
+        fprintf(stderr, "application identity warning: %s\n", icon_error);
+    if (getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") == NULL &&
+        (icon == NULL || !zsharp_desktop_register_application(
             settings->project_name, settings->project_id, entry_path,
-            entry_kind, icon, icon_error, sizeof(icon_error)))
+            entry_kind, icon, icon_error, sizeof(icon_error))))
         fprintf(stderr, "launcher warning: %s\n",
                 icon_error[0] ? icon_error : "could not prepare the application icon");
     free(icon);

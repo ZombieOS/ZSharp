@@ -793,14 +793,19 @@ int zsharp_hub_show(char *error, size_t error_size) {
         zsharp_program_free(&program);
         return 0;
     }
-    if (getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") == NULL) {
+    {
         char registration_error[512] = {0};
         char *icon = zsharp_app_icon_default_path(registration_error,
                                                    sizeof(registration_error));
-        int registered = icon != NULL &&
-            zsharp_desktop_register_application("Z# Hub", "zsharp-hub", NULL, 3,
-                                                 icon, registration_error,
-                                                 sizeof(registration_error));
+        int registered = 1;
+        if (!zsharp_app_export_launch_metadata("zsharp-hub", "Z# Hub", icon,
+                registration_error, sizeof(registration_error)))
+            fprintf(stderr, "application identity warning: %s\n", registration_error);
+        if (getenv("ZSHARP_SKIP_DESKTOP_INTEGRATION") == NULL)
+            registered = icon != NULL &&
+                zsharp_desktop_register_application("Z# Hub", "zsharp-hub", NULL, 3,
+                                                     icon, registration_error,
+                                                     sizeof(registration_error));
         free(icon);
         if (!registered)
             fprintf(stderr, "desktop warning: %s\n",

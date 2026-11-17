@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(zsharp VERSION 1.4.1.1 LANGUAGES C)
+project(zsharp VERSION 1.4.1.2 LANGUAGES C)
 if(MSVC)
     # The bootstrap installs one native executable, not a machine-wide VC++
     # redistributable. Keep the C and C++ runtimes inside that executable.
@@ -915,6 +915,12 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/desktop-icon-tests.py"
                 "$<TARGET_FILE:zsharp_test_desktop_icon>")
         set_tests_properties(zsharp_desktop_icon PROPERTIES TIMEOUT 60)
+        add_test(NAME zsharp_package_cache
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/package-cache-tests.py"
+                "$<TARGET_FILE:zsharp>")
+        set_tests_properties(zsharp_package_cache PROPERTIES
+            TIMEOUT 90 SKIP_RETURN_CODE 77)
     endif()
     add_executable(zsharp_test_game_projection
         tests/game-projection-tests.c

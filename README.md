@@ -5,6 +5,18 @@ Official website and downloads: <https://zsharp.zombieos.com>
 Z# is a systems programming language implemented in C. Its official source-file
 extension is **`.zsharp`**.
 
+## Version 1.4.1.2
+
+Unbytecoded packages reuse intact extracted files after checking them against
+the archive. Package SHA-256 and ZIP CRC checks remain enabled, while a
+table-based IEEE CRC32 implementation reduces verification overhead. Missing
+or changed cached files are repaired without rewriting intact neighbors.
+
+Linux application launchers can be pinned through the desktop's normal menu.
+Graphical projects also publish their canonical launcher identity and resolved
+icon to hosted language integrations, so foreign GUI windows can match their
+Z# application's taskbar entry.
+
 ## Version 1.4.1.1
 
 The installer saves persistent shell PATH settings on Linux and macOS, so
@@ -373,6 +385,41 @@ playtime, and last-played time. Achievements are marked **Coming soon**. The
 script-friendly forms are `zsharp hub list`, `zsharp hub add <package>`, and
 `zsharp hub remove <PID>`. `zsharp hub shortcut` repairs or recreates the
 desktop Hub launcher. Missing package files are omitted automatically.
+
+On Linux, app and game launchers are visible in the application menu and can
+be pinned using the desktop's normal **Pin to Dash** or equivalent action.
+Their stable identity is based on the project's PID, so a pinned launcher
+opens that app's registered package or startup file.
+
+Before a graphical project's startup runs, Z# publishes its identity to
+language integrations through `ZSHARP_PROJECT_ID`, `ZSHARP_APP_NAME`,
+`ZSHARP_DESKTOP_ID`, and `ZSHARP_APP_ICON`. The desktop ID is the launcher
+basename without `.desktop`; the icon is the resolved absolute PNG path,
+including the bundled Z# fallback when no project icon is provided. This
+metadata is still available when `ZSHARP_SKIP_DESKTOP_INTEGRATION` disables
+writing launchers.
+
+Foreign GUI frameworks must associate their own windows with that identity.
+For example, a Python application using Qt can configure its application
+before creating its windows:
+
+```python
+import os
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication
+
+app = QApplication.instance() or QApplication([])
+desktop_id = os.environ.get("ZSHARP_DESKTOP_ID")
+if desktop_id:
+    app.setDesktopFileName(desktop_id)
+icon = os.environ.get("ZSHARP_APP_ICON")
+if icon:
+    app.setWindowIcon(QIcon(icon))
+```
+
+Native Z# windows use the project identity and icon automatically. Giving a
+foreign window its desktop ID lets the desktop find the same icon and pinned
+launcher, including when a native Z# startup window is hidden.
 `zsharp update` starts the installed verified updater without opening another
 terminal and checks the official update manifest immediately. A desktop
 notification reports either `Z# is up to date.` or a successful version

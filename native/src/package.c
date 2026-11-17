@@ -21,6 +21,8 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <fcntl.h>
+#include <io.h>
 #include <sys/stat.h>
 #include <windows.h>
 #else
@@ -446,15 +448,45 @@ static int copy_file_to_stream(const char *path, FILE *output) {
 
 static uint32_t crc32_update(uint32_t crc, const unsigned char *data,
                              size_t length) {
+    /* Reflected IEEE CRC-32; crc is the finalized checksum of prior chunks. */
+    static const uint32_t table[256] = {
+        0x00000000u, 0x77073096u, 0xee0e612cu, 0x990951bau, 0x076dc419u, 0x706af48fu, 0xe963a535u, 0x9e6495a3u,
+        0x0edb8832u, 0x79dcb8a4u, 0xe0d5e91eu, 0x97d2d988u, 0x09b64c2bu, 0x7eb17cbdu, 0xe7b82d07u, 0x90bf1d91u,
+        0x1db71064u, 0x6ab020f2u, 0xf3b97148u, 0x84be41deu, 0x1adad47du, 0x6ddde4ebu, 0xf4d4b551u, 0x83d385c7u,
+        0x136c9856u, 0x646ba8c0u, 0xfd62f97au, 0x8a65c9ecu, 0x14015c4fu, 0x63066cd9u, 0xfa0f3d63u, 0x8d080df5u,
+        0x3b6e20c8u, 0x4c69105eu, 0xd56041e4u, 0xa2677172u, 0x3c03e4d1u, 0x4b04d447u, 0xd20d85fdu, 0xa50ab56bu,
+        0x35b5a8fau, 0x42b2986cu, 0xdbbbc9d6u, 0xacbcf940u, 0x32d86ce3u, 0x45df5c75u, 0xdcd60dcfu, 0xabd13d59u,
+        0x26d930acu, 0x51de003au, 0xc8d75180u, 0xbfd06116u, 0x21b4f4b5u, 0x56b3c423u, 0xcfba9599u, 0xb8bda50fu,
+        0x2802b89eu, 0x5f058808u, 0xc60cd9b2u, 0xb10be924u, 0x2f6f7c87u, 0x58684c11u, 0xc1611dabu, 0xb6662d3du,
+        0x76dc4190u, 0x01db7106u, 0x98d220bcu, 0xefd5102au, 0x71b18589u, 0x06b6b51fu, 0x9fbfe4a5u, 0xe8b8d433u,
+        0x7807c9a2u, 0x0f00f934u, 0x9609a88eu, 0xe10e9818u, 0x7f6a0dbbu, 0x086d3d2du, 0x91646c97u, 0xe6635c01u,
+        0x6b6b51f4u, 0x1c6c6162u, 0x856530d8u, 0xf262004eu, 0x6c0695edu, 0x1b01a57bu, 0x8208f4c1u, 0xf50fc457u,
+        0x65b0d9c6u, 0x12b7e950u, 0x8bbeb8eau, 0xfcb9887cu, 0x62dd1ddfu, 0x15da2d49u, 0x8cd37cf3u, 0xfbd44c65u,
+        0x4db26158u, 0x3ab551ceu, 0xa3bc0074u, 0xd4bb30e2u, 0x4adfa541u, 0x3dd895d7u, 0xa4d1c46du, 0xd3d6f4fbu,
+        0x4369e96au, 0x346ed9fcu, 0xad678846u, 0xda60b8d0u, 0x44042d73u, 0x33031de5u, 0xaa0a4c5fu, 0xdd0d7cc9u,
+        0x5005713cu, 0x270241aau, 0xbe0b1010u, 0xc90c2086u, 0x5768b525u, 0x206f85b3u, 0xb966d409u, 0xce61e49fu,
+        0x5edef90eu, 0x29d9c998u, 0xb0d09822u, 0xc7d7a8b4u, 0x59b33d17u, 0x2eb40d81u, 0xb7bd5c3bu, 0xc0ba6cadu,
+        0xedb88320u, 0x9abfb3b6u, 0x03b6e20cu, 0x74b1d29au, 0xead54739u, 0x9dd277afu, 0x04db2615u, 0x73dc1683u,
+        0xe3630b12u, 0x94643b84u, 0x0d6d6a3eu, 0x7a6a5aa8u, 0xe40ecf0bu, 0x9309ff9du, 0x0a00ae27u, 0x7d079eb1u,
+        0xf00f9344u, 0x8708a3d2u, 0x1e01f268u, 0x6906c2feu, 0xf762575du, 0x806567cbu, 0x196c3671u, 0x6e6b06e7u,
+        0xfed41b76u, 0x89d32be0u, 0x10da7a5au, 0x67dd4accu, 0xf9b9df6fu, 0x8ebeeff9u, 0x17b7be43u, 0x60b08ed5u,
+        0xd6d6a3e8u, 0xa1d1937eu, 0x38d8c2c4u, 0x4fdff252u, 0xd1bb67f1u, 0xa6bc5767u, 0x3fb506ddu, 0x48b2364bu,
+        0xd80d2bdau, 0xaf0a1b4cu, 0x36034af6u, 0x41047a60u, 0xdf60efc3u, 0xa867df55u, 0x316e8eefu, 0x4669be79u,
+        0xcb61b38cu, 0xbc66831au, 0x256fd2a0u, 0x5268e236u, 0xcc0c7795u, 0xbb0b4703u, 0x220216b9u, 0x5505262fu,
+        0xc5ba3bbeu, 0xb2bd0b28u, 0x2bb45a92u, 0x5cb36a04u, 0xc2d7ffa7u, 0xb5d0cf31u, 0x2cd99e8bu, 0x5bdeae1du,
+        0x9b64c2b0u, 0xec63f226u, 0x756aa39cu, 0x026d930au, 0x9c0906a9u, 0xeb0e363fu, 0x72076785u, 0x05005713u,
+        0x95bf4a82u, 0xe2b87a14u, 0x7bb12baeu, 0x0cb61b38u, 0x92d28e9bu, 0xe5d5be0du, 0x7cdcefb7u, 0x0bdbdf21u,
+        0x86d3d2d4u, 0xf1d4e242u, 0x68ddb3f8u, 0x1fda836eu, 0x81be16cdu, 0xf6b9265bu, 0x6fb077e1u, 0x18b74777u,
+        0x88085ae6u, 0xff0f6a70u, 0x66063bcau, 0x11010b5cu, 0x8f659effu, 0xf862ae69u, 0x616bffd3u, 0x166ccf45u,
+        0xa00ae278u, 0xd70dd2eeu, 0x4e048354u, 0x3903b3c2u, 0xa7672661u, 0xd06016f7u, 0x4969474du, 0x3e6e77dbu,
+        0xaed16a4au, 0xd9d65adcu, 0x40df0b66u, 0x37d83bf0u, 0xa9bcae53u, 0xdebb9ec5u, 0x47b2cf7fu, 0x30b5ffe9u,
+        0xbdbdf21cu, 0xcabac28au, 0x53b39330u, 0x24b4a3a6u, 0xbad03605u, 0xcdd70693u, 0x54de5729u, 0x23d967bfu,
+        0xb3667a2eu, 0xc4614ab8u, 0x5d681b02u, 0x2a6f2b94u, 0xb40bbe37u, 0xc30c8ea1u, 0x5a05df1bu, 0x2d02ef8du
+    };
     size_t index;
     crc = ~crc;
-    for (index = 0; index < length; index++) {
-        unsigned bit;
-        crc ^= data[index];
-        for (bit = 0; bit < 8; bit++)
-            crc = (crc >> 1) ^
-                  (0xedb88320u & (uint32_t)-(int)(crc & 1u));
-    }
+    for (index = 0; index < length; index++)
+        crc = (crc >> 8) ^ table[(crc ^ data[index]) & 0xffu];
     return ~crc;
 }
 
@@ -1620,50 +1652,248 @@ static int write_entry(FILE *package, const char *target, uint64_t size,
     return zsharp_package_enable_go_companion(target, error, error_size);
 }
 
+static int verify_zip_entry(FILE *package, FILE *cached, FILE *output,
+                            const char *target, uint32_t size,
+                            uint32_t expected_crc, int *matches,
+                            char *error, size_t error_size) {
+    unsigned char buffer[64 * 1024];
+    unsigned char cached_buffer[64 * 1024];
+    uint32_t remaining = size;
+    uint32_t actual_crc = 0;
+    int same = cached != NULL;
+    while (remaining > 0) {
+        size_t wanted = remaining > sizeof(buffer) ? sizeof(buffer)
+                                                    : (size_t)remaining;
+        if (fread(buffer, 1, wanted, package) != wanted ||
+            (output != NULL && fwrite(buffer, 1, wanted, output) != wanted)) {
+            package_error(error, error_size,
+                          "unbytecoded package data is truncated");
+            return 0;
+        }
+        if (same && (fread(cached_buffer, 1, wanted, cached) != wanted ||
+                     memcmp(buffer, cached_buffer, wanted) != 0)) same = 0;
+        actual_crc = crc32_update(actual_crc, buffer, wanted);
+        remaining -= (uint32_t)wanted;
+    }
+    if (same && (fgetc(cached) != EOF || ferror(cached))) same = 0;
+    if (actual_crc != expected_crc) {
+        package_error(error, error_size,
+                      "package entry '%s' failed ZIP CRC verification", target);
+        return 0;
+    }
+    if (matches != NULL) *matches = same;
+    return 1;
+}
+
 static int write_zip_entry(FILE *package, const char *target, uint32_t size,
                            uint32_t expected_crc, char *error,
                            size_t error_size) {
     FILE *output;
-    unsigned char buffer[64 * 1024];
-    uint32_t remaining = size;
-    uint32_t actual_crc = 0;
+    int ok;
     if (!make_parent_directories(target, error, error_size)) return 0;
     output = fopen(target, "wb");
     if (output == NULL) {
         package_error(error, error_size, "could not extract '%s'", target);
         return 0;
     }
-    while (remaining > 0) {
-        size_t wanted = remaining > sizeof(buffer) ? sizeof(buffer)
-                                                    : (size_t)remaining;
-        if (fread(buffer, 1, wanted, package) != wanted ||
-            fwrite(buffer, 1, wanted, output) != wanted) {
-            fclose(output);
-            package_error(error, error_size,
-                          "unbytecoded package data is truncated");
-            return 0;
-        }
-        actual_crc = crc32_update(actual_crc, buffer, wanted);
-        remaining -= (uint32_t)wanted;
+    ok = verify_zip_entry(package, NULL, output, target, size, expected_crc,
+                          NULL, error, error_size);
+    if (fclose(output) != 0) {
+        package_error(error, error_size, "could not finish extracting '%s'", target);
+        ok = 0;
     }
-    if (fclose(output) != 0 || actual_crc != expected_crc) {
-        package_error(error, error_size,
-                      "package entry '%s' failed ZIP CRC verification", target);
+    if (!ok) return 0;
+    return zsharp_package_enable_go_companion(target, error, error_size);
+}
+
+/* The configured cache base is user-controlled and may legitimately resolve
+ * through HOME/XDG symlinks. Below it, package-owned paths must never redirect
+ * reads or replacement writes through symlinks/reparse points. */
+static int source_cache_path(const char *base, const char *path, int directory,
+                              int *exists, char *error, size_t error_size) {
+    size_t base_length = strlen(base);
+    char *copy = copy_text(path), *cursor;
+    int ok = 1;
+    if (exists != NULL) *exists = 0;
+    if (copy == NULL) {
+        package_error(error, error_size, "out of memory");
         return 0;
     }
-    return zsharp_package_enable_go_companion(target, error, error_size);
+    if (strncmp(base, path, base_length) != 0 || strlen(path) <= base_length) {
+        free(copy);
+        package_error(error, error_size, "invalid package cache path");
+        return 0;
+    }
+    for (cursor = copy + base_length; ; cursor++) {
+        int leaf, wanted_directory, present;
+        char saved;
+        if (*cursor != '\0' && *cursor != '/' && *cursor != '\\') continue;
+        if (cursor == copy + base_length) continue;
+        leaf = *cursor == '\0';
+        wanted_directory = !leaf || directory;
+        saved = *cursor;
+        *cursor = '\0';
+#ifdef _WIN32
+        {
+            DWORD attributes = GetFileAttributesA(copy);
+            present = attributes != INVALID_FILE_ATTRIBUTES;
+            if (!present && wanted_directory &&
+                (GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND)) {
+                if (CreateDirectoryA(copy, NULL) || GetLastError() == ERROR_ALREADY_EXISTS)
+                    attributes = GetFileAttributesA(copy);
+                present = attributes != INVALID_FILE_ATTRIBUTES;
+            }
+            if ((present && ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+                 (attributes & FILE_ATTRIBUTE_DEVICE) ||
+                 !!(attributes & FILE_ATTRIBUTE_DIRECTORY) != wanted_directory)) ||
+                (!present && (wanted_directory ||
+                 (GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND))))
+                ok = 0;
+        }
+#else
+        {
+            struct stat status;
+            present = lstat(copy, &status) == 0;
+            if (!present && errno == ENOENT && wanted_directory) {
+                if (mkdir(copy, 0700) == 0 || errno == EEXIST)
+                    present = lstat(copy, &status) == 0;
+            }
+            if ((present && (S_ISLNK(status.st_mode) ||
+                 (wanted_directory ? !S_ISDIR(status.st_mode) : !S_ISREG(status.st_mode)))) ||
+                (!present && (wanted_directory || errno != ENOENT))) ok = 0;
+        }
+#endif
+        if (ok && leaf && exists != NULL) *exists = present;
+        if (!ok) package_error(error, error_size, "unsafe or unavailable package cache path '%s'", copy);
+        *cursor = saved;
+        if (!ok || leaf) break;
+    }
+    free(copy);
+    return ok;
+}
+
+static FILE *source_cache_open(const char *path) {
+    FILE *file;
+    int descriptor;
+#ifdef _WIN32
+    BY_HANDLE_FILE_INFORMATION information;
+    HANDLE handle = CreateFileA(path, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (handle == INVALID_HANDLE_VALUE) return NULL;
+    if (!GetFileInformationByHandle(handle, &information) ||
+        (information.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT |
+          FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE))) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    descriptor = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (descriptor < 0) { CloseHandle(handle); return NULL; }
+    file = _fdopen(descriptor, "rb");
+    if (file == NULL) _close(descriptor);
+#else
+    struct stat status;
+    descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (descriptor < 0) return NULL;
+    if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode)) {
+        close(descriptor);
+        return NULL;
+    }
+    file = fdopen(descriptor, "rb");
+    if (file == NULL) close(descriptor);
+#endif
+    return file;
+}
+
+static FILE *source_cache_temporary(const char *target, char **path) {
+    size_t capacity = strlen(target) + 64;
+    FILE *file = NULL;
+    int descriptor = -1;
+    *path = (char *)malloc(capacity);
+    if (*path == NULL) return NULL;
+#ifdef _WIN32
+    for (unsigned attempt = 0; attempt < 100; attempt++) {
+        snprintf(*path, capacity, "%s.zsharp-tmp-%lu-%u", target,
+                 (unsigned long)GetCurrentProcessId(), attempt);
+        descriptor = _open(*path, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY |
+                            _O_NOINHERIT, _S_IREAD | _S_IWRITE);
+        if (descriptor >= 0 || errno != EEXIST) break;
+    }
+    if (descriptor >= 0) file = _fdopen(descriptor, "wb");
+    if (descriptor >= 0 && file == NULL) _close(descriptor);
+#else
+    snprintf(*path, capacity, "%s.zsharp-tmp-XXXXXX", target);
+    descriptor = mkstemp(*path);
+    if (descriptor >= 0) file = fdopen(descriptor, "wb");
+    if (descriptor >= 0 && file == NULL) close(descriptor);
+#endif
+    if (file == NULL) {
+        if (descriptor >= 0) remove(*path);
+        free(*path);
+        *path = NULL;
+    }
+    return file;
+}
+
+static int source_cache_replace(const char *temporary, const char *target,
+                                 char *error, size_t error_size) {
+#ifdef _WIN32
+    int ok = MoveFileExA(temporary, target,
+                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    int ok = rename(temporary, target) == 0;
+#endif
+    if (!ok) package_error(error, error_size, "could not replace cached package file '%s'", target);
+    return ok;
+}
+
+static int source_cache_write(FILE *package, const char *base, const char *target,
+                               uint32_t size, uint32_t expected_crc,
+                               char *error, size_t error_size) {
+    char *temporary = NULL;
+    FILE *output = source_cache_temporary(target, &temporary);
+    int ok;
+    if (output == NULL) {
+        package_error(error, error_size, "could not stage cached package file '%s'", target);
+        return 0;
+    }
+    ok = verify_zip_entry(package, NULL, output, target, size, expected_crc,
+                          NULL, error, error_size);
+    if (fclose(output) != 0) {
+        package_error(error, error_size, "could not finish extracting '%s'", target);
+        ok = 0;
+    }
+    if (ok) ok = source_cache_path(base, target, 0, NULL, error, error_size) &&
+                 source_cache_replace(temporary, target, error, error_size);
+    if (!ok) remove(temporary);
+    free(temporary);
+    return ok && zsharp_package_enable_go_companion(target, error, error_size);
+}
+
+static int source_cache_reserved_path(const char *relative) {
+    static const char marker[] = ".zsharp-package-complete";
+    size_t index;
+    for (index = 0; index < sizeof(marker) - 1; index++) {
+        unsigned char character = (unsigned char)relative[index];
+        if (character >= 'A' && character <= 'Z') character += 'a' - 'A';
+        if (character != (unsigned char)marker[index]) return 0;
+    }
+    return relative[index] == '\0' || relative[index] == '/';
 }
 
 static int extract_source_zip(const char *package_path, char **project_root,
                               ZSharpPackageInfo *info, int *new_install,
                               char *error, size_t error_size) {
     FILE *package = NULL;
+    char *base = NULL;
     char *root = NULL;
     char *marker = NULL;
     uint16_t entry_count;
     uint32_t central_offset;
     uint16_t index;
     int marker_existed = 0;
+    int marker_valid = 0;
+    int cache_changed = 0;
     int ok = 0;
     if (!zsharp_package_read_info(package_path, info, error, error_size))
         return 0;
@@ -1673,37 +1903,79 @@ static int extract_source_zip(const char *package_path, char **project_root,
         entry_count != info->file_count || fseek(package, 0, SEEK_SET) != 0)
         goto done;
     root = package_cache_root(package_path, info, error, error_size);
+    base = cache_base(error, error_size);
     marker = root == NULL ? NULL : join_path(root,
                                              ".zsharp-package-complete");
-    if (root == NULL || marker == NULL) goto done;
-#ifdef _WIN32
-    marker_existed = GetFileAttributesA(marker) != INVALID_FILE_ATTRIBUTES;
-#else
+    if (base == NULL || root == NULL || marker == NULL) goto done;
+    if (!make_directories(base, error, error_size) ||
+        !source_cache_path(base, root, 1, NULL, error, error_size) ||
+        !source_cache_path(base, marker, 0, &marker_existed, error, error_size)) goto done;
     {
-        struct stat marker_status;
-        marker_existed = stat(marker, &marker_status) == 0 &&
-                         S_ISREG(marker_status.st_mode);
+        static const char complete_text[] = "verified\n";
+        char contents[sizeof(complete_text) - 1];
+        FILE *complete = source_cache_open(marker);
+        if (complete != NULL) {
+            marker_valid = fread(contents, 1, sizeof(contents), complete) == sizeof(contents) &&
+                           memcmp(contents, complete_text, sizeof(contents)) == 0 &&
+                           fgetc(complete) == EOF && !ferror(complete);
+            if (fclose(complete) != 0) marker_valid = 0;
+        }
     }
-#endif
-    if (!make_directories(root, error, error_size)) goto done;
     for (index = 0; index < entry_count; index++) {
         char *relative = NULL;
         char *target;
+        FILE *cached;
+        long data_offset;
+        int matches = 0;
         uint32_t size;
         uint32_t expected_crc;
         if (!zip_local_header(package, &relative, &size, &expected_crc, error,
                               error_size)) goto done;
+        if (source_cache_reserved_path(relative)) {
+            free(relative);
+            package_error(error, error_size, "source package contains a reserved cache marker");
+            goto done;
+        }
         target = join_path(root, relative);
         free(relative);
         if (target == NULL) {
             package_error(error, error_size, "out of memory");
             goto done;
         }
-        if (!write_zip_entry(package, target, size, expected_crc, error,
-                             error_size)) {
+        if (!source_cache_path(base, target, 0, NULL, error, error_size) ||
+            (data_offset = ftell(package)) < 0) {
             free(target);
             goto done;
         }
+        cached = source_cache_open(target);
+        if (cached != NULL) {
+            int verified = verify_zip_entry(package, cached, NULL, target, size,
+                                             expected_crc, &matches, error, error_size);
+            if (fclose(cached) != 0) matches = 0;
+            if (!verified || (!matches && fseek(package, data_offset, SEEK_SET) != 0)) {
+                free(target);
+                goto done;
+            }
+        }
+        if (!matches) {
+            if (!source_cache_write(package, base, target, size, expected_crc,
+                                     error, error_size)) {
+                free(target);
+                goto done;
+            }
+            cache_changed = 1;
+        }
+#ifndef _WIN32
+        else if (ends_with(target, ".zgo")) {
+            struct stat status;
+            if (lstat(target, &status) != 0 ||
+                (!(status.st_mode & S_IXUSR) &&
+                 !zsharp_package_enable_go_companion(target, error, error_size))) {
+                free(target);
+                goto done;
+            }
+        }
+#endif
         free(target);
     }
     if (ftell(package) != (long)central_offset) {
@@ -1736,13 +2008,19 @@ static int extract_source_zip(const char *package_path, char **project_root,
         }
         zsharp_settings_free(&settings);
     }
-    {
-        FILE *complete = fopen(marker, "wb");
+    if (!marker_valid || cache_changed) {
+        char *temporary = NULL;
+        FILE *complete = source_cache_temporary(marker, &temporary);
         int complete_ok = complete != NULL;
         if (complete_ok && fputs("verified\n", complete) < 0)
             complete_ok = 0;
         if (complete != NULL && fclose(complete) != 0)
             complete_ok = 0;
+        if (complete_ok)
+            complete_ok = source_cache_path(base, marker, 0, NULL, error, error_size) &&
+                          source_cache_replace(temporary, marker, error, error_size);
+        if (!complete_ok && temporary != NULL) remove(temporary);
+        free(temporary);
         if (!complete_ok) {
             package_error(error, error_size,
                           "could not finish installing the package cache");
@@ -1755,6 +2033,7 @@ static int extract_source_zip(const char *package_path, char **project_root,
     ok = 1;
 done:
     if (package != NULL) fclose(package);
+    free(base);
     free(marker);
     free(root);
     if (!ok) zsharp_package_info_free(info);

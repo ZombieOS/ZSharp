@@ -37,6 +37,109 @@ static void environment(const char *name, const char *value) {
 #endif
 }
 
+static int launch_environment_matches(const char *name, const char *expected) {
+#ifdef _WIN32
+    WCHAR wide_name[64], *wide_expected = NULL, *actual = NULL;
+    const WCHAR *crt_value;
+    DWORD count;
+    int expected_count = 0, matches = 0, ascii = 1;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1,
+                             wide_name, 64)) return 0;
+    crt_value = _wgetenv(wide_name);
+    SetLastError(ERROR_SUCCESS);
+    count = GetEnvironmentVariableW(wide_name, NULL, 0);
+    if (expected == NULL)
+        return crt_value == NULL && count == 0 &&
+               GetLastError() == ERROR_ENVVAR_NOT_FOUND && getenv(name) == NULL;
+    expected_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                        expected, -1, NULL, 0);
+    if (!expected_count || !count || crt_value == NULL) return 0;
+    wide_expected = (WCHAR *)malloc((size_t)expected_count * sizeof(WCHAR));
+    actual = (WCHAR *)malloc((size_t)count * sizeof(WCHAR));
+    if (wide_expected != NULL && actual != NULL &&
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, expected, -1,
+                            wide_expected, expected_count) &&
+        GetEnvironmentVariableW(wide_name, actual, count))
+        matches = !wcscmp(crt_value, wide_expected) && !wcscmp(actual, wide_expected);
+    for (const unsigned char *cursor = (const unsigned char *)expected;
+         *cursor; cursor++)
+        if (*cursor >= 128) ascii = 0;
+    if (ascii) matches = matches && getenv(name) != NULL && !strcmp(getenv(name), expected);
+    free(wide_expected);
+    free(actual);
+    return matches;
+#else
+    const char *actual = getenv(name);
+    return expected == NULL ? actual == NULL : actual != NULL && !strcmp(actual, expected);
+#endif
+}
+
+static int launch_metadata_tests(void) {
+    static const char *const names[] = {
+        "ZSHARP_DESKTOP_ID", "ZSHARP_PROJECT_ID", "ZSHARP_APP_NAME", "ZSHARP_APP_ICON"
+    };
+    const char *unicode_name = "Z# \xce\xa9 \xf0\x9f\x8c\x9f";
+#ifdef _WIN32
+    const char *unicode_icon = "C:/ZSharp/\xe6\x98\x9f icons/\xf0\x9f\x8c\x9f.png";
+#else
+    const char *unicode_icon = "/ZSharp/\xe6\x98\x9f icons/\xf0\x9f\x8c\x9f.png";
+#endif
+    char error[256] = "stale error";
+    char *expected_id;
+    for (size_t index = 0; index < sizeof(names) / sizeof(names[0]); index++) {
+        environment(names[index], "stale inherited metadata");
+        CHECK(launch_environment_matches(names[index], "stale inherited metadata"),
+              "seed process and CRT launch metadata");
+    }
+    CHECK(zsharp_app_export_launch_metadata("hello", "Hello App", unicode_icon,
+                                             error, sizeof(error)), "export app launch metadata");
+    CHECK(error[0] == '\0', "successful metadata export clears old errors");
+    CHECK(launch_environment_matches("ZSHARP_DESKTOP_ID", "zsharp-app-a430d84680aabd0b"),
+          "exported desktop ID matches the canonical launcher ID");
+    CHECK(launch_environment_matches("ZSHARP_PROJECT_ID", "hello") &&
+          launch_environment_matches("ZSHARP_APP_NAME", "Hello App") &&
+          launch_environment_matches("ZSHARP_APP_ICON", unicode_icon),
+          "new app replaces stale PID, name and Unicode icon in process environment");
+    CHECK(zsharp_app_export_launch_metadata("world", NULL, NULL, error, sizeof(error)),
+          "export next launch without optional name or icon");
+    expected_id = zsharp_app_desktop_id("world");
+    CHECK(expected_id != NULL && launch_environment_matches("ZSHARP_DESKTOP_ID", expected_id),
+          "next app replaces the inherited desktop ID");
+    free(expected_id);
+    CHECK(launch_environment_matches("ZSHARP_PROJECT_ID", "world") &&
+          launch_environment_matches("ZSHARP_APP_NAME", NULL) &&
+          launch_environment_matches("ZSHARP_APP_ICON", NULL),
+          "missing optional fields clear inherited name and icon");
+    CHECK(zsharp_app_export_launch_metadata("zsharp-hub", "Z# Hub", unicode_icon,
+                                             error, sizeof(error)), "export Hub launch context");
+    CHECK(launch_environment_matches("ZSHARP_DESKTOP_ID", "zsharp-hub") &&
+          launch_environment_matches("ZSHARP_PROJECT_ID", "zsharp-hub") &&
+          launch_environment_matches("ZSHARP_APP_NAME", "Z# Hub"),
+          "Hub replaces application context using its canonical desktop ID");
+    CHECK(zsharp_app_export_launch_metadata(unicode_name, unicode_name, unicode_icon,
+                                             error, sizeof(error)), "export UTF-8 launch metadata");
+    expected_id = zsharp_app_desktop_id(unicode_name);
+    CHECK(expected_id != NULL && launch_environment_matches("ZSHARP_DESKTOP_ID", expected_id) &&
+          launch_environment_matches("ZSHARP_PROJECT_ID", unicode_name) &&
+          launch_environment_matches("ZSHARP_APP_NAME", unicode_name) &&
+          launch_environment_matches("ZSHARP_APP_ICON", unicode_icon),
+          "Unicode PID, title and non-BMP icon path survive environment export");
+    free(expected_id);
+    CHECK(zsharp_app_export_launch_metadata(NULL, NULL, NULL, NULL, 0),
+          "anonymous launch can export without an error buffer");
+    CHECK(launch_environment_matches("ZSHARP_DESKTOP_ID", "zsharp-hub") &&
+          launch_environment_matches("ZSHARP_PROJECT_ID", NULL) &&
+          launch_environment_matches("ZSHARP_APP_NAME", NULL) &&
+          launch_environment_matches("ZSHARP_APP_ICON", NULL),
+          "anonymous launch clears optional metadata and retains canonical Hub fallback");
+    CHECK(zsharp_app_export_launch_metadata("", "", "", error, sizeof(error)) &&
+          launch_environment_matches("ZSHARP_PROJECT_ID", NULL) &&
+          launch_environment_matches("ZSHARP_APP_NAME", NULL) &&
+          launch_environment_matches("ZSHARP_APP_ICON", NULL),
+          "empty optional fields clear consistently across platforms");
+    return 0;
+}
+
 static int write_bytes(const char *path, const void *data, size_t size) {
     FILE *file = fopen(path, "wb");
     int written, closed;
@@ -81,6 +184,7 @@ int main(int argc, char **argv) {
     struct stat before, after;
 #endif
     if (argc != 3) { fputs("usage: app-icon-tests SCRATCH_DIRECTORY OFFICIAL_PNG\n", stderr); return 2; }
+    CHECK(launch_metadata_tests() == 0, "launch metadata regressions");
     CHECK(make_dir(argv[1]), "prepare scratch parent");
 #ifdef _WIN32
     CHECK(GetTempFileNameA(argv[1], "zsi", 0, root) != 0, "unique test directory name");
@@ -216,6 +320,6 @@ int main(int argc, char **argv) {
           !strcmp(first_id, second_id), "Hub has one stable desktop identity");
     free(first_id); free(second_id);
     free(official);
-    printf("App icon API: PNG validation, offline cache, precedence, overrides and desktop IDs passed (%s)\n", root);
+    printf("App icon API: PNG validation, offline cache, precedence, overrides, desktop IDs and launch metadata passed (%s)\n", root);
     return 0;
 }

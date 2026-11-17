@@ -334,3 +334,49 @@ char *zsharp_app_desktop_id(const char *project_id) {
     snprintf(name, sizeof(name), "zsharp-app-%016" PRIx64, hash);
     return copy_text(name);
 }
+
+static int export_launch_field(const char *name, const char *value) {
+    if (value != NULL && value[0] == '\0') value = NULL;
+#ifdef _WIN32
+    WCHAR *wide_name = wide_text(name);
+    WCHAR *wide_value = wide_text(value == NULL ? "" : value);
+    int status = wide_name == NULL || wide_value == NULL
+        ? ENOMEM : _wputenv_s(wide_name, wide_value);
+    free(wide_name);
+    free(wide_value);
+    return status;
+#else
+    if ((value == NULL ? unsetenv(name) : setenv(name, value, 1)) != 0)
+        return errno;
+    return 0;
+#endif
+}
+
+int zsharp_app_export_launch_metadata(const char *project_id,
+                                      const char *display_name,
+                                      const char *icon_path,
+                                      char *error, size_t error_size) {
+    static const char *const names[] = {
+        "ZSHARP_DESKTOP_ID", "ZSHARP_PROJECT_ID", "ZSHARP_APP_NAME", "ZSHARP_APP_ICON"
+    };
+    char *identity = zsharp_app_desktop_id(project_id);
+    const char *values[] = {identity, project_id, display_name, icon_path};
+    size_t index;
+    int ok = 1;
+    icon_error(error, error_size, "");
+    if (identity == NULL) {
+        icon_error(error, error_size, "could not allocate the Z# launch identity");
+        return 0;
+    }
+    for (index = 0; index < sizeof(names) / sizeof(names[0]); index++) {
+        int status = export_launch_field(names[index], values[index]);
+        if (status != 0) {
+            if (ok && error != NULL && error_size != 0)
+                snprintf(error, error_size, "could not export %s: %s",
+                         names[index], strerror(status));
+            ok = 0;
+        }
+    }
+    free(identity);
+    return ok;
+}

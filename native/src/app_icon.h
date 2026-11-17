@@ -16,6 +16,14 @@ char *zsharp_app_icon_for_window(const char *project_root,
                                 char *error, size_t error_size);
 /* Hub uses "zsharp-hub"; projects use a stable ASCII ID derived from their PID. */
 char *zsharp_app_desktop_id(const char *project_id);
+/* Export this launch's identity to child/hosted runtimes. The icon path must
+ * already be resolved by the caller; this function does no file/toolkit work.
+ * Optional NULL/empty values clear inherited metadata. Desktop ID is always
+ * the canonical ID above, including the Hub fallback for a missing PID. */
+int zsharp_app_export_launch_metadata(const char *project_id,
+                                      const char *display_name,
+                                      const char *icon_path,
+                                      char *error, size_t error_size);
 /* Basic PNG signature/IHDR validation, without image decoder dependencies. */
 int zsharp_app_icon_is_png(const char *path);
 

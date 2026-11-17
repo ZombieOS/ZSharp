@@ -18,7 +18,7 @@ import sys
 import tempfile
 
 __all__ = ["ZSharp", "ZSharpError", "call"]
-__version__ = "1.4.1.1"
+__version__ = "1.4.1.2"
 
 _LIMIT = 1024 * 1024
 _RESPONSE_LIMIT = _LIMIT + 8192  # bounded room for the CLI's result envelope

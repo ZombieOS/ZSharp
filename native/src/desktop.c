@@ -744,11 +744,11 @@ int zsharp_desktop_register_application(const char *display_name,
     }
     snprintf(contents, size,
         "[Desktop Entry]\nType=Application\nName=%s\nExec=%s %s%s%s\n"
-        "Terminal=false\nIcon=%s\nStartupWMClass=%s\nStartupNotify=true\nNoDisplay=%s\n"
+        "Terminal=false\nIcon=%s\nStartupWMClass=%s\nStartupNotify=true\nNoDisplay=false\n"
         "Categories=%s\n",
         escaped_name, quoted_executable, actions[entry_kind],
         quoted_entry == NULL ? "" : " ", quoted_entry == NULL ? "" : quoted_entry,
-        escaped_icon, identity, entry_kind == 3 ? "false" : "true",
+        escaped_icon, identity,
         entry_kind == 3 ? "Development;Utility;" : "Utility;");
     ok = write_file(path, contents, 1, error, error_size);
 done:
